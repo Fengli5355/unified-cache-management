@@ -1,14 +1,15 @@
-#include "asu_client/asu_client.h"
-
-#include <gtest/gtest.h>
-
 #include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "asu_client/asu_client.h"
 
 namespace UC::ASU {
 
@@ -18,13 +19,22 @@ struct TestState {
     bool firstQueryFailed{false};
     StatusCode firstQueryFailureCode{StatusCode::CONNECTION_ERROR};
     std::string firstQueryFailureMessage{"fake connection error"};
+    bool failFirstLoad{false};
+    bool firstLoadFailed{false};
+    bool failFirstStore{false};
+    bool firstStoreFailed{false};
+    bool failFirstDelete{false};
+    bool firstDeleteFailed{false};
+    std::unordered_map<AsuId, Status> queryFailures;
     std::unordered_map<AsuId, std::vector<Status>> checkEntryStatus;
     std::unordered_map<AsuId, Status> checkResultStatus;
+    std::unordered_map<AsuId, QueryResult> prefixQueryResults;
     std::vector<AsuId> registerCalls;
     std::vector<AsuId> bindCalls;
     std::vector<AsuId> unregisterCalls;
     std::vector<AsuId> queryCalls;
     std::unordered_map<AsuId, std::size_t> queryKeyCounts;
+    std::vector<AsuId> loadCalls;
     std::vector<AsuId> storeCalls;
     std::vector<AsuId> deleteCalls;
     std::vector<AsuId> checkCalls;
@@ -51,7 +61,8 @@ public:
 
     Status CheckHealth() override { return initialized_ ? Status::OK() : NotInitialized(); }
 
-    Status Query(const std::vector<CacheKey>& keys, const QueryOptions&, QueryResult& result) override
+    Status Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
+                 QueryResult& result) override
     {
         if (!initialized_) { return NotInitialized(); }
         if (state_->failFirstQuery && !state_->firstQueryFailed) {
@@ -61,11 +72,20 @@ public:
 
         state_->queryCalls.emplace_back(config_.asu_id);
         state_->queryKeyCounts[config_.asu_id] += keys.size();
+        auto failureIter = state_->queryFailures.find(config_.asu_id);
+        if (failureIter != state_->queryFailures.end()) { return failureIter->second; }
+
+        if (options.mode == QueryMode::PREFIX) {
+            auto iter = state_->prefixQueryResults.find(config_.asu_id);
+            if (iter != state_->prefixQueryResults.end()) {
+                result = iter->second;
+                return Status::OK();
+            }
+        }
+
         result.exists.clear();
         result.exists.reserve(keys.size());
-        for (const auto& key : keys) {
-            result.exists.emplace_back(key == "k15" || key == "k25");
-        }
+        for (const auto& key : keys) { result.exists.emplace_back(key == "k15" || key == "k25"); }
         result.prefix_hit_keys = 0;
         return Status::OK();
     }
@@ -78,6 +98,12 @@ public:
 
     Status LoadAsync(const std::vector<KVBuffer>&, TaskId& taskId) override
     {
+        if (state_->failFirstLoad && !state_->firstLoadFailed) {
+            state_->firstLoadFailed = true;
+            return Status::Error(StatusCode::CONNECTION_ERROR, "fake load connection error");
+        }
+
+        state_->loadCalls.emplace_back(config_.asu_id);
         taskId = 1000 + config_.asu_id;
         state_->childTaskIds[config_.asu_id] = taskId;
         return Status::OK();
@@ -85,6 +111,11 @@ public:
 
     Status StoreAsync(const std::vector<KVBuffer>&, TaskId& taskId) override
     {
+        if (state_->failFirstStore && !state_->firstStoreFailed) {
+            state_->firstStoreFailed = true;
+            return Status::Error(StatusCode::CONNECTION_ERROR, "fake store connection error");
+        }
+
         state_->storeCalls.emplace_back(config_.asu_id);
         taskId = 2000 + config_.asu_id;
         state_->childTaskIds[config_.asu_id] = taskId;
@@ -93,6 +124,11 @@ public:
 
     Status DeleteAsync(const std::vector<CacheKey>&, TaskId& taskId) override
     {
+        if (state_->failFirstDelete && !state_->firstDeleteFailed) {
+            state_->firstDeleteFailed = true;
+            return Status::Error(StatusCode::CONNECTION_ERROR, "fake delete connection error");
+        }
+
         state_->deleteCalls.emplace_back(config_.asu_id);
         taskId = 3000 + config_.asu_id;
         state_->childTaskIds[config_.asu_id] = taskId;
@@ -105,8 +141,8 @@ public:
     {
         state_->checkCalls.emplace_back(config_.asu_id);
         auto statusIter = state_->checkResultStatus.find(config_.asu_id);
-        result.status = statusIter == state_->checkResultStatus.end() ? Status::OK()
-                                                                      : statusIter->second;
+        result.status =
+            statusIter == state_->checkResultStatus.end() ? Status::OK() : statusIter->second;
         auto entryIter = state_->checkEntryStatus.find(config_.asu_id);
         result.entry_status = entryIter == state_->checkEntryStatus.end()
                                   ? std::vector<Status>{result.status}
@@ -168,8 +204,7 @@ public:
     explicit FakeViewServer(std::vector<std::vector<AsuId>> views) : views_(std::move(views)) {}
 
     FakeViewServer(std::vector<std::vector<AsuId>> views, std::vector<std::uint64_t> epochs)
-        : views_(std::move(views)),
-          epochs_(std::move(epochs))
+        : views_(std::move(views)), epochs_(std::move(epochs))
     {
     }
 
@@ -185,9 +220,7 @@ public:
         ++fetchCount_;
 
         view = GlobalView{};
-        for (auto asuId : views_[index]) {
-            view.asuMap.emplace(asuId, AsuInfo{asuId});
-        }
+        for (auto asuId : views_[index]) { view.asuMap.emplace(asuId, AsuInfo{asuId}); }
         view.viewEpoch = index < epochs_.size() ? epochs_[index] : fetchCount_;
         return Status::OK();
     }
@@ -216,10 +249,10 @@ AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
             {"vn-0#asu-10", 10},
             {"vn-0#asu-20", 20},
             {"vn-0#asu-30", 30},
-            {"k05", 5},
-            {"k15", 15},
-            {"k25", 25},
-            {"k35", 35},
+            {"k05",         5 },
+            {"k15",         15},
+            {"k25",         25},
+            {"k35",         35},
         };
         auto iter = values.find(key);
         if (iter != values.end()) { return iter->second; }
@@ -255,9 +288,7 @@ std::uint64_t Crc32IEEE(const std::string& data)
     }();
 
     std::uint32_t crc = 0xFFFFFFFFU;
-    for (unsigned char ch : data) {
-        crc = table[(crc ^ ch) & 0xFFU] ^ (crc >> 8U);
-    }
+    for (unsigned char ch : data) { crc = table[(crc ^ ch) & 0xFFU] ^ (crc >> 8U); }
     return crc ^ 0xFFFFFFFFU;
 }
 
@@ -279,10 +310,7 @@ std::uint64_t SplitMix64(std::uint64_t value)
     return value ^ (value >> 31U);
 }
 
-std::uint64_t StableHash(const std::string& value)
-{
-    return SplitMix64(Fnv1a64(value));
-}
+std::uint64_t StableHash(const std::string& value) { return SplitMix64(Fnv1a64(value)); }
 
 std::vector<AsuId> MakeAsuIds(std::size_t count)
 {
@@ -321,20 +349,195 @@ void ExpectBalancedDistribution(const std::unordered_map<AsuId, std::size_t>& ke
 {
     ASSERT_EQ(keyCounts.size(), asuIds.size());
 
-    const auto expectedCount = static_cast<double>(totalKeyCount) /
-                               static_cast<double>(asuIds.size());
+    const auto expectedCount =
+        static_cast<double>(totalKeyCount) / static_cast<double>(asuIds.size());
     for (auto asuId : asuIds) {
         auto iter = keyCounts.find(asuId);
         ASSERT_NE(iter, keyCounts.end());
         const auto diff = iter->second > expectedCount ? iter->second - expectedCount
                                                        : expectedCount - iter->second;
-        EXPECT_LE(diff / expectedCount, maxSkewRatio) << "asuId=" << asuId
-                                                      << " keyCount=" << iter->second
-                                                      << " expected=" << expectedCount;
+        EXPECT_LE(diff / expectedCount, maxSkewRatio)
+            << "asuId=" << asuId << " keyCount=" << iter->second << " expected=" << expectedCount;
     }
 }
 
-TEST(AsuClientImplTest, QueryPerKeyKeepsOriginalOrder)
+void ExpectSameAsuSet(std::vector<AsuId> actual, std::vector<AsuId> expected)
+{
+    std::sort(actual.begin(), actual.end());
+    std::sort(expected.begin(), expected.end());
+    EXPECT_EQ(actual, expected);
+}
+
+TEST(AsuClientImplTest, Lifecycle_OperationsBeforeInitReturnExpectedErrors)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+
+    QueryResult queryResult;
+    auto status = client->Query({"k05"}, QueryOptions{}, queryResult);
+    EXPECT_EQ(status.code, StatusCode::NOT_INITIALIZED);
+
+    TaskId taskId = kInvalidTaskId;
+    status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    EXPECT_EQ(status.code, StatusCode::NOT_INITIALIZED);
+
+    TaskResult taskResult;
+    status = client->Check(1, taskResult);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Lifecycle_InitTwiceReturnsResourceBusy)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    auto config = MakeConfig({10});
+    ASSERT_TRUE(client->Init(config).ok());
+
+    auto status = client->Init(config);
+
+    EXPECT_EQ(status.code, StatusCode::RESOURCE_BUSY);
+}
+
+TEST(AsuClientImplTest, Lifecycle_ShutdownClearsTasksAndRejectsFutureOperations)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_TRUE(client->Shutdown().ok());
+
+    QueryResult queryResult;
+    status = client->Query({"k05"}, QueryOptions{}, queryResult);
+    EXPECT_EQ(status.code, StatusCode::NOT_INITIALIZED);
+
+    TaskResult taskResult;
+    status = client->Check(taskId, taskResult);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Input_EmptyQueryReturnsEmptyResult)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    QueryResult result;
+    auto status = client->Query({}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_TRUE(result.exists.empty());
+    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{0});
+    EXPECT_TRUE(state->queryCalls.empty());
+}
+
+TEST(AsuClientImplTest, Input_EmptyStoreCreatesCompletableEmptyTask)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->StoreAsync({}, taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_TRUE(state->storeCalls.empty());
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_TRUE(result.entry_status.empty());
+}
+
+TEST(AsuClientImplTest, Input_EmptyDeleteCreatesCompletableEmptyTask)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->DeleteAsync({}, taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_TRUE(state->deleteCalls.empty());
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_TRUE(result.entry_status.empty());
+}
+
+TEST(AsuClientImplTest, Input_EmptyRegisterReturnsEmptyResults)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20})).ok());
+
+    std::vector<RegisterResult> results;
+    auto status = client->RegisterRegions({}, results);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(state->registerCalls, std::vector<AsuId>({10}));
+    EXPECT_EQ(state->bindCalls, std::vector<AsuId>({20}));
+}
+
+TEST(AsuClientImplTest, ViewServer_ConfigFileViewServerLoadsView)
+{
+    constexpr const char* kConfigPath = "asu_client_impl_view_test.conf";
+    {
+        std::ofstream configFile{kConfigPath};
+        ASSERT_TRUE(configFile.is_open());
+        configFile << "viewEpoch=9\n";
+        configFile << "viewId=7\n";
+        configFile << "asuIds=20\n";
+    }
+
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20, 30});
+    config.viewServiceAddrs = {kConfigPath};
+    auto client = CreateAsuClient(MakeFactory(state));
+    auto status = client->Init(config);
+    std::remove(kConfigPath);
+    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(state->createdTransports, std::uint32_t{1});
+
+    QueryResult result;
+    status = client->Query({"k25"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1}));
+    EXPECT_EQ(state->queryCalls, std::vector<AsuId>({20}));
+}
+
+TEST(AsuClientImplTest, ViewServer_InitFailsWhenViewReferencesMissingTransportConfig)
+{
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1});
+    auto client = CreateAsuClient(MakeFactory(state));
+
+    auto status = client->Init(config);
+
+    EXPECT_EQ(status.code, StatusCode::NOT_FOUND);
+    EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
+}
+
+TEST(AsuClientImplTest, Query_PerKeyKeepsOriginalOrder)
 {
     auto state = std::make_shared<TestState>();
     auto client = CreateAsuClient(MakeFactory(state));
@@ -347,12 +550,126 @@ TEST(AsuClientImplTest, QueryPerKeyKeepsOriginalOrder)
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1}));
 }
 
-TEST(AsuClientImplTest, RefreshesAndRetriesQueryOnce)
+TEST(AsuClientImplTest, Query_PrefixBroadcastsAndMergesResults)
+{
+    auto state = std::make_shared<TestState>();
+    state->prefixQueryResults[10] = QueryResult{
+        {1, 0, 0},
+        2
+    };
+    state->prefixQueryResults[20] = QueryResult{
+        {0, 1, 0},
+        3
+    };
+    state->prefixQueryResults[30] = QueryResult{
+        {0, 0, 1},
+        5
+    };
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+
+    QueryOptions options;
+    options.mode = QueryMode::PREFIX;
+    QueryResult result;
+    auto status = client->Query({"prefix-a", "prefix-b", "prefix-c"}, options, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 1, 1}));
+    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{10});
+    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+    EXPECT_EQ(state->queryKeyCounts[10], std::size_t{3});
+    EXPECT_EQ(state->queryKeyCounts[20], std::size_t{3});
+    EXPECT_EQ(state->queryKeyCounts[30], std::size_t{3});
+}
+
+TEST(AsuClientImplTest, Query_PrefixPartialFailureIncludesAsuContext)
+{
+    auto state = std::make_shared<TestState>();
+    state->prefixQueryResults[10] = QueryResult{
+        {1, 0, 0},
+        2
+    };
+    state->queryFailures[20] =
+        Status::Error(StatusCode::INVALID_ARGUMENT, "fake prefix query failure");
+    state->prefixQueryResults[30] = QueryResult{
+        {0, 0, 1},
+        5
+    };
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+
+    QueryOptions options;
+    options.mode = QueryMode::PREFIX;
+    QueryResult result;
+    auto status = client->Query({"prefix-a", "prefix-b", "prefix-c"}, options, result);
+
+    EXPECT_EQ(status.code, StatusCode::PARTIAL_FAILED);
+    EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 0, 1}));
+    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{7});
+    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+}
+
+TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesAndRetriesOnce)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(MakeConfig({10, 20})).ok());
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+
+    QueryResult result;
+    auto status = client->Query({"k05"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0}));
+
+    status = client->Query({"k15"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1}));
+}
+
+TEST(AsuClientImplTest, RefreshRetry_QueryDoesNotRefreshOrRetryNonRefreshableError)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstQuery = true;
+    state->firstQueryFailureCode = StatusCode::INVALID_ARGUMENT;
+    state->firstQueryFailureMessage = "fake invalid argument";
+    auto viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto config = MakeConfig({10, 20});
+    config.viewServer = viewServer;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k05"}, QueryOptions{}, result);
+
+    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(viewServer->FetchCount(), std::size_t{1});
+    EXPECT_EQ(state->createdTransports, std::uint32_t{1});
+}
+
+TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnIoError)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstQuery = true;
+    state->firstQueryFailureCode = StatusCode::IO_ERROR;
+    state->firstQueryFailureMessage = "fake io error";
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
@@ -362,33 +679,40 @@ TEST(AsuClientImplTest, RefreshesAndRetriesQueryOnce)
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
 }
 
-TEST(AsuClientImplTest, DoesNotRefreshOrRetryNonRefreshableQueryError)
+TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnTimeout)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
-    state->firstQueryFailureCode = StatusCode::IO_ERROR;
-    state->firstQueryFailureMessage = "fake io error";
-    auto viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10}, {10, 20}}, std::vector<std::uint64_t>{1, 2});
+    state->firstQueryFailureCode = StatusCode::TIMEOUT;
+    state->firstQueryFailureMessage = "fake timeout";
     auto config = MakeConfig({10, 20});
-    config.viewServer = viewServer;
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_EQ(status.code, StatusCode::IO_ERROR);
-    EXPECT_EQ(viewServer->FetchCount(), std::size_t{1});
-    EXPECT_EQ(state->createdTransports, std::uint32_t{1});
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0}));
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
 }
 
-TEST(AsuClientImplTest, ReturnsRefreshFailureWhenRetryCannotFetchView)
+TEST(AsuClientImplTest, RefreshRetry_QueryReturnsRefreshFailureWhenViewFetchFails)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
     auto viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10}, {10, 20}}, std::vector<std::uint64_t>{1, 2});
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
     viewServer->FailFetchAt(2);
     auto config = MakeConfig({10, 20});
     config.viewServer = viewServer;
@@ -404,12 +728,93 @@ TEST(AsuClientImplTest, ReturnsRefreshFailureWhenRetryCannotFetchView)
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
-TEST(AsuClientImplTest, DoesNotPublishSameOrOlderViewEpoch)
+TEST(AsuClientImplTest, RefreshRetry_LoadRefreshesAndRetriesOnce)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstLoad = true;
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->LoadAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+    EXPECT_EQ(state->loadCalls, std::vector<AsuId>({10}));
+}
+
+TEST(AsuClientImplTest, RefreshRetry_StoreRefreshesAndRetriesOnce)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstStore = true;
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+    EXPECT_EQ(state->storeCalls, std::vector<AsuId>({10}));
+}
+
+TEST(AsuClientImplTest, RefreshRetry_DeleteRefreshesAndRetriesOnce)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstDelete = true;
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->DeleteAsync({"k05"}, taskId);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+    EXPECT_EQ(state->deleteCalls, std::vector<AsuId>({10}));
+}
+
+TEST(AsuClientImplTest, ViewEpoch_DoesNotPublishSameOrOlderViewEpoch)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
     auto viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10}, {10, 20}, {10, 20}},
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20},
+            {10, 20}
+    },
         std::vector<std::uint64_t>{5, 5, 4});
     auto config = MakeConfig({10, 20});
     config.viewServer = viewServer;
@@ -428,7 +833,7 @@ TEST(AsuClientImplTest, DoesNotPublishSameOrOlderViewEpoch)
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
-TEST(AsuClientImplTest, RegisterRegionsRegistersFirstTransportAndBindsFollowers)
+TEST(AsuClientImplTest, MemoryRegister_RegisterRegionsRegistersFirstTransportAndBindsFollowers)
 {
     auto state = std::make_shared<TestState>();
     auto client = CreateAsuClient(MakeFactory(state));
@@ -445,7 +850,7 @@ TEST(AsuClientImplTest, RegisterRegionsRegistersFirstTransportAndBindsFollowers)
     EXPECT_EQ(results[1].handle, MRHandle{501});
 }
 
-TEST(AsuClientImplTest, RegisterRegionsBindFailureIncludesAsuContext)
+TEST(AsuClientImplTest, MemoryRegister_BindFailureIncludesAsuContext)
 {
     class FailingBindTransport final : public FakeTransport {
     public:
@@ -480,257 +885,16 @@ TEST(AsuClientImplTest, RegisterRegionsBindFailureIncludesAsuContext)
     EXPECT_NE(status.message.find("region_count=1"), std::string::npos);
 }
 
-TEST(AsuClientImplTest, RemovesTaskAfterCompletion)
-{
-    auto state = std::make_shared<TestState>();
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
-
-    TaskId taskId = 0;
-    auto status = client->StoreAsync({KVBuffer{"k05", {}}}, taskId);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    TaskResult result;
-    status = client->Check(taskId, result);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    status = client->Check(taskId, result);
-    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
-}
-
-TEST(AsuClientImplTest, KeepsInProgressTaskUntilCompletion)
-{
-    auto state = std::make_shared<TestState>();
-    state->checkResultStatus[10] = Status::Error(StatusCode::IN_PROGRESS, "fake in progress");
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
-
-    TaskId taskId = 0;
-    auto status = client->StoreAsync({KVBuffer{"k05", {}}}, taskId);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    TaskResult result;
-    status = client->Check(taskId, result);
-    EXPECT_EQ(status.code, StatusCode::IN_PROGRESS);
-
-    state->checkResultStatus.erase(10);
-    status = client->Check(taskId, result);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    status = client->Check(taskId, result);
-    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
-}
-
-TEST(AsuClientImplTest, WaitRemovesTaskAfterCompletion)
-{
-    auto state = std::make_shared<TestState>();
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
-
-    TaskId taskId = 0;
-    auto status = client->StoreAsync({KVBuffer{"k05", {}}}, taskId);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    TaskResult result;
-    status = client->Wait(taskId, 10, result);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    status = client->Wait(taskId, 10, result);
-    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
-}
-
-TEST(AsuClientImplTest, CheckKeepsEntryStatusInOriginalOrderAcrossAsus)
-{
-    auto state = std::make_shared<TestState>();
-    state->checkEntryStatus[10] = {Status::OK()};
-    state->checkEntryStatus[20] = {Status::Error(StatusCode::IO_ERROR, "entry on asu 20")};
-    state->checkEntryStatus[30] = {Status::Error(StatusCode::NOT_FOUND, "entry on asu 30")};
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
-
-    TaskId taskId = 0;
-    auto status = client->StoreAsync({KVBuffer{"k25", {}}, KVBuffer{"k05", {}},
-                                      KVBuffer{"k15", {}}},
-                                     taskId);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    TaskResult result;
-    status = client->Check(taskId, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
-    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
-    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
-    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
-}
-
-TEST(AsuClientImplTest, RefreshViewReusesExistingTransportAndBindsResourcesToAddedAsu)
+TEST(AsuClientImplTest, MemoryRegister_UnregisterRemovesCachedResourceBeforeFutureAsuIsAdded)
 {
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20});
     config.viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10}, {10, 20}});
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(config).ok());
-
-    std::vector<RegisterResult> results;
-    auto status = client->RegisterRegions({MemoryRegion{}}, results);
-    ASSERT_TRUE(status.ok()) << status.message;
-    state->failFirstQuery = true;
-
-    QueryResult result;
-    status = client->Query({"k05"}, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
-    EXPECT_EQ(state->bindCalls, std::vector<AsuId>({20}));
-}
-
-TEST(AsuClientImplTest, RemovedAsuStopsReceivingNewRequestsButExistingTaskCanComplete)
-{
-    auto state = std::make_shared<TestState>();
-    auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10, 20}, {10}}, std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(config).ok());
-
-    TaskId taskId = 0;
-    auto status = client->StoreAsync({KVBuffer{"k15", {}}}, taskId);
-    ASSERT_TRUE(status.ok()) << status.message;
-    ASSERT_EQ(state->storeCalls, std::vector<AsuId>({20}));
-
-    state->failFirstQuery = true;
-    QueryResult queryResult;
-    status = client->Query({"k05"}, QueryOptions{}, queryResult);
-    ASSERT_TRUE(status.ok()) << status.message;
-
-    TaskResult taskResult;
-    status = client->Check(taskId, taskResult);
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(state->checkCalls, std::vector<AsuId>({20}));
-
-    status = client->StoreAsync({KVBuffer{"k15", {}}}, taskId);
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(state->storeCalls, std::vector<AsuId>({20, 10}));
-}
-
-TEST(AsuClientImplTest, MaglevModeBuildsAndRoutes)
-{
-    auto state = std::make_shared<TestState>();
-    auto config = MakeConfig({10, 20, 30});
-    config.hashTable.type = HashTableType::MAGLEV;
-    config.hashTable.maglevTableSize = 7;
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(config).ok());
-
-    QueryResult result;
-    auto status = client->Query({"k05", "k15", "k25", "k35"}, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1, 0}));
-    EXPECT_FALSE(state->queryCalls.empty());
-}
-
-TEST(AsuClientImplTest, RingHashModeBuildsAndRoutes)
-{
-    auto state = std::make_shared<TestState>();
-    auto config = MakeConfig({10, 20, 30});
-    config.hashTable.type = HashTableType::RING_HASH;
-    config.hashTable.virtualNodeCount = 1;
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(config).ok());
-
-    QueryResult result;
-    auto status = client->Query({"k05", "k15", "k25", "k35"}, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1, 0}));
-    EXPECT_EQ(state->queryCalls, std::vector<AsuId>({10, 20, 30}));
-}
-
-TEST(AsuClientImplTest, Crc32IEEERingHashDistributionIsBalanced)
-{
-    constexpr std::size_t kAsuCount = 16;
-    constexpr std::size_t kKeyCount = 20000;
-    constexpr double kMaxSkewRatio = 0.3;
-
-    auto state = std::make_shared<TestState>();
-    auto asuIds = MakeAsuIds(kAsuCount);
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::RING_HASH)).ok());
-
-    QueryResult result;
-    auto keys = MakeKeys(kKeyCount);
-    auto status = client->Query(keys, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
-}
-
-TEST(AsuClientImplTest, Crc32IEEEMaglevDistributionIsBalanced)
-{
-    constexpr std::size_t kAsuCount = 16;
-    constexpr std::size_t kKeyCount = 20000;
-    constexpr double kMaxSkewRatio = 0.3;
-
-    auto state = std::make_shared<TestState>();
-    auto asuIds = MakeAsuIds(kAsuCount);
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::MAGLEV)).ok());
-
-    QueryResult result;
-    auto keys = MakeKeys(kKeyCount);
-    auto status = client->Query(keys, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
-}
-
-TEST(AsuClientImplTest, StableHashRingHashDistributionIsBalanced)
-{
-    constexpr std::size_t kAsuCount = 16;
-    constexpr std::size_t kKeyCount = 20000;
-    constexpr double kMaxSkewRatio = 0.3;
-
-    auto state = std::make_shared<TestState>();
-    auto asuIds = MakeAsuIds(kAsuCount);
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::RING_HASH, StableHash)).ok());
-
-    QueryResult result;
-    auto keys = MakeKeys(kKeyCount);
-    auto status = client->Query(keys, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
-}
-
-TEST(AsuClientImplTest, StableHashMaglevDistributionIsBalanced)
-{
-    constexpr std::size_t kAsuCount = 16;
-    constexpr std::size_t kKeyCount = 20000;
-    constexpr double kMaxSkewRatio = 0.3;
-
-    auto state = std::make_shared<TestState>();
-    auto asuIds = MakeAsuIds(kAsuCount);
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::MAGLEV, StableHash)).ok());
-
-    QueryResult result;
-    auto keys = MakeKeys(kKeyCount);
-    auto status = client->Query(keys, QueryOptions{}, result);
-
-    EXPECT_TRUE(status.ok()) << status.message;
-    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
-}
-
-TEST(AsuClientImplTest, UnregisterRemovesCachedResourceBeforeFutureAsuIsAdded)
-{
-    auto state = std::make_shared<TestState>();
-    auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{{10}, {10, 20}}, std::vector<std::uint64_t>{1, 2});
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(config).ok());
 
@@ -749,6 +913,336 @@ TEST(AsuClientImplTest, UnregisterRemovesCachedResourceBeforeFutureAsuIsAdded)
     EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
     EXPECT_TRUE(state->bindCalls.empty());
+}
+
+TEST(AsuClientImplTest, Task_CheckRemovesTaskAfterCompletion)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    status = client->Check(taskId, result);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Task_CheckKeepsInProgressTaskUntilCompletion)
+{
+    auto state = std::make_shared<TestState>();
+    state->checkResultStatus[10] = Status::Error(StatusCode::IN_PROGRESS, "fake in progress");
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+    EXPECT_EQ(status.code, StatusCode::IN_PROGRESS);
+
+    state->checkResultStatus.erase(10);
+    status = client->Check(taskId, result);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    status = client->Check(taskId, result);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Task_WaitRemovesTaskAfterCompletion)
+{
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Wait(taskId, 10, result);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    status = client->Wait(taskId, 10, result);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Task_CheckKeepsEntryStatusInOriginalOrderAcrossAsus)
+{
+    auto state = std::make_shared<TestState>();
+    state->checkEntryStatus[10] = {Status::OK()};
+    state->checkEntryStatus[20] = {Status::Error(StatusCode::IO_ERROR, "entry on asu 20")};
+    state->checkEntryStatus[30] = {Status::Error(StatusCode::NOT_FOUND, "entry on asu 30")};
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k25", {}},
+            KVBuffer{"k05", {}},
+            KVBuffer{"k15", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
+    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+}
+
+TEST(AsuClientImplTest, Task_LoadKeepsEntryStatusInOriginalOrderAcrossAsus)
+{
+    auto state = std::make_shared<TestState>();
+    state->checkEntryStatus[10] = {Status::OK()};
+    state->checkEntryStatus[20] = {Status::Error(StatusCode::IO_ERROR, "load entry on asu 20")};
+    state->checkEntryStatus[30] = {Status::Error(StatusCode::NOT_FOUND, "load entry on asu 30")};
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->LoadAsync(
+        {
+            KVBuffer{"k25", {}},
+            KVBuffer{"k05", {}},
+            KVBuffer{"k15", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
+    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+}
+
+TEST(AsuClientImplTest, Task_DeleteKeepsEntryStatusInOriginalOrderAcrossAsus)
+{
+    auto state = std::make_shared<TestState>();
+    state->checkEntryStatus[10] = {Status::OK()};
+    state->checkEntryStatus[20] = {Status::Error(StatusCode::IO_ERROR, "delete entry on asu 20")};
+    state->checkEntryStatus[30] = {Status::Error(StatusCode::NOT_FOUND, "delete entry on asu 30")};
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->DeleteAsync({"k25", "k05", "k15"}, taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
+    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+}
+
+TEST(AsuClientImplTest, SnapshotRefresh_ReusesExistingTransportAndBindsResourcesToAddedAsu)
+{
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(std::vector<std::vector<AsuId>>{
+        {10},
+        {10, 20}
+    });
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    std::vector<RegisterResult> results;
+    auto status = client->RegisterRegions({MemoryRegion{}}, results);
+    ASSERT_TRUE(status.ok()) << status.message;
+    state->failFirstQuery = true;
+
+    QueryResult result;
+    status = client->Query({"k05"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+    EXPECT_EQ(state->bindCalls, std::vector<AsuId>({20}));
+}
+
+TEST(AsuClientImplTest,
+     SnapshotRefresh_RemovedAsuStopsReceivingNewRequestsButExistingTaskCanComplete)
+{
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10, 20},
+            {10}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k15", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(state->storeCalls, std::vector<AsuId>({20}));
+
+    state->failFirstQuery = true;
+    QueryResult queryResult;
+    status = client->Query({"k05"}, QueryOptions{}, queryResult);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult taskResult;
+    status = client->Check(taskId, taskResult);
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(state->checkCalls, std::vector<AsuId>({20}));
+
+    status = client->StoreAsync(
+        {
+            KVBuffer{"k15", {}}
+    },
+        taskId);
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(state->storeCalls, std::vector<AsuId>({20, 10}));
+}
+
+TEST(AsuClientImplTest, Hash_RingHashModeBuildsAndRoutes)
+{
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20, 30});
+    config.hashTable.type = HashTableType::RING_HASH;
+    config.hashTable.virtualNodeCount = 1;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k05", "k15", "k25", "k35"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1, 0}));
+    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+}
+
+TEST(AsuClientImplTest, Hash_Crc32IEEERingHashDistributionIsBalanced)
+{
+    constexpr std::size_t kAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxSkewRatio = 0.3;
+
+    auto state = std::make_shared<TestState>();
+    auto asuIds = MakeAsuIds(kAsuCount);
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::RING_HASH)).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
+}
+
+TEST(AsuClientImplTest, Hash_StableHashRingHashDistributionIsBalanced)
+{
+    constexpr std::size_t kAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxSkewRatio = 0.3;
+
+    auto state = std::make_shared<TestState>();
+    auto asuIds = MakeAsuIds(kAsuCount);
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(
+        client->Init(MakeDistributionConfig(asuIds, HashTableType::RING_HASH, StableHash)).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
+}
+
+TEST(AsuClientImplTest, Hash_MaglevModeBuildsAndRoutes)
+{
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20, 30});
+    config.hashTable.type = HashTableType::MAGLEV;
+    config.hashTable.maglevTableSize = 7;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k05", "k15", "k25", "k35"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1, 0}));
+    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+}
+
+TEST(AsuClientImplTest, Hash_Crc32IEEEMaglevDistributionIsBalanced)
+{
+    constexpr std::size_t kAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxSkewRatio = 0.3;
+
+    auto state = std::make_shared<TestState>();
+    auto asuIds = MakeAsuIds(kAsuCount);
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeDistributionConfig(asuIds, HashTableType::MAGLEV)).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
+}
+
+TEST(AsuClientImplTest, Hash_StableHashMaglevDistributionIsBalanced)
+{
+    constexpr std::size_t kAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxSkewRatio = 0.3;
+
+    auto state = std::make_shared<TestState>();
+    auto asuIds = MakeAsuIds(kAsuCount);
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(
+        client->Init(MakeDistributionConfig(asuIds, HashTableType::MAGLEV, StableHash)).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
 }
 
 }  // namespace UC::ASU

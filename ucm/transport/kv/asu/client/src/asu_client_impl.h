@@ -143,8 +143,7 @@ private:
     Status SubmitEntriesOnce(const std::vector<KVBuffer>& entries, TaskId& taskId,
                              TransportOperation operation, bool& needRefresh);
     Status SubmitDelete(const std::vector<CacheKey>& keys, TaskId& taskId);
-    Status SubmitDeleteOnce(const std::vector<CacheKey>& keys, TaskId& taskId,
-                            bool& needRefresh);
+    Status SubmitDeleteOnce(const std::vector<CacheKey>& keys, TaskId& taskId, bool& needRefresh);
     std::shared_ptr<ViewSnapshot> GetSnapshot() const;
     TaskId SaveAggregateTask(AggregateTask task);
     void RemoveAggregateTask(TaskId taskId);

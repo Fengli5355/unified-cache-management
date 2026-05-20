@@ -21,18 +21,17 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
+#include "asu_client_impl.h"
 #include <algorithm>
-#include <chrono>
-#include <functional>
-#include <thread>
 #include <array>
+#include <chrono>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <sstream>
+#include <thread>
 #include <utility>
-#include "asu_client_impl.h"
 #include "asu_transport/types.h"
-
 
 namespace UC::ASU {
 
@@ -60,9 +59,7 @@ std::uint64_t Crc32IEEE(const std::string& data)
     }();
 
     std::uint32_t crc = 0xFFFFFFFFU;
-    for (unsigned char ch : data) {
-        crc = table[(crc ^ ch) & 0xFFU] ^ (crc >> 8U);
-    }
+    for (unsigned char ch : data) { crc = table[(crc ^ ch) & 0xFFU] ^ (crc >> 8U); }
     return crc ^ 0xFFFFFFFFU;
 }
 
@@ -75,9 +72,8 @@ std::string BuildVirtualNodeKey(AsuId asuId, std::uint64_t index, std::uint64_t 
 
 bool HasHash(const RingData& ringData, std::uint64_t hashValue)
 {
-    return std::any_of(ringData.begin(), ringData.end(), [hashValue](const RingNode& node) {
-        return node.first == hashValue;
-    });
+    return std::any_of(ringData.begin(), ringData.end(),
+                       [hashValue](const RingNode& node) { return node.first == hashValue; });
 }
 
 void InsertAsuVirtualNode(RingData& ringData, AsuId asuId, std::uint64_t index,
@@ -179,8 +175,7 @@ private:
 
 AsuClientImpl::Router::Router(const std::vector<AsuId>& asuIds, HashFunction hash,
                               HashTableConfig config)
-    : hash_(std::move(hash)),
-      hashTable_(config)
+    : hash_(std::move(hash)), hashTable_(config)
 {
     if (!hash_) { hash_ = Crc32IEEE; }
     if (hashTable_.type == HashTableType::MAGLEV) {
@@ -212,7 +207,9 @@ void AsuClientImpl::Router::BuildRing(const std::vector<AsuId>& asuIds)
 
 void AsuClientImpl::Router::BuildMaglev(const std::vector<AsuId>& asuIds)
 {
-    if (!IsPrime(hashTable_.maglevTableSize)) { hashTable_.maglevTableSize = kDefaultMaglevTableSize; }
+    if (!IsPrime(hashTable_.maglevTableSize)) {
+        hashTable_.maglevTableSize = kDefaultMaglevTableSize;
+    }
 
     std::vector<AsuId> activeAsuIds;
     for (auto asuId : asuIds) {
@@ -235,13 +232,14 @@ void AsuClientImpl::Router::BuildMaglev(const std::vector<AsuId>& asuIds)
     for (auto asuId : activeAsuIds) {
         auto value = std::to_string(asuId);
         offsets.emplace_back(hash_("maglev-offset#asu-" + value) % hashTable_.maglevTableSize);
-        skips.emplace_back(hash_("maglev-skip#asu-" + value) % (hashTable_.maglevTableSize - 1) + 1);
+        skips.emplace_back(hash_("maglev-skip#asu-" + value) % (hashTable_.maglevTableSize - 1) +
+                           1);
     }
 
     std::uint64_t filled = 0;
     while (filled < hashTable_.maglevTableSize) {
-        for (std::size_t index = 0; index < activeAsuIds.size() &&
-                                  filled < hashTable_.maglevTableSize; ++index) {
+        for (std::size_t index = 0;
+             index < activeAsuIds.size() && filled < hashTable_.maglevTableSize; ++index) {
             auto candidate =
                 (offsets[index] + next[index] * skips[index]) % hashTable_.maglevTableSize;
             ++next[index];
@@ -256,8 +254,8 @@ void AsuClientImpl::Router::BuildMaglev(const std::vector<AsuId>& asuIds)
     }
 }
 
-std::unordered_map<AsuId, std::vector<AsuClientImpl::EntryIndex>>
-AsuClientImpl::Router::RouteKeys(const std::vector<CacheKey>& keys) const
+std::unordered_map<AsuId, std::vector<AsuClientImpl::EntryIndex>> AsuClientImpl::Router::RouteKeys(
+    const std::vector<CacheKey>& keys) const
 {
     std::unordered_map<AsuId, std::vector<EntryIndex>> routes;
     for (EntryIndex index = 0; index < keys.size(); ++index) {
@@ -284,10 +282,9 @@ AsuId AsuClientImpl::Router::RouteKey(const CacheKey& key) const
     if (ring_.empty()) { return kInvalidAsuId; }
 
     const auto hashValue = hash_(key);
-    auto iter = std::lower_bound(ring_.begin(), ring_.end(), hashValue,
-                                 [](const RingNode& ringNode, std::uint64_t value) {
-                                     return ringNode.first < value;
-                                 });
+    auto iter = std::lower_bound(
+        ring_.begin(), ring_.end(), hashValue,
+        [](const RingNode& ringNode, std::uint64_t value) { return ringNode.first < value; });
     if (iter == ring_.end()) { iter = ring_.begin(); }
     return iter->second;
 }
@@ -391,9 +388,7 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
 
     std::lock_guard<std::mutex> lock{mutex_};
     if (initialized_) {
-        for (auto& item : nextSnapshot->transports) {
-            item.second->Shutdown();
-        }
+        for (auto& item : nextSnapshot->transports) { item.second->Shutdown(); }
         return Status::Error(StatusCode::RESOURCE_BUSY, "asu client has already been initialized");
     }
     snapshot_ = std::move(nextSnapshot);
@@ -505,9 +500,8 @@ Status AsuClientImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
 Status AsuClientImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                             QueryResult& result)
 {
-    return RunWithRefreshRetry("query", [&](bool& needRefresh) {
-        return QueryOnce(keys, options, result, needRefresh);
-    });
+    return RunWithRefreshRetry(
+        "query", [&](bool& needRefresh) { return QueryOnce(keys, options, result, needRefresh); });
 }
 
 Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
@@ -526,14 +520,13 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
             auto status = item.second->Query(keys, options, childResult);
             if (!status.ok()) {
                 MarkRefreshIfNeeded(status, needRefresh);
-                finalStatus = WithContext(
-                    PartialFailed("one or more asu prefix queries failed"),
-                    "asuId=" + std::to_string(item.first));
+                finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
+                                          "asuId=" + std::to_string(item.first));
                 continue;
             }
             result.prefix_hit_keys += childResult.prefix_hit_keys;
-            for (std::size_t index = 0; index < result.exists.size() &&
-                                        index < childResult.exists.size(); ++index) {
+            for (std::size_t index = 0;
+                 index < result.exists.size() && index < childResult.exists.size(); ++index) {
                 result.exists[index] = result.exists[index] || childResult.exists[index];
             }
         }
@@ -551,9 +544,7 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
 
         std::vector<CacheKey> childKeys;
         childKeys.reserve(route.second.size());
-        for (auto index : route.second) {
-            childKeys.emplace_back(keys[index]);
-        }
+        for (auto index : route.second) { childKeys.emplace_back(keys[index]); }
 
         QueryResult childResult;
         auto status = transportIter->second->Query(childKeys, options, childResult);
@@ -563,11 +554,11 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
                                            " key_count=" + std::to_string(childKeys.size()));
         }
         if (childResult.exists.size() != childKeys.size()) {
-            return Status::Error(StatusCode::INTERNAL_ERROR,
-                                 "query result size mismatch, asuId=" +
-                                     std::to_string(route.first) +
-                                     " expected=" + std::to_string(childKeys.size()) +
-                                     " actual=" + std::to_string(childResult.exists.size()));
+            return Status::Error(
+                StatusCode::INTERNAL_ERROR,
+                "query result size mismatch, asuId=" + std::to_string(route.first) +
+                    " expected=" + std::to_string(childKeys.size()) +
+                    " actual=" + std::to_string(childResult.exists.size()));
         }
 
         for (std::size_t index = 0; index < route.second.size(); ++index) {
@@ -612,7 +603,7 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
         auto refreshStatus = RefreshView();
         if (!refreshStatus.ok()) {
             return WithContext(refreshStatus, "failed to refresh view after checking taskId=" +
-                                                   std::to_string(taskId));
+                                                  std::to_string(taskId));
         }
     }
     return status;
@@ -636,7 +627,7 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
         auto refreshStatus = RefreshView();
         if (!refreshStatus.ok()) {
             return WithContext(refreshStatus, "failed to refresh view after waiting taskId=" +
-                                                   std::to_string(taskId));
+                                                  std::to_string(taskId));
         }
     }
     return status;
@@ -651,8 +642,7 @@ Status AsuClientImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
 }
 
 Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
-                                          std::vector<RegisterResult>& results,
-                                          bool& needRefresh)
+                                          std::vector<RegisterResult>& results, bool& needRefresh)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot) { return NotInitialized(); }
@@ -689,10 +679,9 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
         if (iter == snapshot->transports.end()) {
             auto status = Status::Error(StatusCode::NOT_FOUND, "bound asu transport not found");
             MarkRefreshIfNeeded(status, needRefresh);
-            finalStatus = WithContext(
-                PartialFailed("one or more asu region bindings failed"),
-                "asuIndex=" + std::to_string(asuIndex) +
-                    " asuId=" + std::to_string(snapshot->asuIds[asuIndex]));
+            finalStatus = WithContext(PartialFailed("one or more asu region bindings failed"),
+                                      "asuIndex=" + std::to_string(asuIndex) +
+                                          " asuId=" + std::to_string(snapshot->asuIds[asuIndex]));
             continue;
         }
 
@@ -700,11 +689,11 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
         status = iter->second->BindRegisteredRegions(registeredRegions, childResults);
         if (!status.ok() && finalStatus.ok()) {
             MarkRefreshIfNeeded(status, needRefresh);
-            finalStatus = WithContext(
-                PartialFailed("one or more asu region bindings failed"),
-                "asuIndex=" + std::to_string(asuIndex) +
-                    " asuId=" + std::to_string(snapshot->asuIds[asuIndex]) +
-                    " region_count=" + std::to_string(registeredRegions.size()));
+            finalStatus =
+                WithContext(PartialFailed("one or more asu region bindings failed"),
+                            "asuIndex=" + std::to_string(asuIndex) +
+                                " asuId=" + std::to_string(snapshot->asuIds[asuIndex]) +
+                                " region_count=" + std::to_string(registeredRegions.size()));
         }
     }
 
@@ -716,7 +705,6 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
     }
     return finalStatus;
 }
-
 
 Status AsuClientImpl::SubmitAsync(ClientOpType op_type, const std::vector<KVBuffer>& entries,
                                   TaskId& task_id)
@@ -855,8 +843,7 @@ Status AsuClientImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
     });
 }
 
-Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles,
-                                            bool& needRefresh)
+Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot) { return NotInitialized(); }
@@ -866,9 +853,9 @@ Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles
         auto status = item.second->UnregisterRegions(handles);
         if (!status.ok() && finalStatus.ok()) {
             MarkRefreshIfNeeded(status, needRefresh);
-            finalStatus = WithContext(status, "asuId=" + std::to_string(item.first) +
-                                                   " handle_count=" +
-                                                   std::to_string(handles.size()));
+            finalStatus =
+                WithContext(status, "asuId=" + std::to_string(item.first) +
+                                        " handle_count=" + std::to_string(handles.size()));
         }
     }
     if (finalStatus.ok()) {
@@ -934,9 +921,9 @@ Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalV
             status = BindRegisteredResources(asuId, transport);
             if (!status.ok()) {
                 transport->Shutdown();
-                return WithContext(status, "bind registered resources during view refresh, asuIndex=" +
-                                               std::to_string(asuIndex) +
-                                               " asuId=" + std::to_string(asuId));
+                return WithContext(
+                    status, "bind registered resources during view refresh, asuIndex=" +
+                                std::to_string(asuIndex) + " asuId=" + std::to_string(asuId));
             }
         }
 
@@ -1064,9 +1051,7 @@ Status AsuClientImpl::SubmitEntriesOnce(const std::vector<KVBuffer>& entries, Ta
 
         std::vector<KVBuffer> childEntries;
         childEntries.reserve(route.second.size());
-        for (auto index : route.second) {
-            childEntries.emplace_back(entries[index]);
-        }
+        for (auto index : route.second) { childEntries.emplace_back(entries[index]); }
 
         TaskId childTaskId = kInvalidTaskId;
         auto status = (transportIter->second.get()->*operation)(childEntries, childTaskId);
@@ -1112,9 +1097,7 @@ Status AsuClientImpl::SubmitDeleteOnce(const std::vector<CacheKey>& keys, TaskId
 
         std::vector<CacheKey> childKeys;
         childKeys.reserve(route.second.size());
-        for (auto index : route.second) {
-            childKeys.emplace_back(keys[index]);
-        }
+        for (auto index : route.second) { childKeys.emplace_back(keys[index]); }
 
         TaskId childTaskId = kInvalidTaskId;
         auto status = transportIter->second->DeleteAsync(childKeys, childTaskId);
@@ -1168,11 +1151,10 @@ Status AsuClientImpl::CollectTaskResult(const AggregateTask& task, bool wait,
             auto status = Status::Error(StatusCode::NOT_FOUND, "task transport not found");
             MarkRefreshIfNeeded(status, needRefresh);
             finalStatus = WithContext(PartialFailed("task transport not found"),
-                                       "asuId=" + std::to_string(childTask.asuId) +
-                                           " childTaskId=" +
-                                           std::to_string(childTask.taskId) +
-                                           " viewEpoch=" + std::to_string(task.viewEpoch) +
-                                           " viewId=" + std::to_string(task.viewId));
+                                      "asuId=" + std::to_string(childTask.asuId) +
+                                          " childTaskId=" + std::to_string(childTask.taskId) +
+                                          " viewEpoch=" + std::to_string(task.viewEpoch) +
+                                          " viewId=" + std::to_string(task.viewId));
             continue;
         }
 
@@ -1191,12 +1173,11 @@ Status AsuClientImpl::CollectTaskResult(const AggregateTask& task, bool wait,
                                     " viewEpoch=" + std::to_string(task.viewEpoch) +
                                     " viewId=" + std::to_string(task.viewId));
             } else if (finalStatus.ok() || finalStatus.code == StatusCode::IN_PROGRESS) {
-                finalStatus = WithContext(
-                    PartialFailed("one or more child tasks failed"),
-                    "asuId=" + std::to_string(childTask.asuId) +
-                        " childTaskId=" + std::to_string(childTask.taskId) +
-                        " viewEpoch=" + std::to_string(task.viewEpoch) +
-                        " viewId=" + std::to_string(task.viewId));
+                finalStatus = WithContext(PartialFailed("one or more child tasks failed"),
+                                          "asuId=" + std::to_string(childTask.asuId) +
+                                              " childTaskId=" + std::to_string(childTask.taskId) +
+                                              " viewEpoch=" + std::to_string(task.viewEpoch) +
+                                              " viewId=" + std::to_string(task.viewId));
             }
         }
 
@@ -1242,20 +1223,17 @@ GlobalView AsuClientImpl::MakeConfigGlobalView(const AsuClientConfig& config)
     return view;
 }
 
-bool AsuClientImpl::HasKnownViewEpoch(const GlobalView& view)
-{
-    return view.viewEpoch != 0;
-}
+bool AsuClientImpl::HasKnownViewEpoch(const GlobalView& view) { return view.viewEpoch != 0; }
 
 bool AsuClientImpl::ShouldRefreshView(const Status& status)
 {
     switch (status.code) {
         case StatusCode::CONNECTION_ERROR:
+        case StatusCode::IO_ERROR:
+        case StatusCode::TIMEOUT:
         case StatusCode::NOT_FOUND:
-        case StatusCode::BUFFER_NOT_REGISTERED:
-            return true;
-        default:
-            return false;
+        case StatusCode::BUFFER_NOT_REGISTERED: return true;
+        default: return false;
     }
 }
 
