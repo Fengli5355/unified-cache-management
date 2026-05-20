@@ -30,6 +30,14 @@
 #include "asu_transport/types.h"
 
 namespace UC::ASU {
+namespace {
+
+Status Unsupported(const std::string& message)
+{
+    return Status::Error(StatusCode::UNSUPPORTED, message);
+}
+
+}  // namespace
 
 AsuTransportImpl::~AsuTransportImpl() { Shutdown(); }
 
@@ -234,6 +242,80 @@ void AsuTransportImpl::BuildResult(const TransportTaskContext& ctx, TaskResult& 
     result.entry_status = ctx.entry_status;
     result.query_result.reset();
     if (ctx.op_type == TransportOpType::QUERY) { result.query_result = ctx.query_result; }
+}
+
+Status AsuTransportImpl::CheckHealth() { return Status::OK(); }
+
+Status AsuTransportImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions&,
+                               QueryResult& result)
+{
+    result.exists.assign(keys.size(), 0);
+    result.prefix_hit_keys = 0;
+    return Unsupported("asu transport query backend is not implemented");
+}
+
+Status AsuTransportImpl::QueryAsync(const std::vector<CacheKey>&, const QueryOptions&,
+                                    TaskId& taskId)
+{
+    taskId = kInvalidTaskId;
+    return Unsupported("asu transport async query backend is not implemented");
+}
+
+Status AsuTransportImpl::LoadAsync(const std::vector<KVBuffer>&, TaskId& taskId)
+{
+    taskId = kInvalidTaskId;
+    return Unsupported("asu transport load backend is not implemented");
+}
+
+Status AsuTransportImpl::StoreAsync(const std::vector<KVBuffer>&, TaskId& taskId)
+{
+    taskId = kInvalidTaskId;
+    return Unsupported("asu transport store backend is not implemented");
+}
+
+Status AsuTransportImpl::DeleteAsync(const std::vector<CacheKey>&, TaskId& taskId)
+{
+    taskId = kInvalidTaskId;
+    return Unsupported("asu transport delete backend is not implemented");
+}
+
+Status AsuTransportImpl::Cancel(TaskId)
+{
+    return Unsupported("asu transport cancel is not implemented");
+}
+
+Status AsuTransportImpl::Check(TaskId, TaskResult& result)
+{
+    result.status = Unsupported("asu transport task check is not implemented");
+    result.entry_status.clear();
+    result.query_result.reset();
+    return result.status;
+}
+
+Status AsuTransportImpl::Wait(TaskId taskId, std::uint64_t, TaskResult& result)
+{
+    return Check(taskId, result);
+}
+
+Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
+                                         std::vector<RegisterResult>& results)
+{
+    const auto status = Unsupported("asu transport memory registration is not implemented");
+    results.assign(regions.size(), RegisterResult{status, kInvalidMRHandle});
+    return status;
+}
+
+Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemory>& regions,
+                                               std::vector<RegisterResult>& results)
+{
+    const auto status = Unsupported("asu transport registered memory binding is not implemented");
+    results.assign(regions.size(), RegisterResult{status, kInvalidMRHandle});
+    return status;
+}
+
+Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>&)
+{
+    return Unsupported("asu transport memory unregistration is not implemented");
 }
 
 std::unique_ptr<AsuTransport> CreateAsuTransport() { return std::make_unique<AsuTransportImpl>(); }
