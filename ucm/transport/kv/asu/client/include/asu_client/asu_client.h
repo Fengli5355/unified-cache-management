@@ -22,87 +22,45 @@
  * SOFTWARE.
  * */
 #pragma once
-
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <unordered_map>
 #include <vector>
-#include "asu_transport/asu_transport.h"
+#include "asu_transport/types.h"
 
 namespace UC::ASU {
 
-struct AsuInfo {
-    AsuId asuId{0};
-};
-struct GlobalView {
-    std::uint64_t viewEpoch{0};
-    std::uint64_t viewId{0};
-    std::unordered_map<AsuId, AsuInfo> asuMap;
-    std::uint64_t createTimeMs{0};
-    std::uint64_t expireTimeMs{0};
-};
+struct AsuClientConfig;
 
-class ViewServer {
-public:
-    virtual ~ViewServer() = default;
-    virtual Status GetGlobalView(GlobalView& view) = 0;
-};
-
-using HashFunction = std::function<std::uint64_t(const CacheKey&)>;
-
-constexpr std::uint64_t kDefaultVirtualNodeCount = 128;
-constexpr std::uint64_t kDefaultMaglevTableSize = 65537;
-
-enum class HashTableType {
-    RING_HASH = 0,
-    MAGLEV = 1,
-};
-
-struct HashTableConfig {
-    HashTableType type{HashTableType::RING_HASH};
-    std::uint64_t virtualNodeCount{kDefaultVirtualNodeCount};
-    std::uint64_t maglevTableSize{kDefaultMaglevTableSize};
-};
-
-struct AsuClientConfig {
-    std::string clientId;
-    std::vector<std::string> viewServiceAddrs;
-    std::shared_ptr<ViewServer> viewServer;
-
-    std::vector<TransportConfig> transportConfigs;
-
-    HashFunction hash;
-    HashTableConfig hashTable;
-    std::uint64_t defaultWaitTimeoutMs{100};
-    std::unordered_map<std::string, std::string> attrs;
-};
-
+// AsuClient provides the public asynchronous KV client interface.
 class AsuClient {
 public:
+    // Destroys the client interface.
     virtual ~AsuClient() = default;
 
+    // Initializes the client from a concrete implementation config.
     virtual Status Init(const AsuClientConfig& config) = 0;
+    // Stops accepting new operations and releases client-side resources.
     virtual Status Shutdown() = 0;
 
+    // Queries key existence through the current routing view.
     virtual Status Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                          QueryResult& result) = 0;
 
+    // Submits asynchronous load operations.
     virtual Status LoadAsync(const std::vector<KVBuffer>& entries, TaskId& taskId) = 0;
+    // Submits asynchronous store operations.
     virtual Status StoreAsync(const std::vector<KVBuffer>& entries, TaskId& taskId) = 0;
+    // Submits asynchronous delete operations.
     virtual Status DeleteAsync(const std::vector<CacheKey>& keys, TaskId& taskId) = 0;
 
+    // Checks an asynchronous aggregate task without blocking.
     virtual Status Check(TaskId taskId, TaskResult& result) = 0;
+    // Waits for an asynchronous aggregate task up to the provided timeout.
     virtual Status Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& result) = 0;
 
+    // Registers memory regions across the current view.
     virtual Status RegisterRegions(const std::vector<MemoryRegion>& regions,
                                    std::vector<RegisterResult>& results) = 0;
+    // Unregisters memory regions across the current view.
     virtual Status UnregisterRegions(const std::vector<MRHandle>& handles) = 0;
 };
-
-using TransportFactory = std::function<std::unique_ptr<AsuTransport>()>;
-
-std::unique_ptr<AsuClient> CreateAsuClient(TransportFactory factory = CreateAsuTransport);
 
 }  // namespace UC::ASU

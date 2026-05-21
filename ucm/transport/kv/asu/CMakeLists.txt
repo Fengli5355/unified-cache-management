@@ -22,7 +22,7 @@ target_include_directories(asu_client
         ${CMAKE_CURRENT_SOURCE_DIR}/client/src
         ${UCM_ROOT_DIR}/ucm/shared/infra
 )
-target_link_libraries(asu_client PUBLIC asu_transport pthread)
+target_link_libraries(asu_client PUBLIC asu_transport kv_common pthread)
 
 if(BUILD_UNIT_TESTS)
     include(GoogleTest)

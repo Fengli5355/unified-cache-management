@@ -21,7 +21,6 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  * */
-#include "asu_client_impl.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -31,77 +30,17 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include "asu_client_impl.h"
 #include "asu_transport/types.h"
+#include "kv_common/router.h"
 
 namespace UC::ASU {
 
-using RingNode = std::pair<std::uint64_t, AsuId>;
-using RingData = std::vector<RingNode>;
-
-constexpr AsuId kInvalidAsuId = std::numeric_limits<AsuId>::max();
-
-std::uint64_t Crc32IEEE(const std::string& data)
-{
-    static const auto table = [] {
-        std::array<std::uint32_t, 256> values{};
-        for (std::uint32_t i = 0; i < 256; ++i) {
-            std::uint32_t crc = i;
-            for (int j = 0; j < 8; ++j) {
-                if ((crc & 1U) != 0) {
-                    crc = 0xEDB88320U ^ (crc >> 1U);
-                } else {
-                    crc >>= 1U;
-                }
-            }
-            values[i] = crc;
-        }
-        return values;
-    }();
-
-    std::uint32_t crc = 0xFFFFFFFFU;
-    for (unsigned char ch : data) { crc = table[(crc ^ ch) & 0xFFU] ^ (crc >> 8U); }
-    return crc ^ 0xFFFFFFFFU;
-}
-
-std::string BuildVirtualNodeKey(AsuId asuId, std::uint64_t index, std::uint64_t salt)
-{
-    auto key = "vn-" + std::to_string(index) + "#asu-" + std::to_string(asuId);
-    if (salt == 0) { return key; }
-    return key + "#" + std::to_string(salt);
-}
-
-bool HasHash(const RingData& ringData, std::uint64_t hashValue)
-{
-    return std::any_of(ringData.begin(), ringData.end(),
-                       [hashValue](const RingNode& node) { return node.first == hashValue; });
-}
-
-void InsertAsuVirtualNode(RingData& ringData, AsuId asuId, std::uint64_t index,
-                          const HashFunction& hash)
-{
-    std::uint64_t salt = 0;
-    auto hashValue = hash(BuildVirtualNodeKey(asuId, index, salt));
-    while (HasHash(ringData, hashValue)) {
-        ++salt;
-        hashValue = hash(BuildVirtualNodeKey(asuId, index, salt));
-    }
-    ringData.emplace_back(hashValue, asuId);
-}
+constexpr std::uint32_t kMaxShutdownDrainAttempts = 64;
 
 Status PartialFailed(const std::string& message)
 {
     return Status::Error(StatusCode::PARTIAL_FAILED, message);
-}
-
-bool IsPrime(std::uint64_t value)
-{
-    if (value < 2) { return false; }
-    if (value == 2) { return true; }
-    if (value % 2 == 0) { return false; }
-    for (std::uint64_t factor = 3; factor <= value / factor; factor += 2) {
-        if (value % factor == 0) { return false; }
-    }
-    return true;
 }
 
 std::string Trim(const std::string& value)
@@ -122,6 +61,24 @@ std::vector<std::string> Split(const std::string& value, char delimiter)
         if (!part.empty()) { parts.emplace_back(std::move(part)); }
     }
     return parts;
+}
+
+std::vector<UC::KV::CacheKey> ExtractEntryKeys(const std::vector<KVBuffer>& entries)
+{
+    std::vector<UC::KV::CacheKey> keys;
+    keys.reserve(entries.size());
+    for (const auto& entry : entries) { keys.emplace_back(entry.key); }
+    return keys;
+}
+
+std::vector<std::string> ExtractEndpointIps(const TransportConfig& config)
+{
+    std::vector<std::string> ips;
+    ips.reserve(config.endpoints.size());
+    for (const auto& endpoint : config.endpoints) {
+        if (!endpoint.ip.empty()) { ips.emplace_back(endpoint.ip); }
+    }
+    return ips;
 }
 
 class ConfigFileViewServer final : public ViewServer {
@@ -158,9 +115,7 @@ public:
             } else if (key == "asuIds" || key == "asu_ids") {
                 nextView.asuMap.clear();
                 for (const auto& asuId : Split(value, ',')) {
-                    AsuInfo asuInfo;
-                    asuInfo.asuId = std::stoull(asuId);
-                    nextView.asuMap.emplace(asuInfo.asuId, asuInfo);
+                    nextView.asuMap.emplace(std::stoull(asuId), AsuIps{});
                 }
             }
         }
@@ -173,122 +128,6 @@ private:
     std::string configPath_;
 };
 
-AsuClientImpl::Router::Router(const std::vector<AsuId>& asuIds, HashFunction hash,
-                              HashTableConfig config)
-    : hash_(std::move(hash)), hashTable_(config)
-{
-    if (!hash_) { hash_ = Crc32IEEE; }
-    if (hashTable_.type == HashTableType::MAGLEV) {
-        BuildMaglev(asuIds);
-    } else {
-        BuildRing(asuIds);
-    }
-}
-
-void AsuClientImpl::Router::BuildRing(const std::vector<AsuId>& asuIds)
-{
-    RingData ringData;
-    std::vector<AsuId> addedAsuIds;
-    for (auto asuId : asuIds) {
-        if (asuId == kInvalidAsuId ||
-            std::find(addedAsuIds.begin(), addedAsuIds.end(), asuId) != addedAsuIds.end()) {
-            continue;
-        }
-
-        addedAsuIds.emplace_back(asuId);
-        for (std::uint64_t index = 0; index < hashTable_.virtualNodeCount; ++index) {
-            InsertAsuVirtualNode(ringData, asuId, index, hash_);
-        }
-    }
-
-    std::sort(ringData.begin(), ringData.end());
-    ring_ = std::move(ringData);
-}
-
-void AsuClientImpl::Router::BuildMaglev(const std::vector<AsuId>& asuIds)
-{
-    if (!IsPrime(hashTable_.maglevTableSize)) {
-        hashTable_.maglevTableSize = kDefaultMaglevTableSize;
-    }
-
-    std::vector<AsuId> activeAsuIds;
-    for (auto asuId : asuIds) {
-        if (asuId == kInvalidAsuId ||
-            std::find(activeAsuIds.begin(), activeAsuIds.end(), asuId) != activeAsuIds.end()) {
-            continue;
-        }
-        activeAsuIds.emplace_back(asuId);
-    }
-    if (activeAsuIds.empty()) { return; }
-
-    lookupTable_.assign(hashTable_.maglevTableSize, kInvalidAsuId);
-    std::vector<std::uint64_t> offsets;
-    std::vector<std::uint64_t> skips;
-    std::vector<std::uint64_t> next;
-    offsets.reserve(activeAsuIds.size());
-    skips.reserve(activeAsuIds.size());
-    next.assign(activeAsuIds.size(), 0);
-
-    for (auto asuId : activeAsuIds) {
-        auto value = std::to_string(asuId);
-        offsets.emplace_back(hash_("maglev-offset#asu-" + value) % hashTable_.maglevTableSize);
-        skips.emplace_back(hash_("maglev-skip#asu-" + value) % (hashTable_.maglevTableSize - 1) +
-                           1);
-    }
-
-    std::uint64_t filled = 0;
-    while (filled < hashTable_.maglevTableSize) {
-        for (std::size_t index = 0;
-             index < activeAsuIds.size() && filled < hashTable_.maglevTableSize; ++index) {
-            auto candidate =
-                (offsets[index] + next[index] * skips[index]) % hashTable_.maglevTableSize;
-            ++next[index];
-            while (lookupTable_[candidate] != kInvalidAsuId) {
-                candidate =
-                    (offsets[index] + next[index] * skips[index]) % hashTable_.maglevTableSize;
-                ++next[index];
-            }
-            lookupTable_[candidate] = activeAsuIds[index];
-            ++filled;
-        }
-    }
-}
-
-std::unordered_map<AsuId, std::vector<AsuClientImpl::EntryIndex>> AsuClientImpl::Router::RouteKeys(
-    const std::vector<CacheKey>& keys) const
-{
-    std::unordered_map<AsuId, std::vector<EntryIndex>> routes;
-    for (EntryIndex index = 0; index < keys.size(); ++index) {
-        auto asuId = RouteKey(keys[index]);
-        if (asuId != kInvalidAsuId) { routes[asuId].emplace_back(index); }
-    }
-    return routes;
-}
-
-std::unordered_map<AsuId, std::vector<AsuClientImpl::EntryIndex>>
-AsuClientImpl::Router::RouteEntries(const std::vector<KVBuffer>& entries) const
-{
-    std::unordered_map<AsuId, std::vector<EntryIndex>> routes;
-    for (EntryIndex index = 0; index < entries.size(); ++index) {
-        auto asuId = RouteKey(entries[index].key);
-        if (asuId != kInvalidAsuId) { routes[asuId].emplace_back(index); }
-    }
-    return routes;
-}
-
-AsuId AsuClientImpl::Router::RouteKey(const CacheKey& key) const
-{
-    if (!lookupTable_.empty()) { return lookupTable_[hash_(key) % lookupTable_.size()]; }
-    if (ring_.empty()) { return kInvalidAsuId; }
-
-    const auto hashValue = hash_(key);
-    auto iter = std::lower_bound(
-        ring_.begin(), ring_.end(), hashValue,
-        [](const RingNode& ringNode, std::uint64_t value) { return ringNode.first < value; });
-    if (iter == ring_.end()) { iter = ring_.begin(); }
-    return iter->second;
-}
-
 AsuClientImpl::AsuClientImpl(TransportFactory factory) : transportFactory_(std::move(factory))
 {
     if (!transportFactory_) { transportFactory_ = CreateAsuTransport; }
@@ -296,12 +135,6 @@ AsuClientImpl::AsuClientImpl(TransportFactory factory) : transportFactory_(std::
 
 AsuClientImpl::~AsuClientImpl() { Shutdown(); }
 
-AsuId AsuClientImpl::Router::Pick(const CacheKey& key) const
-{
-    if (asu_ids.empty()) { return 0; }
-    const auto index = std::hash<CacheKey>{}(key) % asu_ids.size();
-    return asu_ids[index];
-}
 
 Status AsuClientImpl::Init(const AsuClientConfig& config)
 {
@@ -398,10 +231,18 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
 
 Status AsuClientImpl::Shutdown()
 {
+    JoinBackgroundRefresh();
+
     std::shared_ptr<ViewSnapshot> snapshot;
+    std::vector<std::shared_ptr<AsuTransport>> retiredTransports;
+    std::vector<AggregateTask> tasks;
+    std::uint64_t waitTimeoutMs = 0;
     {
         std::lock_guard<std::mutex> lock{mutex_};
         snapshot = std::move(snapshot_);
+        retiredTransports = std::move(retiredTransports_);
+        for (const auto& item : tasks_) { tasks.emplace_back(item.second); }
+        waitTimeoutMs = config_.defaultWaitTimeoutMs;
         tasks_.clear();
         config_ = AsuClientConfig{};
         viewServer_.reset();
@@ -411,27 +252,18 @@ Status AsuClientImpl::Shutdown()
     }
 
     Status finalStatus = Status::OK();
+    auto drainStatus = DrainTasksBeforeShutdown(tasks, waitTimeoutMs);
+    if (!drainStatus.ok()) { finalStatus = drainStatus; }
     if (snapshot) {
-        for (auto& item : snapshot->transports) {
-            auto status = item.second->Shutdown();
-            if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
-        }
+        auto shutdownStatus = ShutdownSnapshotTransports(snapshot);
+        if (!shutdownStatus.ok() && finalStatus.ok()) { finalStatus = shutdownStatus; }
+    }
+    for (auto& transport : retiredTransports) {
+        if (transport == nullptr) { continue; }
+        auto status = transport->Shutdown();
+        if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
     }
     return finalStatus;
-}
-
-Status AsuClientImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                            QueryResult& result)
-{
-    auto view = view_;
-    if (!view || !view->router || view->transports.empty()) {
-        return Status::Error(StatusCode::NOT_INITIALIZED, "client has no ASU transports");
-    }
-
-    result.exists.assign(keys.size(), 0);
-    result.prefix_hit_keys = 0;
-
-    return Status::OK();
 }
 
 Status AsuClientImpl::LoadAsync(const std::vector<KVBuffer>& entries, TaskId& task_id)
@@ -500,8 +332,10 @@ Status AsuClientImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
 Status AsuClientImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                             QueryResult& result)
 {
-    return RunWithRefreshRetry(
-        "query", [&](bool& needRefresh) { return QueryOnce(keys, options, result, needRefresh); });
+    bool needRefresh = false;
+    auto status = QueryOnce(keys, options, result, needRefresh);
+    if (needRefresh) { RequestBackgroundRefresh(); }
+    return status;
 }
 
 Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
@@ -599,13 +433,7 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
     bool needRefresh = false;
     auto status = CollectTaskResult(task, false, 0, result, needRefresh);
     if (IsTaskComplete(result)) { RemoveAggregateTask(taskId); }
-    if (needRefresh) {
-        auto refreshStatus = RefreshView();
-        if (!refreshStatus.ok()) {
-            return WithContext(refreshStatus, "failed to refresh view after checking taskId=" +
-                                                  std::to_string(taskId));
-        }
-    }
+    if (needRefresh) { RequestBackgroundRefresh(); }
     return status;
 }
 
@@ -623,22 +451,17 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
     bool needRefresh = false;
     auto status = CollectTaskResult(task, true, timeoutMs, result, needRefresh);
     if (IsTaskComplete(result)) { RemoveAggregateTask(taskId); }
-    if (needRefresh) {
-        auto refreshStatus = RefreshView();
-        if (!refreshStatus.ok()) {
-            return WithContext(refreshStatus, "failed to refresh view after waiting taskId=" +
-                                                  std::to_string(taskId));
-        }
-    }
+    if (needRefresh) { RequestBackgroundRefresh(); }
     return status;
 }
 
 Status AsuClientImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
                                       std::vector<RegisterResult>& results)
 {
-    return RunWithRefreshRetry("register regions", [&](bool& needRefresh) {
-        return RegisterRegionsOnce(regions, results, needRefresh);
-    });
+    bool needRefresh = false;
+    auto status = RegisterRegionsOnce(regions, results, needRefresh);
+    if (needRefresh) { RequestBackgroundRefresh(); }
+    return status;
 }
 
 Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
@@ -723,7 +546,7 @@ Status AsuClientImpl::SubmitAsync(ClientOpType op_type, const std::vector<KVBuff
     std::unordered_map<AsuId, std::size_t> group_index;
     for (std::size_t i = 0; i < count; ++i) {
         const auto& key = entries[i].key;
-        const auto asu_id = view->router->Pick(key);
+        const auto asu_id = view->router->Pick(key); // Pick 即 Routekey 语义
         auto iter = group_index.find(asu_id);
         if (iter == group_index.end()) {
             iter = group_index.emplace(asu_id, ctx->sub_tasks.size()).first;
@@ -838,9 +661,10 @@ Status AsuClientImpl::BuildResult(const ClientTaskContextPtr& ctx, TaskResult& r
 }
 Status AsuClientImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
 {
-    return RunWithRefreshRetry("unregister regions", [&](bool& needRefresh) {
-        return UnregisterRegionsOnce(handles, needRefresh);
-    });
+    bool needRefresh = false;
+    auto status = UnregisterRegionsOnce(handles, needRefresh);
+    if (needRefresh) { RequestBackgroundRefresh(); }
+    return status;
 }
 
 Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh)
@@ -930,7 +754,8 @@ Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalV
         nextSnapshot->transports.emplace(asuId, std::move(transport));
     }
 
-    nextSnapshot->router = std::make_shared<Router>(asuIds, config.hash, config.hashTable);
+    std::vector<UC::KV::NodeId> nodeIds(asuIds.begin(), asuIds.end());
+    nextSnapshot->router = UC::KV::CreateRouter(nodeIds, config.hash, config.hashTable);
     nextSnapshot->asuIds = std::move(asuIds);
     snapshot = std::move(nextSnapshot);
     return Status::OK();
@@ -938,10 +763,15 @@ Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalV
 
 Status AsuClientImpl::BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>& transport)
 {
-    auto configIter = transportConfigs_.find(asuId);
-    if (configIter == transportConfigs_.end()) {
-        return Status::Error(StatusCode::NOT_FOUND,
-                             "transport config not found, asuId=" + std::to_string(asuId));
+    TransportConfig config;
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        auto configIter = transportConfigs_.find(asuId);
+        if (configIter == transportConfigs_.end()) {
+            return Status::Error(StatusCode::NOT_FOUND,
+                                 "transport config not found, asuId=" + std::to_string(asuId));
+        }
+        config = configIter->second;
     }
 
     auto nextTransport = transportFactory_();
@@ -950,7 +780,7 @@ Status AsuClientImpl::BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>&
                              "transport factory returned null, asuId=" + std::to_string(asuId));
     }
 
-    auto status = nextTransport->Init(configIter->second);
+    auto status = nextTransport->Init(config);
     if (!status.ok()) {
         return WithContext(status, "init transport failed, asuId=" + std::to_string(asuId));
     }
@@ -1015,18 +845,85 @@ Status AsuClientImpl::RefreshView()
         std::lock_guard<std::mutex> lock{mutex_};
         if (!initialized_) { return NotInitialized(); }
         if (IsStaleViewLocked(view)) { return Status::OK(); }
+        if (oldSnapshot != nullptr) {
+            for (const auto& item : oldSnapshot->transports) {
+                if (nextSnapshot->transports.find(item.first) == nextSnapshot->transports.end()) {
+                    retiredTransports_.emplace_back(item.second);
+                }
+            }
+        }
         snapshot_ = std::move(nextSnapshot);
     }
 
     return Status::OK();
 }
 
+void AsuClientImpl::RequestBackgroundRefresh()
+{
+    bool shouldStart = false;
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        if (!initialized_ || refreshInProgress_) { return; }
+        refreshInProgress_ = true;
+        shouldStart = true;
+    }
+
+    if (!shouldStart) { return; }
+    if (refreshThread_.joinable()) { refreshThread_.join(); }
+
+    refreshThread_ = std::thread([this] {
+        (void)RefreshView();
+        std::lock_guard<std::mutex> lock{mutex_};
+        refreshInProgress_ = false;
+    });
+}
+
+void AsuClientImpl::JoinBackgroundRefresh()
+{
+    if (refreshThread_.joinable()) { refreshThread_.join(); }
+}
+
+Status AsuClientImpl::ShutdownSnapshotTransports(const std::shared_ptr<ViewSnapshot>& snapshot)
+{
+    if (!snapshot) { return Status::OK(); }
+    Status finalStatus = Status::OK();
+    for (auto& item : snapshot->transports) {
+        auto status = item.second->Shutdown();
+        if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
+    }
+    return finalStatus;
+}
+
+Status AsuClientImpl::DrainTasksBeforeShutdown(const std::vector<AggregateTask>& tasks,
+                                               std::uint64_t waitTimeoutMs)
+{
+    Status finalStatus = Status::OK();
+    for (const auto& task : tasks) {
+        TaskResult result;
+        for (std::uint32_t attempt = 0; attempt < kMaxShutdownDrainAttempts; ++attempt) {
+            bool needRefresh = false;
+            auto status = CollectTaskResult(task, true, waitTimeoutMs, result, needRefresh);
+            if (!status.ok() && status.code != StatusCode::IN_PROGRESS &&
+                status.code != StatusCode::TIMEOUT && finalStatus.ok()) {
+                finalStatus = status;
+            }
+            if (IsTaskComplete(result)) { break; }
+            if (attempt + 1 == kMaxShutdownDrainAttempts && finalStatus.ok()) {
+                finalStatus =
+                    Status::Error(StatusCode::TIMEOUT, "timed out draining transport tasks");
+            }
+        }
+    }
+    return finalStatus;
+}
+
 Status AsuClientImpl::SubmitEntries(const std::vector<KVBuffer>& entries, TaskId& taskId,
                                     TransportOperation operation)
 {
-    return RunWithRefreshRetry("submit entries", [&](bool& needRefresh) {
-        return SubmitEntriesOnce(entries, taskId, operation, needRefresh);
-    });
+    bool needRefresh = false;
+    auto status = SubmitEntriesOnce(entries, taskId, operation, needRefresh);
+    if (needRefresh) { RequestBackgroundRefresh(); }
+    return status;
 }
 
 Status AsuClientImpl::SubmitEntriesOnce(const std::vector<KVBuffer>& entries, TaskId& taskId,
@@ -1040,7 +937,7 @@ Status AsuClientImpl::SubmitEntriesOnce(const std::vector<KVBuffer>& entries, Ta
     task.entryCount = entries.size();
     task.viewEpoch = snapshot->view.viewEpoch;
     task.viewId = snapshot->view.viewId;
-    auto routes = snapshot->router->RouteEntries(entries);
+    auto routes = snapshot->router->RouteKeys(ExtractEntryKeys(entries));
     for (const auto& route : routes) {
         auto transportIter = snapshot->transports.find(route.first);
         if (transportIter == snapshot->transports.end()) {
@@ -1070,9 +967,10 @@ Status AsuClientImpl::SubmitEntriesOnce(const std::vector<KVBuffer>& entries, Ta
 
 Status AsuClientImpl::SubmitDelete(const std::vector<CacheKey>& keys, TaskId& taskId)
 {
-    return RunWithRefreshRetry("submit delete", [&](bool& needRefresh) {
-        return SubmitDeleteOnce(keys, taskId, needRefresh);
-    });
+    bool needRefresh = false;
+    auto status = SubmitDeleteOnce(keys, taskId, needRefresh);
+    if (needRefresh) { RequestBackgroundRefresh(); }
+    return status;
 }
 
 Status AsuClientImpl::SubmitDeleteOnce(const std::vector<CacheKey>& keys, TaskId& taskId,
@@ -1206,7 +1104,9 @@ std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
     std::vector<AsuId> asuIds;
     asuIds.reserve(view.asuMap.size());
     for (const auto& item : view.asuMap) {
-        if (item.first != kInvalidAsuId) { asuIds.emplace_back(item.first); }
+        if (item.first != static_cast<AsuId>(UC::KV::kInvalidNodeId)) {
+            asuIds.emplace_back(item.first);
+        }
     }
     std::sort(asuIds.begin(), asuIds.end());
     return asuIds;
@@ -1216,9 +1116,7 @@ GlobalView AsuClientImpl::MakeConfigGlobalView(const AsuClientConfig& config)
 {
     GlobalView view;
     for (const auto& transportConfig : config.transportConfigs) {
-        AsuInfo asuInfo;
-        asuInfo.asuId = transportConfig.asu_id;
-        view.asuMap.emplace(transportConfig.asu_id, asuInfo);
+        view.asuMap.emplace(transportConfig.asu_id, ExtractEndpointIps(transportConfig));
     }
     return view;
 }
