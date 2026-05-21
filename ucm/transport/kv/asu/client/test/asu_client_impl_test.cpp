@@ -1,15 +1,19 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "asu_client/asu_client.h"
+#include "asu_client_impl.h"
 
 namespace UC::ASU {
 
@@ -34,6 +38,7 @@ struct TestState {
     std::vector<AsuId> unregisterCalls;
     std::vector<AsuId> queryCalls;
     std::unordered_map<AsuId, std::size_t> queryKeyCounts;
+    std::unordered_map<AsuId, std::vector<CacheKey>> queryKeys;
     std::vector<AsuId> loadCalls;
     std::vector<AsuId> storeCalls;
     std::vector<AsuId> deleteCalls;
@@ -72,6 +77,8 @@ public:
 
         state_->queryCalls.emplace_back(config_.asu_id);
         state_->queryKeyCounts[config_.asu_id] += keys.size();
+        auto& routedKeys = state_->queryKeys[config_.asu_id];
+        routedKeys.insert(routedKeys.end(), keys.begin(), keys.end());
         auto failureIter = state_->queryFailures.find(config_.asu_id);
         if (failureIter != state_->queryFailures.end()) { return failureIter->second; }
 
@@ -210,6 +217,7 @@ public:
 
     Status GetGlobalView(GlobalView& view) override
     {
+        std::lock_guard<std::mutex> lock{mutex_};
         if (failFetchAt_ != 0 && fetchCount_ + 1 == failFetchAt_) {
             ++fetchCount_;
             return Status::Error(StatusCode::IO_ERROR, "fake view fetch failed");
@@ -220,20 +228,39 @@ public:
         ++fetchCount_;
 
         view = GlobalView{};
-        for (auto asuId : views_[index]) { view.asuMap.emplace(asuId, AsuInfo{asuId}); }
+        for (auto asuId : views_[index]) { view.asuMap.emplace(asuId, AsuIps{}); }
         view.viewEpoch = index < epochs_.size() ? epochs_[index] : fetchCount_;
         return Status::OK();
     }
 
-    void FailFetchAt(std::size_t fetchCount) { failFetchAt_ = fetchCount; }
-    std::size_t FetchCount() const { return fetchCount_; }
+    void FailFetchAt(std::size_t fetchCount)
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        failFetchAt_ = fetchCount;
+    }
+    std::size_t FetchCount() const
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        return fetchCount_;
+    }
 
 private:
+    mutable std::mutex mutex_;
     std::size_t fetchCount_{0};
     std::size_t failFetchAt_{0};
     std::vector<std::vector<AsuId>> views_;
     std::vector<std::uint64_t> epochs_;
 };
+
+bool WaitForFetchCount(const std::shared_ptr<FakeViewServer>& viewServer,
+                       std::size_t expectedFetchCount)
+{
+    for (std::uint32_t attempt = 0; attempt < 100; ++attempt) {
+        if (viewServer->FetchCount() >= expectedFetchCount) { return true; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
 
 AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
 {
@@ -246,13 +273,13 @@ AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
     config.hashTable.virtualNodeCount = 1;
     config.hash = [](const std::string& key) -> std::uint64_t {
         static const std::unordered_map<std::string, std::uint64_t> values{
-            {"vn-0#asu-10", 10},
-            {"vn-0#asu-20", 20},
-            {"vn-0#asu-30", 30},
-            {"k05",         5 },
-            {"k15",         15},
-            {"k25",         25},
-            {"k35",         35},
+            {"vn-0#node-10", 10},
+            {"vn-0#node-20", 20},
+            {"vn-0#node-30", 30},
+            {"k05",          5 },
+            {"k15",          15},
+            {"k25",          25},
+            {"k35",          35},
         };
         auto iter = values.find(key);
         if (iter != values.end()) { return iter->second; }
@@ -341,6 +368,43 @@ AsuClientConfig MakeDistributionConfig(const std::vector<AsuId>& asuIds, HashTab
     config.hashTable.virtualNodeCount = 256;
     config.hashTable.maglevTableSize = 65537;
     return config;
+}
+
+std::unordered_map<CacheKey, AsuId> CaptureKeyRoutes(const std::vector<AsuId>& asuIds,
+                                                     HashTableType type, HashFunction hashFunc,
+                                                     const std::vector<CacheKey>& keys)
+{
+    std::unordered_map<CacheKey, AsuId> routes;
+    auto config = MakeDistributionConfig(asuIds, type, std::move(hashFunc));
+    config.hashTable.virtualNodeCount = 512;
+    config.hashTable.maglevTableSize = 65537;
+
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient(MakeFactory(state));
+    EXPECT_TRUE(client->Init(config).ok());
+    QueryResult result;
+    auto status = client->Query(keys, QueryOptions{}, result);
+    EXPECT_TRUE(status.ok()) << status.message;
+
+    for (const auto& item : state->queryKeys) {
+        for (const auto& key : item.second) { routes.emplace(key, item.first); }
+    }
+    return routes;
+}
+
+double CalculateMigrationRatio(const std::unordered_map<CacheKey, AsuId>& oldRoutes,
+                               const std::unordered_map<CacheKey, AsuId>& newRoutes)
+{
+    std::size_t movedCount = 0;
+    std::size_t comparedCount = 0;
+    for (const auto& item : oldRoutes) {
+        auto iter = newRoutes.find(item.first);
+        if (iter == newRoutes.end()) { continue; }
+        ++comparedCount;
+        if (iter->second != item.second) { ++movedCount; }
+    }
+    if (comparedCount == 0) { return 0.0; }
+    return static_cast<double>(movedCount) / static_cast<double>(comparedCount);
 }
 
 void ExpectBalancedDistribution(const std::unordered_map<AsuId, std::size_t>& keyCounts,
@@ -610,7 +674,7 @@ TEST(AsuClientImplTest, Query_PrefixPartialFailureIncludesAsuContext)
     ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
 }
 
-TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesAndRetriesOnce)
+TEST(AsuClientImplTest, BackgroundRefresh_QueryReturnsErrorWithoutRetry)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
@@ -621,8 +685,7 @@ TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesAndRetriesOnce)
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0}));
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
 
     status = client->Query({"k15"}, QueryOptions{}, result);
 
@@ -630,7 +693,7 @@ TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesAndRetriesOnce)
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1}));
 }
 
-TEST(AsuClientImplTest, RefreshRetry_QueryDoesNotRefreshOrRetryNonRefreshableError)
+TEST(AsuClientImplTest, BackgroundRefresh_QueryDoesNotRefreshNonRefreshableError)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
@@ -655,7 +718,7 @@ TEST(AsuClientImplTest, RefreshRetry_QueryDoesNotRefreshOrRetryNonRefreshableErr
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
-TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnIoError)
+TEST(AsuClientImplTest, BackgroundRefresh_QueryRefreshesOnIoError)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
@@ -674,12 +737,12 @@ TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnIoError)
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0}));
+    EXPECT_EQ(status.code, StatusCode::IO_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
 }
 
-TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnTimeout)
+TEST(AsuClientImplTest, BackgroundRefresh_QueryRefreshesOnTimeout)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
@@ -698,12 +761,12 @@ TEST(AsuClientImplTest, RefreshRetry_QueryRefreshesOnTimeout)
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0}));
+    EXPECT_EQ(status.code, StatusCode::TIMEOUT);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
 }
 
-TEST(AsuClientImplTest, RefreshRetry_QueryReturnsRefreshFailureWhenViewFetchFails)
+TEST(AsuClientImplTest, BackgroundRefresh_QueryKeepsOriginalErrorWhenViewFetchFails)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
@@ -722,13 +785,12 @@ TEST(AsuClientImplTest, RefreshRetry_QueryReturnsRefreshFailureWhenViewFetchFail
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_EQ(status.code, StatusCode::IO_ERROR);
-    EXPECT_NE(status.message.find("failed to refresh view before retrying query"),
-              std::string::npos);
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
-TEST(AsuClientImplTest, RefreshRetry_LoadRefreshesAndRetriesOnce)
+TEST(AsuClientImplTest, BackgroundRefresh_LoadReturnsErrorWithoutRetry)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstLoad = true;
@@ -749,13 +811,14 @@ TEST(AsuClientImplTest, RefreshRetry_LoadRefreshesAndRetriesOnce)
     },
         taskId);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    EXPECT_EQ(taskId, kInvalidTaskId);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
-    EXPECT_EQ(state->loadCalls, std::vector<AsuId>({10}));
+    EXPECT_TRUE(state->loadCalls.empty());
 }
 
-TEST(AsuClientImplTest, RefreshRetry_StoreRefreshesAndRetriesOnce)
+TEST(AsuClientImplTest, BackgroundRefresh_StoreReturnsErrorWithoutRetry)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstStore = true;
@@ -776,13 +839,14 @@ TEST(AsuClientImplTest, RefreshRetry_StoreRefreshesAndRetriesOnce)
     },
         taskId);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    EXPECT_EQ(taskId, kInvalidTaskId);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
-    EXPECT_EQ(state->storeCalls, std::vector<AsuId>({10}));
+    EXPECT_TRUE(state->storeCalls.empty());
 }
 
-TEST(AsuClientImplTest, RefreshRetry_DeleteRefreshesAndRetriesOnce)
+TEST(AsuClientImplTest, BackgroundRefresh_DeleteReturnsErrorWithoutRetry)
 {
     auto state = std::make_shared<TestState>();
     state->failFirstDelete = true;
@@ -799,10 +863,11 @@ TEST(AsuClientImplTest, RefreshRetry_DeleteRefreshesAndRetriesOnce)
     TaskId taskId = kInvalidTaskId;
     auto status = client->DeleteAsync({"k05"}, taskId);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_NE(taskId, kInvalidTaskId);
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    EXPECT_EQ(taskId, kInvalidTaskId);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
-    EXPECT_EQ(state->deleteCalls, std::vector<AsuId>({10}));
+    EXPECT_TRUE(state->deleteCalls.empty());
 }
 
 TEST(AsuClientImplTest, ViewEpoch_DoesNotPublishSameOrOlderViewEpoch)
@@ -823,13 +888,8 @@ TEST(AsuClientImplTest, ViewEpoch_DoesNotPublishSameOrOlderViewEpoch)
 
     QueryResult result;
     auto status = client->Query({"k05"}, QueryOptions{}, result);
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(state->createdTransports, std::uint32_t{1});
-
-    state->failFirstQuery = true;
-    state->firstQueryFailed = false;
-    status = client->Query({"k05"}, QueryOptions{}, result);
-    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
@@ -910,7 +970,8 @@ TEST(AsuClientImplTest, MemoryRegister_UnregisterRemovesCachedResourceBeforeFutu
     QueryResult queryResult;
     status = client->Query({"k05"}, QueryOptions{}, queryResult);
 
-    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
     EXPECT_TRUE(state->bindCalls.empty());
 }
@@ -1086,7 +1147,8 @@ TEST(AsuClientImplTest, SnapshotRefresh_ReusesExistingTransportAndBindsResources
     QueryResult result;
     status = client->Query({"k05"}, QueryOptions{}, result);
 
-    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
     EXPECT_EQ(state->createdTransports, std::uint32_t{2});
     EXPECT_EQ(state->bindCalls, std::vector<AsuId>({20}));
 }
@@ -1117,7 +1179,9 @@ TEST(AsuClientImplTest,
     state->failFirstQuery = true;
     QueryResult queryResult;
     status = client->Query({"k05"}, QueryOptions{}, queryResult);
-    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(WaitForFetchCount(std::static_pointer_cast<FakeViewServer>(config.viewServer), 2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     TaskResult taskResult;
     status = client->Check(taskId, taskResult);
@@ -1243,6 +1307,42 @@ TEST(AsuClientImplTest, Hash_StableHashMaglevDistributionIsBalanced)
 
     EXPECT_TRUE(status.ok()) << status.message;
     ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
+}
+
+TEST(AsuClientImplTest, Hash_RingHashMigrationRatioIsBoundedWhenAsuIsAdded)
+{
+    constexpr std::size_t kOldAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxMigrationRatio = 0.15;
+
+    auto oldAsuIds = MakeAsuIds(kOldAsuCount);
+    auto newAsuIds = MakeAsuIds(kOldAsuCount + 1);
+    auto keys = MakeKeys(kKeyCount);
+
+    auto oldRoutes = CaptureKeyRoutes(oldAsuIds, HashTableType::RING_HASH, StableHash, keys);
+    auto newRoutes = CaptureKeyRoutes(newAsuIds, HashTableType::RING_HASH, StableHash, keys);
+    auto migrationRatio = CalculateMigrationRatio(oldRoutes, newRoutes);
+
+    std::cout << "RingHash migration ratio after adding one ASU: " << migrationRatio << std::endl;
+    EXPECT_LE(migrationRatio, kMaxMigrationRatio);
+}
+
+TEST(AsuClientImplTest, Hash_MaglevMigrationRatioIsBoundedWhenAsuIsAdded)
+{
+    constexpr std::size_t kOldAsuCount = 16;
+    constexpr std::size_t kKeyCount = 20000;
+    constexpr double kMaxMigrationRatio = 0.15;
+
+    auto oldAsuIds = MakeAsuIds(kOldAsuCount);
+    auto newAsuIds = MakeAsuIds(kOldAsuCount + 1);
+    auto keys = MakeKeys(kKeyCount);
+
+    auto oldRoutes = CaptureKeyRoutes(oldAsuIds, HashTableType::MAGLEV, StableHash, keys);
+    auto newRoutes = CaptureKeyRoutes(newAsuIds, HashTableType::MAGLEV, StableHash, keys);
+    auto migrationRatio = CalculateMigrationRatio(oldRoutes, newRoutes);
+
+    std::cout << "Maglev migration ratio after adding one ASU: " << migrationRatio << std::endl;
+    EXPECT_LE(migrationRatio, kMaxMigrationRatio);
 }
 
 }  // namespace UC::ASU
