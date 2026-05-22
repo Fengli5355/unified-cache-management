@@ -27,6 +27,8 @@ target_link_libraries(asu_client PUBLIC asu_transport kv_common pthread)
 if(BUILD_UNIT_TESTS)
     include(GoogleTest)
     file(GLOB_RECURSE ASU_TEST_SOURCE_FILES CONFIGURE_DEPENDS test/case/*.cc)
+    file(GLOB_RECURSE ASU_CLIENT_TEST_SOURCE_FILES CONFIGURE_DEPENDS client/test/*.cpp)
+    list(APPEND ASU_TEST_SOURCE_FILES ${ASU_CLIENT_TEST_SOURCE_FILES})
     add_executable(asu.test ${ASU_TEST_SOURCE_FILES})
     target_include_directories(asu.test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/common

@@ -32,8 +32,8 @@
 #include <unordered_map>
 #include <utility>
 #include "asu_client/asu_client.h"
-#include "client_task_manager.h"
 #include "asu_transport/asu_transport.h"
+#include "client_task_manager.h"
 #include "kv_common/router.h"
 
 namespace UC::ASU {
@@ -81,6 +81,14 @@ struct AsuClientConfig {
     std::unordered_map<std::string, std::string> attrs;
 };
 
+// ViewSnapshot is the immutable routing state used by foreground IO and submitted tasks.
+struct ViewSnapshot {
+    std::shared_ptr<UC::KV::Router> router;
+    std::vector<AsuId> asuIds;
+    GlobalView view;
+    std::unordered_map<AsuId, std::shared_ptr<AsuTransport>> transports;
+};
+
 // Creates the default ASU client implementation.
 std::unique_ptr<AsuClient> CreateAsuClient(TransportFactory factory = CreateAsuTransport);
 
@@ -94,10 +102,10 @@ public:
 
     // Initializes routing and transport resources.
     Status Init(const AsuClientConfig& config) override;
-    // Gracefully drains tracked transport tasks and releases resources.
+    // Gracefully drains tracked client tasks and releases resources.
     Status Shutdown() override;
 
-    // Queries key existence without retrying on current-view failures.
+    // Queries key existence and schedules background refresh on refreshable failures.
     Status Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                  QueryResult& result) override;
 
@@ -120,43 +128,7 @@ public:
     Status UnregisterRegions(const std::vector<MRHandle>& handles) override;
 
 private:
-    using EntryIndex = std::size_t;
-
-    // ViewSnapshot is the immutable routing state used by foreground IO.
-    struct ViewSnapshot {
-        std::shared_ptr<UC::KV::Router> router;
-        std::vector<AsuId> asuIds;
-        GlobalView view;
-        std::unordered_map<AsuId, std::shared_ptr<AsuTransport>> transports;
-    };
-
-    Status SubmitAsync(ClientOpType op_type, const std::vector<KVBuffer>& entries, TaskId& task_id);
     using ClientTaskContextPtr = std::shared_ptr<ClientTaskContext>;
-
-    Status DispatchTask(const ClientTaskContextPtr& ctx);
-    bool PollTask(const ClientTaskContextPtr& ctx);
-    Status BuildResult(const ClientTaskContextPtr& ctx, TaskResult& result);
-
-    TransportFactory transport_factory_;
-    AsuClientConfig config_;
-    std::shared_ptr<ViewSnapshot> view_;
-    ClientTaskManager task_manager_;
-    // The following impls are mine.
-    // ChildTask records one transport-level task inside an aggregate task.
-    struct ChildTask {
-        AsuId asuId{0};
-        TaskId taskId{kInvalidTaskId};
-        std::shared_ptr<AsuTransport> transport;
-        std::vector<EntryIndex> entryIndices;
-    };
-
-    // AggregateTask tracks all transport tasks created by one client operation.
-    struct AggregateTask {
-        std::vector<ChildTask> childTasks;
-        std::size_t entryCount{0};
-        std::uint64_t viewEpoch{0};
-        std::uint64_t viewId{0};
-    };
 
     // RegisteredResource keeps memory metadata that must be rebound after refresh.
     struct RegisteredResource {
@@ -164,7 +136,35 @@ private:
         RegisterResult result;
     };
 
-    using TransportOperation = Status (AsuTransport::*)(const std::vector<KVBuffer>&, TaskId&);
+    // Submits one entry-based client task through the refresh-retry wrapper.
+    Status SubmitAsync(ClientOpType opType, const std::vector<KVBuffer>& entries, TaskId& taskId);
+    // Builds and dispatches one entry-based task attempt on the current snapshot.
+    Status SubmitAsyncOnce(ClientOpType opType, const std::vector<KVBuffer>& entries,
+                           TaskId& taskId, bool& needRefresh);
+    // Submits one key-based client task through the refresh-retry wrapper.
+    Status SubmitAsync(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId);
+    // Builds and dispatches one key-based task attempt on the current snapshot.
+    Status SubmitAsyncOnce(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId,
+                           bool& needRefresh);
+
+    // Sends each subtask to its routed transport and records transport task ids.
+    Status DispatchTask(const ClientTaskContextPtr& ctx);
+    // Polls transport subtasks and copies completed entry statuses back by original index.
+    bool PollTask(const ClientTaskContextPtr& ctx);
+    // Converts a client task context into the public task result shape.
+    Status BuildResult(const ClientTaskContextPtr& ctx, TaskResult& result);
+    // Waits for one client task context until completion or timeout.
+    Status WaitTaskContext(const ClientTaskContextPtr& ctx, std::uint64_t timeoutMs,
+                           TaskResult& result);
+
+    // Performs one query attempt on the current snapshot.
+    Status QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
+                     QueryResult& result, bool& needRefresh);
+    // Performs one register operation on the current snapshot.
+    Status RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
+                               std::vector<RegisterResult>& results, bool& needRefresh);
+    // Performs one unregister operation on the current snapshot.
+    Status UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh);
 
     // Fetches the next global view from the configured source.
     Status FetchGlobalView(GlobalView& view);
@@ -178,45 +178,22 @@ private:
     Status BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>& transport);
     // Binds remembered registered resources to a transport.
     Status BindRegisteredResources(AsuId asuId, const std::shared_ptr<AsuTransport>& transport);
+    // Returns the current immutable snapshot if initialized.
+    std::shared_ptr<ViewSnapshot> GetSnapshot() const;
+
     // Refreshes the view and publishes it if it is newer.
     Status RefreshView();
-    // Starts a non-blocking background refresh if one is not already running.
+    // Starts a non-blocking refresh after a status indicates stale routing or transport state.
     void RequestBackgroundRefresh();
     // Waits for the background refresh worker to finish.
     void JoinBackgroundRefresh();
+
     // Shuts down transports owned by a snapshot.
     Status ShutdownSnapshotTransports(const std::shared_ptr<ViewSnapshot>& snapshot);
-    // Waits for tracked transport tasks before transport shutdown.
-    Status DrainTasksBeforeShutdown(const std::vector<AggregateTask>& tasks,
-                                    std::uint64_t waitTimeoutMs);
-    // Performs one query attempt on the current snapshot.
-    Status QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                     QueryResult& result, bool& needRefresh);
-    // Performs one register operation on the current snapshot.
-    Status RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
-                               std::vector<RegisterResult>& results, bool& needRefresh);
-    // Performs one unregister operation on the current snapshot.
-    Status UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh);
-    // Submits entries through the selected transport operation.
-    Status SubmitEntries(const std::vector<KVBuffer>& entries, TaskId& taskId,
-                         TransportOperation operation);
-    // Performs one routed entry submission attempt.
-    Status SubmitEntriesOnce(const std::vector<KVBuffer>& entries, TaskId& taskId,
-                             TransportOperation operation, bool& needRefresh);
-    // Submits delete operations through routed transports.
-    Status SubmitDelete(const std::vector<CacheKey>& keys, TaskId& taskId);
-    // Performs one routed delete submission attempt.
-    Status SubmitDeleteOnce(const std::vector<CacheKey>& keys, TaskId& taskId, bool& needRefresh);
-    // Returns the current immutable snapshot if initialized.
-    std::shared_ptr<ViewSnapshot> GetSnapshot() const;
-    // Stores an aggregate task and returns its client task id.
-    TaskId SaveAggregateTask(AggregateTask task);
-    // Removes a completed aggregate task.
-    void RemoveAggregateTask(TaskId taskId);
-    // Collects child task results into a client-level result.
-    Status CollectTaskResult(const AggregateTask& task, bool wait, std::uint64_t timeoutMs,
-                             TaskResult& result, bool& needRefresh);
-    // Marks whether a status should trigger background refresh.
+    // Waits for tracked client tasks before transport shutdown.
+    Status DrainTasksBeforeShutdown(std::uint64_t waitTimeoutMs);
+
+    // Marks whether a status suggests the published snapshot should be refreshed.
     static void MarkRefreshIfNeeded(const Status& status, bool& needRefresh);
     // Extracts sorted ASU ids from a view.
     static std::vector<AsuId> GetSortedAsuIds(const GlobalView& view);
@@ -224,8 +201,10 @@ private:
     static GlobalView MakeConfigGlobalView(const AsuClientConfig& config);
     // Returns whether a view carries a comparable epoch.
     static bool HasKnownViewEpoch(const GlobalView& view);
-    // Returns whether an operation status implies stale routing.
+    // Returns whether an operation status should schedule view refresh.
     static bool ShouldRefreshView(const Status& status);
+    // Returns whether any task status should schedule view refresh.
+    static bool ShouldRefreshView(const TaskResult& result);
     // Returns whether all child statuses are terminal.
     static bool IsTaskComplete(const TaskResult& result);
     // Returns whether one task status is terminal.
@@ -234,20 +213,30 @@ private:
     static Status WithContext(Status status, const std::string& context);
     // Builds the standard not-initialized status.
     static Status NotInitialized();
+
+    // Tracks aggregate client tasks returned through public TaskId values.
+    ClientTaskManager taskManager_;
+    // Creates ASU transports; tests inject fake transports through this hook.
     TransportFactory transportFactory_;
-    // mutex_ protects initialized_, config_, viewServer_, transportConfigs_,
-    // registeredResources_, snapshot_, retiredTransports_, tasks_, and refreshInProgress_.
+    // mutex_ protects background refresh state and resource/view caches.
     mutable std::mutex mutex_;
+    // Tracks whether Init has published a usable snapshot.
     bool initialized_{false};
+    // Prevents duplicate background refresh workers.
     bool refreshInProgress_{false};
+    // Last accepted initialization config.
     AsuClientConfig config_;
+    // Source for dynamic global views; may be backed by viewServiceAddrs.
     std::shared_ptr<ViewServer> viewServer_;
+    // Transport configs indexed by ASU id for snapshot construction.
     std::unordered_map<AsuId, TransportConfig> transportConfigs_;
+    // Resources registered on the current view and rebound to newly added transports.
     std::vector<RegisteredResource> registeredResources_;
+    // Current immutable routing and transport snapshot.
     std::shared_ptr<ViewSnapshot> snapshot_;
+    // Transports removed from the active snapshot but still needed by old tasks.
     std::vector<std::shared_ptr<AsuTransport>> retiredTransports_;
-    std::atomic<TaskId> nextTaskId_{1};
-    std::unordered_map<TaskId, AggregateTask> tasks_;
+    // Worker used for non-blocking refresh requests.
     std::thread refreshThread_;
 };
 

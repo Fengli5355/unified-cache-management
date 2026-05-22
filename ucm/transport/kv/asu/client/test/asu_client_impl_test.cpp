@@ -27,9 +27,14 @@ struct TestState {
     bool firstLoadFailed{false};
     bool failFirstStore{false};
     bool firstStoreFailed{false};
+    bool failStoreAfterFirstDispatch{false};
+    std::size_t storeDispatchAttempts{0};
     bool failFirstDelete{false};
     bool firstDeleteFailed{false};
     std::unordered_map<AsuId, Status> queryFailures;
+    std::unordered_map<AsuId, Status> loadFailures;
+    std::unordered_map<AsuId, Status> storeFailures;
+    std::unordered_map<AsuId, Status> deleteFailures;
     std::unordered_map<AsuId, std::vector<Status>> checkEntryStatus;
     std::unordered_map<AsuId, Status> checkResultStatus;
     std::unordered_map<AsuId, QueryResult> prefixQueryResults;
@@ -44,6 +49,7 @@ struct TestState {
     std::vector<AsuId> deleteCalls;
     std::vector<AsuId> checkCalls;
     std::vector<AsuId> waitCalls;
+    std::vector<AsuId> cancelCalls;
     std::unordered_map<AsuId, TaskId> childTaskIds;
 };
 
@@ -75,15 +81,15 @@ public:
             return Status::Error(state_->firstQueryFailureCode, state_->firstQueryFailureMessage);
         }
 
-        state_->queryCalls.emplace_back(config_.asu_id);
-        state_->queryKeyCounts[config_.asu_id] += keys.size();
-        auto& routedKeys = state_->queryKeys[config_.asu_id];
+        state_->queryCalls.emplace_back(config_.asuId);
+        state_->queryKeyCounts[config_.asuId] += keys.size();
+        auto& routedKeys = state_->queryKeys[config_.asuId];
         routedKeys.insert(routedKeys.end(), keys.begin(), keys.end());
-        auto failureIter = state_->queryFailures.find(config_.asu_id);
+        auto failureIter = state_->queryFailures.find(config_.asuId);
         if (failureIter != state_->queryFailures.end()) { return failureIter->second; }
 
         if (options.mode == QueryMode::PREFIX) {
-            auto iter = state_->prefixQueryResults.find(config_.asu_id);
+            auto iter = state_->prefixQueryResults.find(config_.asuId);
             if (iter != state_->prefixQueryResults.end()) {
                 result = iter->second;
                 return Status::OK();
@@ -93,7 +99,7 @@ public:
         result.exists.clear();
         result.exists.reserve(keys.size());
         for (const auto& key : keys) { result.exists.emplace_back(key == "k15" || key == "k25"); }
-        result.prefix_hit_keys = 0;
+        result.prefixHitKeys = 0;
         return Status::OK();
     }
 
@@ -109,10 +115,12 @@ public:
             state_->firstLoadFailed = true;
             return Status::Error(StatusCode::CONNECTION_ERROR, "fake load connection error");
         }
+        auto failureIter = state_->loadFailures.find(config_.asuId);
+        if (failureIter != state_->loadFailures.end()) { return failureIter->second; }
 
-        state_->loadCalls.emplace_back(config_.asu_id);
-        taskId = 1000 + config_.asu_id;
-        state_->childTaskIds[config_.asu_id] = taskId;
+        state_->loadCalls.emplace_back(config_.asuId);
+        taskId = 1000 + config_.asuId;
+        state_->childTaskIds[config_.asuId] = taskId;
         return Status::OK();
     }
 
@@ -122,10 +130,15 @@ public:
             state_->firstStoreFailed = true;
             return Status::Error(StatusCode::CONNECTION_ERROR, "fake store connection error");
         }
+        auto failureIter = state_->storeFailures.find(config_.asuId);
+        if (failureIter != state_->storeFailures.end()) { return failureIter->second; }
+        if (state_->failStoreAfterFirstDispatch && ++state_->storeDispatchAttempts > 1) {
+            return Status::Error(StatusCode::CONNECTION_ERROR, "fake partial dispatch failure");
+        }
 
-        state_->storeCalls.emplace_back(config_.asu_id);
-        taskId = 2000 + config_.asu_id;
-        state_->childTaskIds[config_.asu_id] = taskId;
+        state_->storeCalls.emplace_back(config_.asuId);
+        taskId = 2000 + config_.asuId;
+        state_->childTaskIds[config_.asuId] = taskId;
         return Status::OK();
     }
 
@@ -135,26 +148,32 @@ public:
             state_->firstDeleteFailed = true;
             return Status::Error(StatusCode::CONNECTION_ERROR, "fake delete connection error");
         }
+        auto failureIter = state_->deleteFailures.find(config_.asuId);
+        if (failureIter != state_->deleteFailures.end()) { return failureIter->second; }
 
-        state_->deleteCalls.emplace_back(config_.asu_id);
-        taskId = 3000 + config_.asu_id;
-        state_->childTaskIds[config_.asu_id] = taskId;
+        state_->deleteCalls.emplace_back(config_.asuId);
+        taskId = 3000 + config_.asuId;
+        state_->childTaskIds[config_.asuId] = taskId;
         return Status::OK();
     }
 
-    Status Cancel(TaskId) override { return Status::OK(); }
+    Status Cancel(TaskId) override
+    {
+        state_->cancelCalls.emplace_back(config_.asuId);
+        return Status::OK();
+    }
 
     Status Check(TaskId taskId, TaskResult& result) override
     {
-        state_->checkCalls.emplace_back(config_.asu_id);
-        auto statusIter = state_->checkResultStatus.find(config_.asu_id);
+        state_->checkCalls.emplace_back(config_.asuId);
+        auto statusIter = state_->checkResultStatus.find(config_.asuId);
         result.status =
             statusIter == state_->checkResultStatus.end() ? Status::OK() : statusIter->second;
-        auto entryIter = state_->checkEntryStatus.find(config_.asu_id);
-        result.entry_status = entryIter == state_->checkEntryStatus.end()
+        auto entryIter = state_->checkEntryStatus.find(config_.asuId);
+        result.entryStatus = entryIter == state_->checkEntryStatus.end()
                                   ? std::vector<Status>{result.status}
                                   : entryIter->second;
-        result.query_result.reset();
+        result.queryResult.reset();
         if (taskId == 0) {
             return Status::Error(StatusCode::TASK_NOT_FOUND, "fake task not found");
         }
@@ -163,14 +182,14 @@ public:
 
     Status Wait(TaskId taskId, std::uint64_t, TaskResult& result) override
     {
-        state_->waitCalls.emplace_back(config_.asu_id);
+        state_->waitCalls.emplace_back(config_.asuId);
         return Check(taskId, result);
     }
 
     Status RegisterRegions(const std::vector<MemoryRegion>& regions,
                            std::vector<RegisterResult>& results) override
     {
-        state_->registerCalls.emplace_back(config_.asu_id);
+        state_->registerCalls.emplace_back(config_.asuId);
         results.clear();
         for (std::size_t index = 0; index < regions.size(); ++index) {
             results.emplace_back(RegisterResult{Status::OK(), 500 + index});
@@ -181,7 +200,7 @@ public:
     Status BindRegisteredRegions(const std::vector<RegisteredMemory>& regions,
                                  std::vector<RegisterResult>& results) override
     {
-        state_->bindCalls.emplace_back(config_.asu_id);
+        state_->bindCalls.emplace_back(config_.asuId);
         results.clear();
         for (const auto& region : regions) {
             results.emplace_back(RegisterResult{Status::OK(), region.handle});
@@ -191,7 +210,7 @@ public:
 
     Status UnregisterRegions(const std::vector<MRHandle>&) override
     {
-        state_->unregisterCalls.emplace_back(config_.asu_id);
+        state_->unregisterCalls.emplace_back(config_.asuId);
         return Status::OK();
     }
 
@@ -267,7 +286,7 @@ AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
     AsuClientConfig config;
     for (auto asuId : asuIds) {
         TransportConfig transportConfig;
-        transportConfig.asu_id = asuId;
+        transportConfig.asuId = asuId;
         config.transportConfigs.emplace_back(std::move(transportConfig));
     }
     config.hashTable.virtualNodeCount = 1;
@@ -501,7 +520,7 @@ TEST(AsuClientImplTest, Input_EmptyQueryReturnsEmptyResult)
 
     EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_TRUE(result.exists.empty());
-    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{0});
+    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{0});
     EXPECT_TRUE(state->queryCalls.empty());
 }
 
@@ -520,7 +539,7 @@ TEST(AsuClientImplTest, Input_EmptyStoreCreatesCompletableEmptyTask)
     TaskResult result;
     status = client->Check(taskId, result);
     EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_TRUE(result.entry_status.empty());
+    EXPECT_TRUE(result.entryStatus.empty());
 }
 
 TEST(AsuClientImplTest, Input_EmptyDeleteCreatesCompletableEmptyTask)
@@ -538,7 +557,7 @@ TEST(AsuClientImplTest, Input_EmptyDeleteCreatesCompletableEmptyTask)
     TaskResult result;
     status = client->Check(taskId, result);
     EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_TRUE(result.entry_status.empty());
+    EXPECT_TRUE(result.entryStatus.empty());
 }
 
 TEST(AsuClientImplTest, Input_EmptyRegisterReturnsEmptyResults)
@@ -614,6 +633,54 @@ TEST(AsuClientImplTest, Query_PerKeyKeepsOriginalOrder)
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({0, 1, 1}));
 }
 
+TEST(AsuClientImplTest, Query_PerKeyFailureIncludesAsuContext)
+{
+    auto state = std::make_shared<TestState>();
+    state->queryFailures[20] = Status::Error(StatusCode::IO_ERROR, "fake per-key query failure");
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20})).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k15"}, QueryOptions{}, result);
+
+    EXPECT_EQ(status.code, StatusCode::IO_ERROR);
+    EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
+    EXPECT_NE(status.message.find("key_count=1"), std::string::npos);
+}
+
+TEST(AsuClientImplTest, Query_PerKeyResultSizeMismatchReturnsInternalError)
+{
+    class ShortQueryTransport final : public FakeTransport {
+    public:
+        explicit ShortQueryTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(std::move(state))
+        {
+        }
+
+        Status Query(const std::vector<CacheKey>&, const QueryOptions&,
+                     QueryResult& result) override
+        {
+            result.exists.clear();
+            result.prefixHitKeys = 0;
+            return Status::OK();
+        }
+    };
+
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        return std::unique_ptr<AsuTransport>(new ShortQueryTransport(state));
+    });
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k05"}, QueryOptions{}, result);
+
+    EXPECT_EQ(status.code, StatusCode::INTERNAL_ERROR);
+    EXPECT_NE(status.message.find("query result size mismatch"), std::string::npos);
+    EXPECT_NE(status.message.find("asuId=10"), std::string::npos);
+}
+
 TEST(AsuClientImplTest, Query_PrefixBroadcastsAndMergesResults)
 {
     auto state = std::make_shared<TestState>();
@@ -639,7 +706,7 @@ TEST(AsuClientImplTest, Query_PrefixBroadcastsAndMergesResults)
 
     EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 1, 1}));
-    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{10});
+    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{10});
     ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
     EXPECT_EQ(state->queryKeyCounts[10], std::size_t{3});
     EXPECT_EQ(state->queryKeyCounts[20], std::size_t{3});
@@ -670,8 +737,28 @@ TEST(AsuClientImplTest, Query_PrefixPartialFailureIncludesAsuContext)
     EXPECT_EQ(status.code, StatusCode::PARTIAL_FAILED);
     EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 0, 1}));
-    EXPECT_EQ(result.prefix_hit_keys, std::uint32_t{7});
+    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{7});
     ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+}
+
+TEST(AsuClientImplTest, Query_PrefixResultSizeMismatchReturnsInternalError)
+{
+    auto state = std::make_shared<TestState>();
+    state->prefixQueryResults[10] = QueryResult{
+        {1},
+        1
+    };
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    QueryOptions options;
+    options.mode = QueryMode::PREFIX;
+    QueryResult result;
+    auto status = client->Query({"prefix-a", "prefix-b"}, options, result);
+
+    EXPECT_EQ(status.code, StatusCode::INTERNAL_ERROR);
+    EXPECT_NE(status.message.find("prefix query result size mismatch"), std::string::npos);
+    EXPECT_NE(status.message.find("asuId=10"), std::string::npos);
 }
 
 TEST(AsuClientImplTest, BackgroundRefresh_QueryReturnsErrorWithoutRetry)
@@ -893,6 +980,33 @@ TEST(AsuClientImplTest, ViewEpoch_DoesNotPublishSameOrOlderViewEpoch)
     EXPECT_EQ(state->createdTransports, std::uint32_t{1});
 }
 
+TEST(AsuClientImplTest, SnapshotRefresh_BuildFailureKeepsOldSnapshot)
+{
+    auto state = std::make_shared<TestState>();
+    state->failFirstQuery = true;
+    auto config = MakeConfig({10});
+    auto viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    config.viewServer = viewServer;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query({"k05"}, QueryOptions{}, result);
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(WaitForFetchCount(viewServer, 2));
+
+    status = client->Query({"k05"}, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(state->createdTransports, std::uint32_t{1});
+    EXPECT_EQ(state->queryCalls, std::vector<AsuId>({10}));
+}
+
 TEST(AsuClientImplTest, MemoryRegister_RegisterRegionsRegistersFirstTransportAndBindsFollowers)
 {
     auto state = std::make_shared<TestState>();
@@ -908,6 +1022,47 @@ TEST(AsuClientImplTest, MemoryRegister_RegisterRegionsRegistersFirstTransportAnd
     ASSERT_EQ(results.size(), std::size_t{2});
     EXPECT_EQ(results[0].handle, MRHandle{500});
     EXPECT_EQ(results[1].handle, MRHandle{501});
+}
+
+TEST(AsuClientImplTest, MemoryRegister_FirstRegisterFailureIncludesAsuContext)
+{
+    class FailingRegisterTransport final : public FakeTransport {
+    public:
+        explicit FailingRegisterTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(std::move(state))
+        {
+        }
+
+        Status RegisterRegions(const std::vector<MemoryRegion>&,
+                               std::vector<RegisterResult>&) override
+        {
+            return Status::Error(StatusCode::BUFFER_NOT_REGISTERED, "fake register failure");
+        }
+    };
+
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        return std::unique_ptr<AsuTransport>(new FailingRegisterTransport(state));
+    });
+    ASSERT_TRUE(client->Init(config).ok());
+
+    std::vector<RegisterResult> results;
+    auto status = client->RegisterRegions({MemoryRegion{}}, results);
+
+    EXPECT_EQ(status.code, StatusCode::BUFFER_NOT_REGISTERED);
+    EXPECT_NE(status.message.find("asuIndex=0"), std::string::npos);
+    EXPECT_NE(status.message.find("asuId=10"), std::string::npos);
+    EXPECT_NE(status.message.find("region_count=1"), std::string::npos);
+    ASSERT_TRUE(client->Shutdown().ok());
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
 }
 
 TEST(AsuClientImplTest, MemoryRegister_BindFailureIncludesAsuContext)
@@ -943,6 +1098,86 @@ TEST(AsuClientImplTest, MemoryRegister_BindFailureIncludesAsuContext)
     EXPECT_NE(status.message.find("asuIndex=1"), std::string::npos);
     EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
     EXPECT_NE(status.message.find("region_count=1"), std::string::npos);
+}
+
+TEST(AsuClientImplTest, MemoryRegister_BindFailureDoesNotCacheResource)
+{
+    class FailingBindTransport final : public FakeTransport {
+    public:
+        explicit FailingBindTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(state), state_(std::move(state))
+        {
+        }
+
+        Status BindRegisteredRegions(const std::vector<RegisteredMemory>&,
+                                     std::vector<RegisterResult>&) override
+        {
+            state_->bindCalls.emplace_back(20);
+            return Status::Error(StatusCode::CONNECTION_ERROR, "fake bind failure");
+        }
+
+    private:
+        std::shared_ptr<TestState> state_;
+    };
+
+    auto state = std::make_shared<TestState>();
+    auto config = MakeConfig({10, 20, 30});
+    config.viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10, 20},
+            {10, 20, 30}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        if (state->createdTransports == 2) {
+            return std::unique_ptr<AsuTransport>(new FailingBindTransport(state));
+        }
+        return std::unique_ptr<AsuTransport>(new FakeTransport(state));
+    });
+    ASSERT_TRUE(client->Init(config).ok());
+
+    std::vector<RegisterResult> results;
+    auto status = client->RegisterRegions({MemoryRegion{}}, results);
+    ASSERT_EQ(status.code, StatusCode::PARTIAL_FAILED);
+
+    state->failFirstQuery = true;
+    QueryResult queryResult;
+    status = client->Query({"k05"}, QueryOptions{}, queryResult);
+
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    ASSERT_TRUE(client->Shutdown().ok());
+    EXPECT_EQ(state->createdTransports, std::uint32_t{3});
+    EXPECT_EQ(state->bindCalls, std::vector<AsuId>({20}));
+}
+
+TEST(AsuClientImplTest, MemoryRegister_UnregisterFailureIncludesAsuContext)
+{
+    class FailingUnregisterTransport final : public FakeTransport {
+    public:
+        explicit FailingUnregisterTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(std::move(state))
+        {
+        }
+
+        Status UnregisterRegions(const std::vector<MRHandle>&) override
+        {
+            return Status::Error(StatusCode::IO_ERROR, "fake unregister failure");
+        }
+    };
+
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        return std::unique_ptr<AsuTransport>(new FailingUnregisterTransport(state));
+    });
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    auto status = client->UnregisterRegions({7});
+
+    EXPECT_EQ(status.code, StatusCode::IO_ERROR);
+    EXPECT_NE(status.message.find("asuId=10"), std::string::npos);
+    EXPECT_NE(status.message.find("handle_count=1"), std::string::npos);
 }
 
 TEST(AsuClientImplTest, MemoryRegister_UnregisterRemovesCachedResourceBeforeFutureAsuIsAdded)
@@ -1025,6 +1260,60 @@ TEST(AsuClientImplTest, Task_CheckKeepsInProgressTaskUntilCompletion)
     EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
 }
 
+TEST(AsuClientImplTest, Task_CheckRefreshesViewOnRefreshableChildFailure)
+{
+    auto state = std::make_shared<TestState>();
+    state->checkResultStatus[10] = Status::Error(StatusCode::IO_ERROR, "fake child io error");
+    auto config = MakeConfig({10, 20});
+    auto viewServer = std::make_shared<FakeViewServer>(
+        std::vector<std::vector<AsuId>>{
+            {10},
+            {10, 20}
+    },
+        std::vector<std::uint64_t>{1, 2});
+    config.viewServer = viewServer;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Check(taskId, result);
+
+    EXPECT_EQ(status.code, StatusCode::PARTIAL_FAILED);
+    ASSERT_TRUE(WaitForFetchCount(viewServer, 2));
+    ASSERT_TRUE(client->Shutdown().ok());
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+}
+
+TEST(AsuClientImplTest, Task_PartialDispatchFailureCancelsDispatchedSubtasks)
+{
+    auto state = std::make_shared<TestState>();
+    state->failStoreAfterFirstDispatch = true;
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20})).ok());
+
+    TaskId taskId = kInvalidTaskId;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}},
+            KVBuffer{"k15", {}}
+    },
+        taskId);
+
+    EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
+    EXPECT_EQ(taskId, kInvalidTaskId);
+    ASSERT_EQ(state->storeCalls.size(), std::size_t{1});
+    ASSERT_EQ(state->cancelCalls.size(), std::size_t{1});
+    EXPECT_EQ(state->cancelCalls[0], state->storeCalls[0]);
+}
+
 TEST(AsuClientImplTest, Task_WaitRemovesTaskAfterCompletion)
 {
     auto state = std::make_shared<TestState>();
@@ -1044,6 +1333,55 @@ TEST(AsuClientImplTest, Task_WaitRemovesTaskAfterCompletion)
     ASSERT_TRUE(status.ok()) << status.message;
 
     status = client->Wait(taskId, 10, result);
+    EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
+}
+
+TEST(AsuClientImplTest, Task_WaitTimeoutKeepsTaskForLaterCompletion)
+{
+    class TimeoutOnceTransport final : public FakeTransport {
+    public:
+        explicit TimeoutOnceTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(std::move(state))
+        {
+        }
+
+        Status Wait(TaskId, std::uint64_t, TaskResult& result) override
+        {
+            if (!timedOut_) {
+                timedOut_ = true;
+                result.status = Status::Error(StatusCode::TIMEOUT, "fake wait timeout");
+                return result.status;
+            }
+            return FakeTransport::Check(1000, result);
+        }
+
+    private:
+        bool timedOut_{false};
+    };
+
+    auto state = std::make_shared<TestState>();
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        return std::unique_ptr<AsuTransport>(new TimeoutOnceTransport(state));
+    });
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+
+    TaskId taskId = 0;
+    auto status = client->StoreAsync(
+        {
+            KVBuffer{"k05", {}}
+    },
+        taskId);
+    ASSERT_TRUE(status.ok()) << status.message;
+
+    TaskResult result;
+    status = client->Wait(taskId, 10, result);
+    EXPECT_EQ(status.code, StatusCode::TIMEOUT);
+
+    status = client->Wait(taskId, 10, result);
+    EXPECT_TRUE(status.ok()) << status.message;
+
+    status = client->Check(taskId, result);
     EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
 }
 
@@ -1070,10 +1408,10 @@ TEST(AsuClientImplTest, Task_CheckKeepsEntryStatusInOriginalOrderAcrossAsus)
     status = client->Check(taskId, result);
 
     EXPECT_TRUE(status.ok()) << status.message;
-    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
-    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
-    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
-    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+    ASSERT_EQ(result.entryStatus.size(), std::size_t{3});
+    EXPECT_EQ(result.entryStatus[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entryStatus[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entryStatus[2].code, StatusCode::IO_ERROR);
 }
 
 TEST(AsuClientImplTest, Task_LoadKeepsEntryStatusInOriginalOrderAcrossAsus)
@@ -1099,10 +1437,10 @@ TEST(AsuClientImplTest, Task_LoadKeepsEntryStatusInOriginalOrderAcrossAsus)
     status = client->Check(taskId, result);
 
     EXPECT_TRUE(status.ok()) << status.message;
-    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
-    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
-    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
-    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+    ASSERT_EQ(result.entryStatus.size(), std::size_t{3});
+    EXPECT_EQ(result.entryStatus[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entryStatus[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entryStatus[2].code, StatusCode::IO_ERROR);
 }
 
 TEST(AsuClientImplTest, Task_DeleteKeepsEntryStatusInOriginalOrderAcrossAsus)
@@ -1122,10 +1460,10 @@ TEST(AsuClientImplTest, Task_DeleteKeepsEntryStatusInOriginalOrderAcrossAsus)
     status = client->Check(taskId, result);
 
     EXPECT_TRUE(status.ok()) << status.message;
-    ASSERT_EQ(result.entry_status.size(), std::size_t{3});
-    EXPECT_EQ(result.entry_status[0].code, StatusCode::NOT_FOUND);
-    EXPECT_EQ(result.entry_status[1].code, StatusCode::OK);
-    EXPECT_EQ(result.entry_status[2].code, StatusCode::IO_ERROR);
+    ASSERT_EQ(result.entryStatus.size(), std::size_t{3});
+    EXPECT_EQ(result.entryStatus[0].code, StatusCode::NOT_FOUND);
+    EXPECT_EQ(result.entryStatus[1].code, StatusCode::OK);
+    EXPECT_EQ(result.entryStatus[2].code, StatusCode::IO_ERROR);
 }
 
 TEST(AsuClientImplTest, SnapshotRefresh_ReusesExistingTransportAndBindsResourcesToAddedAsu)

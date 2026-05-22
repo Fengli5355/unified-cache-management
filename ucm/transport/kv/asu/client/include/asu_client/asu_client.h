@@ -29,37 +29,25 @@ namespace UC::ASU {
 
 struct AsuClientConfig;
 
-// AsuClient provides the public asynchronous KV client interface.
 class AsuClient {
 public:
-    // Destroys the client interface.
     virtual ~AsuClient() = default;
 
-    // Initializes the client from a concrete implementation config.
     virtual Status Init(const AsuClientConfig& config) = 0;
-    // Stops accepting new operations and releases client-side resources.
     virtual Status Shutdown() = 0;
 
-    // Queries key existence through the current routing view.
     virtual Status Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                          QueryResult& result) = 0;
 
-    // Submits asynchronous load operations.
     virtual Status LoadAsync(const std::vector<KVBuffer>& entries, TaskId& taskId) = 0;
-    // Submits asynchronous store operations.
     virtual Status StoreAsync(const std::vector<KVBuffer>& entries, TaskId& taskId) = 0;
-    // Submits asynchronous delete operations.
     virtual Status DeleteAsync(const std::vector<CacheKey>& keys, TaskId& taskId) = 0;
 
-    // Checks an asynchronous aggregate task without blocking.
     virtual Status Check(TaskId taskId, TaskResult& result) = 0;
-    // Waits for an asynchronous aggregate task up to the provided timeout.
     virtual Status Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& result) = 0;
 
-    // Registers memory regions across the current view.
     virtual Status RegisterRegions(const std::vector<MemoryRegion>& regions,
                                    std::vector<RegisterResult>& results) = 0;
-    // Unregisters memory regions across the current view.
     virtual Status UnregisterRegions(const std::vector<MRHandle>& handles) = 0;
 };
 
