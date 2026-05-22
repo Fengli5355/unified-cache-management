@@ -30,14 +30,6 @@
 #include "asu_transport/types.h"
 
 namespace UC::ASU {
-namespace {
-
-Status Unsupported(const std::string& message)
-{
-    return Status::Error(StatusCode::UNSUPPORTED, message);
-}
-
-}  // namespace
 
 AsuTransportImpl::~AsuTransportImpl() { Shutdown(); }
 
@@ -46,9 +38,8 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
     if (worker_.joinable()) { return Status::OK(); }
 
     config_ = config;
-    auto queue_depth =
-        std::max<std::size_t>(2, static_cast<std::size_t>(config_.max_inflight_tasks));
-    execute_queue_.Setup(queue_depth + 1);
+    auto queueDepth = std::max<std::size_t>(2, static_cast<std::size_t>(config_.maxInflightTasks));
+    executeQueue_.Setup(queueDepth + 1);
     stop_.store(false, std::memory_order_release);
     worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
     return Status::OK();
@@ -74,91 +65,89 @@ Status AsuTransportImpl::CheckHealth()
 Status AsuTransportImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                                QueryResult& result)
 {
-    TaskId task_id{kInvalidTaskId};
-    auto status = QueryAsync(keys, options, task_id);
+    TaskId taskId{kInvalidTaskId};
+    auto status = QueryAsync(keys, options, taskId);
     if (!status.ok()) { return status; }
 
-    TaskResult task_result;
-    const auto timeout_ms = options.timeout_ms == 0 ? config_.query_timeout_ms : options.timeout_ms;
-    status = Wait(task_id, timeout_ms, task_result);
+    TaskResult taskResult;
+    const auto timeoutMs = options.timeoutMs == 0 ? config_.queryTimeoutMs : options.timeoutMs;
+    status = Wait(taskId, timeoutMs, taskResult);
     if (!status.ok()) { return status; }
-    if (task_result.query_result.has_value()) { result = *task_result.query_result; }
-    return task_result.status;
+    if (taskResult.queryResult.has_value()) { result = *taskResult.queryResult; }
+    return taskResult.status;
 }
 
 Status AsuTransportImpl::QueryAsync(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                                    TaskId& task_id)
+                                    TaskId& taskId)
 {
     auto ctx = std::make_unique<TransportTaskContext>();
-    ctx->op_type = TransportOpType::QUERY;
+    ctx->opType = TransportOpType::QUERY;
     ctx->keys = BatchView<CacheKey>{keys.data(), keys.size()};
-    ctx->query_options = options;
-    ctx->entry_status.assign(keys.size(), Status::OK());
-    return SubmitAsync(std::move(ctx), task_id);
+    ctx->queryOptions = options;
+    ctx->entryStatus.assign(keys.size(), Status::OK());
+    return SubmitAsync(std::move(ctx), taskId);
 }
 
-Status AsuTransportImpl::LoadAsync(const std::vector<KVBuffer>& entries, TaskId& task_id)
+Status AsuTransportImpl::LoadAsync(const std::vector<KVBuffer>& entries, TaskId& taskId)
 {
     auto ctx = std::make_unique<TransportTaskContext>();
-    ctx->op_type = TransportOpType::LOAD;
+    ctx->opType = TransportOpType::LOAD;
     ctx->entries = BatchView<KVBuffer>{entries.data(), entries.size()};
-    ctx->entry_status.assign(entries.size(), Status::OK());
-    return SubmitAsync(std::move(ctx), task_id);
+    ctx->entryStatus.assign(entries.size(), Status::OK());
+    return SubmitAsync(std::move(ctx), taskId);
 }
 
-Status AsuTransportImpl::StoreAsync(const std::vector<KVBuffer>& entries, TaskId& task_id)
+Status AsuTransportImpl::StoreAsync(const std::vector<KVBuffer>& entries, TaskId& taskId)
 {
     auto ctx = std::make_unique<TransportTaskContext>();
-    ctx->op_type = TransportOpType::STORE;
+    ctx->opType = TransportOpType::STORE;
     ctx->entries = BatchView<KVBuffer>{entries.data(), entries.size()};
-    ctx->entry_status.assign(entries.size(), Status::OK());
-    return SubmitAsync(std::move(ctx), task_id);
+    ctx->entryStatus.assign(entries.size(), Status::OK());
+    return SubmitAsync(std::move(ctx), taskId);
 }
 
-Status AsuTransportImpl::DeleteAsync(const std::vector<CacheKey>& keys, TaskId& task_id)
+Status AsuTransportImpl::DeleteAsync(const std::vector<CacheKey>& keys, TaskId& taskId)
 {
     auto ctx = std::make_unique<TransportTaskContext>();
-    ctx->op_type = TransportOpType::DELETE;
+    ctx->opType = TransportOpType::DELETE;
     ctx->keys = BatchView<CacheKey>{keys.data(), keys.size()};
-    ctx->entry_status.assign(keys.size(), Status::OK());
-    return SubmitAsync(std::move(ctx), task_id);
+    ctx->entryStatus.assign(keys.size(), Status::OK());
+    return SubmitAsync(std::move(ctx), taskId);
 }
 
-Status AsuTransportImpl::Cancel(TaskId task_id)
+Status AsuTransportImpl::Cancel(TaskId taskId)
 {
+    (void)taskId;
     return Status::Error(StatusCode::INTERNAL_ERROR, "cancel is not supported now");
 }
 
-Status AsuTransportImpl::Check(TaskId task_id, TaskResult& result)
+Status AsuTransportImpl::Check(TaskId taskId, TaskResult& result)
 {
-    auto ctx = task_manager_.Get(task_id);
+    auto ctx = taskManager_.Get(taskId);
     if (!ctx) { return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found"); }
 
-    std::lock_guard<std::mutex> lock(ctx->wait_mu);
+    std::lock_guard<std::mutex> lock(ctx->waitMu);
     BuildResult(*ctx, result);
-    if (!ctx->Done()) {
-        result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress");
-    }
+    if (!ctx->Done()) { result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress"); }
     return Status::OK();
 }
 
-Status AsuTransportImpl::Wait(TaskId task_id, std::uint64_t timeout_ms, TaskResult& result)
+Status AsuTransportImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& result)
 {
-    auto ctx = task_manager_.Get(task_id);
+    auto ctx = taskManager_.Get(taskId);
     if (!ctx) { return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found"); }
 
-    std::unique_lock<std::mutex> lock(ctx->wait_mu);
-    const bool done = timeout_ms == 0
-                          ? (ctx->cv.wait(lock, [ctx] { return ctx->Done(); }), true)
-                          : ctx->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                                             [ctx] { return ctx->Done(); });
+    std::unique_lock<std::mutex> lock(ctx->waitMu);
+    const bool done = timeoutMs == 0
+        ? (ctx->cv.wait(lock, [ctx] { return ctx->Done(); }), true)
+        : ctx->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [ctx] { return ctx->Done(); });
     BuildResult(*ctx, result);
     if (!done) {
         result.status = Status::Error(StatusCode::TIMEOUT, "transport task wait timeout");
         return result.status;
     }
     lock.unlock();
-    task_manager_.Remove(task_id);
+    taskManager_.Remove(taskId);
     return Status::OK();
 }
 
@@ -182,25 +171,26 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
 
 Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
 {
+    (void)handles;
     // TODO:
     return Status::OK();
 }
 
-Status AsuTransportImpl::SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& task_id)
+Status AsuTransportImpl::SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& taskId)
 {
-    auto status = task_manager_.Submit(std::move(ctx), task_id);
+    auto status = taskManager_.Submit(std::move(ctx), taskId);
     if (!status.ok()) { return status; }
 
-    auto raw_ctx = task_manager_.Get(task_id);
-    if (!raw_ctx) {
-        task_id = kInvalidTaskId;
+    auto rawCtx = taskManager_.Get(taskId);
+    if (!rawCtx) {
+        taskId = kInvalidTaskId;
         return Status::Error(StatusCode::INTERNAL_ERROR, "transport task disappeared after submit");
     }
 
-    std::lock_guard<std::mutex> lock(producer_mu_);
-    if (!execute_queue_.TryPush(std::move(raw_ctx))) {
-        task_manager_.Remove(task_id);
-        task_id = kInvalidTaskId;
+    std::lock_guard<std::mutex> lock(producerMu_);
+    if (!executeQueue_.TryPush(std::move(rawCtx))) {
+        taskManager_.Remove(taskId);
+        taskId = kInvalidTaskId;
         return Status::Error(StatusCode::RESOURCE_BUSY, "transport task queue is full");
     }
     return Status::OK();
@@ -208,7 +198,7 @@ Status AsuTransportImpl::SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, 
 
 void AsuTransportImpl::WorkerLoop()
 {
-    execute_queue_.ConsumerLoop(stop_, [this](TransportTaskContextPtr ctx) {
+    executeQueue_.ConsumerLoop(stop_, [this](TransportTaskContextPtr ctx) {
         if (!ctx) { return; }
         CompleteTask(ctx);
     });
@@ -226,96 +216,22 @@ void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
         return;
     }
 
-    std::lock_guard<std::mutex> lock(ctx->wait_mu);
-    if (ctx->op_type == TransportOpType::QUERY) {
-        ctx->query_result.exists.assign(ctx->keys.size, 0);
-        ctx->query_result.prefix_hit_keys = 0;
+    std::lock_guard<std::mutex> lock(ctx->waitMu);
+    if (ctx->opType == TransportOpType::QUERY) {
+        ctx->queryResult.exists.assign(ctx->keys.size, 0);
+        ctx->queryResult.prefixHitKeys = 0;
     }
-    ctx->final_status = Status::OK();
+    ctx->finalStatus = Status::OK();
     ctx->state.store(TransportTaskState::COMPLETED, std::memory_order_release);
     ctx->cv.notify_all();
 }
 
 void AsuTransportImpl::BuildResult(const TransportTaskContext& ctx, TaskResult& result)
 {
-    result.status = ctx.final_status;
-    result.entry_status = ctx.entry_status;
-    result.query_result.reset();
-    if (ctx.op_type == TransportOpType::QUERY) { result.query_result = ctx.query_result; }
-}
-
-Status AsuTransportImpl::CheckHealth() { return Status::OK(); }
-
-Status AsuTransportImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions&,
-                               QueryResult& result)
-{
-    result.exists.assign(keys.size(), 0);
-    result.prefix_hit_keys = 0;
-    return Unsupported("asu transport query backend is not implemented");
-}
-
-Status AsuTransportImpl::QueryAsync(const std::vector<CacheKey>&, const QueryOptions&,
-                                    TaskId& taskId)
-{
-    taskId = kInvalidTaskId;
-    return Unsupported("asu transport async query backend is not implemented");
-}
-
-Status AsuTransportImpl::LoadAsync(const std::vector<KVBuffer>&, TaskId& taskId)
-{
-    taskId = kInvalidTaskId;
-    return Unsupported("asu transport load backend is not implemented");
-}
-
-Status AsuTransportImpl::StoreAsync(const std::vector<KVBuffer>&, TaskId& taskId)
-{
-    taskId = kInvalidTaskId;
-    return Unsupported("asu transport store backend is not implemented");
-}
-
-Status AsuTransportImpl::DeleteAsync(const std::vector<CacheKey>&, TaskId& taskId)
-{
-    taskId = kInvalidTaskId;
-    return Unsupported("asu transport delete backend is not implemented");
-}
-
-Status AsuTransportImpl::Cancel(TaskId)
-{
-    return Unsupported("asu transport cancel is not implemented");
-}
-
-Status AsuTransportImpl::Check(TaskId, TaskResult& result)
-{
-    result.status = Unsupported("asu transport task check is not implemented");
-    result.entry_status.clear();
-    result.query_result.reset();
-    return result.status;
-}
-
-Status AsuTransportImpl::Wait(TaskId taskId, std::uint64_t, TaskResult& result)
-{
-    return Check(taskId, result);
-}
-
-Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
-                                         std::vector<RegisterResult>& results)
-{
-    const auto status = Unsupported("asu transport memory registration is not implemented");
-    results.assign(regions.size(), RegisterResult{status, kInvalidMRHandle});
-    return status;
-}
-
-Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemory>& regions,
-                                               std::vector<RegisterResult>& results)
-{
-    const auto status = Unsupported("asu transport registered memory binding is not implemented");
-    results.assign(regions.size(), RegisterResult{status, kInvalidMRHandle});
-    return status;
-}
-
-Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>&)
-{
-    return Unsupported("asu transport memory unregistration is not implemented");
+    result.status = ctx.finalStatus;
+    result.entryStatus = ctx.entryStatus;
+    result.queryResult.reset();
+    if (ctx.opType == TransportOpType::QUERY) { result.queryResult = ctx.queryResult; }
 }
 
 std::unique_ptr<AsuTransport> CreateAsuTransport() { return std::make_unique<AsuTransportImpl>(); }

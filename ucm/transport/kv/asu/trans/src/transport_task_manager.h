@@ -58,20 +58,20 @@ struct BatchView {
 };
 
 struct TransportTaskContext {
-    TaskId task_id{kInvalidTaskId};
-    TransportOpType op_type{TransportOpType::QUERY};
+    TaskId taskId{kInvalidTaskId};
+    TransportOpType opType{TransportOpType::QUERY};
     BatchView<CacheKey> keys;
     BatchView<KVBuffer> entries;
-    QueryOptions query_options;
-    QueryResult query_result;
-    std::vector<Status> entry_status;
+    QueryOptions queryOptions;
+    QueryResult queryResult;
+    std::vector<Status> entryStatus;
 
     std::atomic<TransportTaskState> state{TransportTaskState::PENDING};
-    Status final_status{StatusCode::OK};
+    Status finalStatus{Status::OK()};
 
-    std::vector<MRHandle> mr_handles;
+    std::vector<MRHandle> mrHandles;
 
-    std::mutex wait_mu;
+    std::mutex waitMu;
     std::condition_variable cv;
 
     bool Done() const
