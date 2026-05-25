@@ -560,7 +560,7 @@ AsuClientConfig MakeClientConfig(const std::vector<AsuId>& allAsuIds,
     config.viewServer = std::move(viewServer);
     config.defaultWaitTimeoutMs = 1000;
     config.hash = StableHash;
-    config.hashTable.virtualNodeCount = 64;
+    config.hashTable.ringHash.virtualNodeCount = 64;
     for (auto asuId : allAsuIds) {
         TransportConfig transportConfig;
         transportConfig.asuId = asuId;

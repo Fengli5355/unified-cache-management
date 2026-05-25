@@ -52,7 +52,8 @@ Status AsuTransportImpl::Shutdown()
     for (const auto& ctx : taskManager_.GetAll()) {
         if (ctx == nullptr || ctx->Done()) { continue; }
         std::lock_guard<std::mutex> lock(ctx->waitMu);
-        ctx->finalStatus = Status::Error(StatusCode::CANCELED, "transport task canceled by shutdown");
+        ctx->finalStatus =
+            Status::Error(StatusCode::CANCELED, "transport task canceled by shutdown");
         ctx->state.store(TransportTaskState::CANCELED, std::memory_order_release);
         ctx->cv.notify_all();
     }
@@ -146,7 +147,9 @@ Status AsuTransportImpl::Check(TaskId taskId, TaskResult& result)
 
     std::lock_guard<std::mutex> lock(ctx->waitMu);
     BuildResult(*ctx, result);
-    if (!ctx->Done()) { result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress"); }
+    if (!ctx->Done()) {
+        result.status = Status::Error(StatusCode::IN_PROGRESS, "transport task in progress");
+    }
     return Status::OK();
 }
 
@@ -156,9 +159,9 @@ Status AsuTransportImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult
     if (!ctx) { return Status::Error(StatusCode::TASK_NOT_FOUND, "transport task not found"); }
 
     std::unique_lock<std::mutex> lock(ctx->waitMu);
-    const bool done = timeoutMs == 0
-        ? (ctx->cv.wait(lock, [ctx] { return ctx->Done(); }), true)
-        : ctx->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [ctx] { return ctx->Done(); });
+    const bool done = timeoutMs == 0 ? (ctx->cv.wait(lock, [ctx] { return ctx->Done(); }), true)
+                                     : ctx->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                                        [ctx] { return ctx->Done(); });
     BuildResult(*ctx, result);
     if (!done) {
         result.status = Status::Error(StatusCode::TIMEOUT, "transport task wait timeout");

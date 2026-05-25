@@ -41,17 +41,46 @@ constexpr NodeId kInvalidNodeId = UINT64_MAX;
 constexpr std::uint64_t kDefaultVirtualNodeCount = 128;
 constexpr std::uint64_t kDefaultMaglevTableSize = 65537;
 
-// HashTableType selects the routing table implementation.
+// HashTableType selects the routing strategy implementation.
 enum class HashTableType {
-    RING_HASH = 0,
-    MAGLEV = 1,
+    RING_HASH_FULL_SPREAD = 0,
+    MAGLEV_FULL_SPREAD = 1,
+    CONTIGUOUS_BLOCK_AFFINITY = 2,
+    BATCH_TOPK_AFFINITY = 3,
+    RING_HASH = RING_HASH_FULL_SPREAD,
+    MAGLEV = MAGLEV_FULL_SPREAD,
 };
 
-// HashTableConfig controls router construction parameters.
-struct HashTableConfig {
-    HashTableType type{HashTableType::RING_HASH};
+// RingHashConfig controls the full-spread ring-hash strategy.
+struct RingHashConfig {
     std::uint64_t virtualNodeCount{kDefaultVirtualNodeCount};
-    std::uint64_t maglevTableSize{kDefaultMaglevTableSize};
+};
+
+// MaglevConfig controls the full-spread Maglev strategy.
+struct MaglevConfig {
+    std::uint64_t tableSize{kDefaultMaglevTableSize};
+};
+
+// ContiguousBlockAffinityConfig keeps each K-sized key range on the same node.
+struct ContiguousBlockAffinityConfig {
+    std::uint64_t blockCount{1};
+    HashTableType fullSpreadType{HashTableType::RING_HASH_FULL_SPREAD};
+    bool dynamicAdjustEnabled{false};
+};
+
+// BatchTopKAffinityConfig limits each batch to a TopK node candidate set.
+struct BatchTopKAffinityConfig {
+    std::uint64_t topK{1};
+    bool dynamicAdjustEnabled{false};
+};
+
+// HashTableConfig controls router construction and routing strategy parameters.
+struct HashTableConfig {
+    HashTableType type{HashTableType::RING_HASH_FULL_SPREAD};
+    RingHashConfig ringHash;
+    MaglevConfig maglev;
+    ContiguousBlockAffinityConfig contiguousBlockAffinity;
+    BatchTopKAffinityConfig batchTopKAffinity;
 };
 
 // Router maps cache keys to generic node identifiers.
@@ -62,7 +91,7 @@ public:
     // Destroys the router interface.
     virtual ~Router() = default;
     // Routes cache keys to node identifiers.
-    std::unordered_map<NodeId, std::vector<EntryIndex>> RouteKeys(
+    virtual std::unordered_map<NodeId, std::vector<EntryIndex>> RouteKeys(
         const std::vector<CacheKey>& keys) const;
 
 protected:
@@ -106,6 +135,46 @@ private:
 
     HashTableConfig config_;
     std::vector<NodeId> lookupTable_;
+};
+
+// ContiguousBlockAffinityRouter routes every K contiguous keys to the same node.
+class ContiguousBlockAffinityRouter final : public Router {
+public:
+    // Builds a contiguous-block affinity strategy over a configured full-spread router.
+    ContiguousBlockAffinityRouter(const std::vector<NodeId>& nodeIds, HashFunction hash,
+                                  HashTableConfig config);
+
+    // Routes keys by anchoring each K-sized range to its first key.
+    std::unordered_map<NodeId, std::vector<EntryIndex>> RouteKeys(
+        const std::vector<CacheKey>& keys) const override;
+
+private:
+    // Returns the owner selected by the underlying full-spread router.
+    NodeId RouteKey(const CacheKey& key) const override;
+
+    HashTableConfig config_;
+    std::shared_ptr<Router> fullSpreadRouter_;
+};
+
+// BatchTopKAffinityRouter limits each batch to a TopK ASU candidate set.
+class BatchTopKAffinityRouter final : public Router {
+public:
+    // Builds a batch TopK affinity strategy over active node identifiers.
+    BatchTopKAffinityRouter(const std::vector<NodeId>& nodeIds, HashFunction hash,
+                            HashTableConfig config);
+
+    // Routes one RouteKeys call through a batch-specific TopK node candidate set.
+    std::unordered_map<NodeId, std::vector<EntryIndex>> RouteKeys(
+        const std::vector<CacheKey>& keys) const override;
+
+private:
+    // Returns the owner selected from all active nodes.
+    NodeId RouteKey(const CacheKey& key) const override;
+    // Selects the TopK candidates for one batch fingerprint.
+    std::vector<NodeId> SelectCandidates(const CacheKey& batchKey) const;
+
+    HashTableConfig config_;
+    std::vector<NodeId> nodeIds_;
 };
 
 // Creates a router for the selected hash table configuration.

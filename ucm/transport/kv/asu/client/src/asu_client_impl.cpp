@@ -723,9 +723,9 @@ Status AsuClientImpl::WaitTaskContext(const ClientTaskContextPtr& ctx, std::uint
             anyFailed = anyFailed || subTask.failed;
         }
         if (allDone) {
-            ctx->finalStatus =
-                anyFailed ? Status::Error(StatusCode::PARTIAL_FAILED, "client task partially failed")
-                          : Status::OK();
+            ctx->finalStatus = anyFailed ? Status::Error(StatusCode::PARTIAL_FAILED,
+                                                         "client task partially failed")
+                                         : Status::OK();
             ctx->state.store(anyFailed ? ClientTaskState::FAILED : ClientTaskState::COMPLETED,
                              std::memory_order_release);
             ctx->cv.notify_all();

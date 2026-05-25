@@ -1,3 +1,4 @@
+#include "asu_client_impl.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -13,7 +14,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include "asu_client_impl.h"
 
 namespace UC::ASU {
 
@@ -171,8 +171,8 @@ public:
             statusIter == state_->checkResultStatus.end() ? Status::OK() : statusIter->second;
         auto entryIter = state_->checkEntryStatus.find(config_.asuId);
         result.entryStatus = entryIter == state_->checkEntryStatus.end()
-                                  ? std::vector<Status>{result.status}
-                                  : entryIter->second;
+                                 ? std::vector<Status>{result.status}
+                                 : entryIter->second;
         result.queryResult.reset();
         if (taskId == 0) {
             return Status::Error(StatusCode::TASK_NOT_FOUND, "fake task not found");
@@ -289,7 +289,7 @@ AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
         transportConfig.asuId = asuId;
         config.transportConfigs.emplace_back(std::move(transportConfig));
     }
-    config.hashTable.virtualNodeCount = 1;
+    config.hashTable.ringHash.virtualNodeCount = 1;
     config.hash = [](const std::string& key) -> std::uint64_t {
         static const std::unordered_map<std::string, std::uint64_t> values{
             {"vn-0#node-10", 10},
@@ -384,8 +384,8 @@ AsuClientConfig MakeDistributionConfig(const std::vector<AsuId>& asuIds, HashTab
     auto config = MakeConfig(asuIds);
     config.hash = hashFunc;
     config.hashTable.type = type;
-    config.hashTable.virtualNodeCount = 256;
-    config.hashTable.maglevTableSize = 65537;
+    config.hashTable.ringHash.virtualNodeCount = 256;
+    config.hashTable.maglev.tableSize = 65537;
     return config;
 }
 
@@ -395,8 +395,8 @@ std::unordered_map<CacheKey, AsuId> CaptureKeyRoutes(const std::vector<AsuId>& a
 {
     std::unordered_map<CacheKey, AsuId> routes;
     auto config = MakeDistributionConfig(asuIds, type, std::move(hashFunc));
-    config.hashTable.virtualNodeCount = 512;
-    config.hashTable.maglevTableSize = 65537;
+    config.hashTable.ringHash.virtualNodeCount = 512;
+    config.hashTable.maglev.tableSize = 65537;
 
     auto state = std::make_shared<TestState>();
     auto client = CreateAsuClient(MakeFactory(state));
@@ -744,10 +744,7 @@ TEST(AsuClientImplTest, Query_PrefixPartialFailureIncludesAsuContext)
 TEST(AsuClientImplTest, Query_PrefixResultSizeMismatchReturnsInternalError)
 {
     auto state = std::make_shared<TestState>();
-    state->prefixQueryResults[10] = QueryResult{
-        {1},
-        1
-    };
+    state->prefixQueryResults[10] = QueryResult{{1}, 1};
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
 
@@ -985,12 +982,8 @@ TEST(AsuClientImplTest, SnapshotRefresh_BuildFailureKeepsOldSnapshot)
     auto state = std::make_shared<TestState>();
     state->failFirstQuery = true;
     auto config = MakeConfig({10});
-    auto viewServer = std::make_shared<FakeViewServer>(
-        std::vector<std::vector<AsuId>>{
-            {10},
-            {20}
-    },
-        std::vector<std::uint64_t>{1, 2});
+    auto viewServer = std::make_shared<FakeViewServer>(std::vector<std::vector<AsuId>>{{10}, {20}},
+                                                       std::vector<std::uint64_t>{1, 2});
     config.viewServer = viewServer;
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(config).ok());
@@ -1540,7 +1533,7 @@ TEST(AsuClientImplTest, Hash_RingHashModeBuildsAndRoutes)
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20, 30});
     config.hashTable.type = HashTableType::RING_HASH;
-    config.hashTable.virtualNodeCount = 1;
+    config.hashTable.ringHash.virtualNodeCount = 1;
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(config).ok());
 
@@ -1596,7 +1589,7 @@ TEST(AsuClientImplTest, Hash_MaglevModeBuildsAndRoutes)
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20, 30});
     config.hashTable.type = HashTableType::MAGLEV;
-    config.hashTable.maglevTableSize = 7;
+    config.hashTable.maglev.tableSize = 7;
     auto client = CreateAsuClient(MakeFactory(state));
     ASSERT_TRUE(client->Init(config).ok());
 
@@ -1645,6 +1638,130 @@ TEST(AsuClientImplTest, Hash_StableHashMaglevDistributionIsBalanced)
 
     EXPECT_TRUE(status.ok()) << status.message;
     ExpectBalancedDistribution(state->queryKeyCounts, asuIds, kKeyCount, kMaxSkewRatio);
+}
+
+TEST(AsuClientImplTest, Hash_ContiguousBlockAffinityRoutesKKeysTogether)
+{
+    constexpr std::uint64_t kContiguousBlockCount = 3;
+    constexpr std::size_t kKeyCount = 12;
+
+    auto state = std::make_shared<TestState>();
+    auto config =
+        MakeDistributionConfig(MakeAsuIds(8), HashTableType::CONTIGUOUS_BLOCK_AFFINITY, StableHash);
+    config.hashTable.contiguousBlockAffinity.blockCount = kContiguousBlockCount;
+    config.hashTable.contiguousBlockAffinity.dynamicAdjustEnabled = true;
+
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    std::unordered_map<CacheKey, AsuId> routes;
+    for (const auto& item : state->queryKeys) {
+        for (const auto& key : item.second) { routes.emplace(key, item.first); }
+    }
+
+    for (std::size_t begin = 0; begin < keys.size(); begin += kContiguousBlockCount) {
+        auto routeIter = routes.find(keys[begin]);
+        ASSERT_NE(routeIter, routes.end());
+        const auto groupAsuId = routeIter->second;
+        const auto end = std::min<std::size_t>(keys.size(), begin + kContiguousBlockCount);
+        for (std::size_t index = begin; index < end; ++index) {
+            auto iter = routes.find(keys[index]);
+            ASSERT_NE(iter, routes.end());
+            EXPECT_EQ(iter->second, groupAsuId) << "key=" << keys[index];
+        }
+    }
+}
+
+TEST(AsuClientImplTest, Hash_ContiguousBlockAffinityUsesConfiguredFullSpreadType)
+{
+    constexpr std::uint64_t kContiguousBlockCount = 4;
+    constexpr std::size_t kKeyCount = 16;
+
+    auto asuIds = MakeAsuIds(8);
+    auto state = std::make_shared<TestState>();
+    auto config =
+        MakeDistributionConfig(asuIds, HashTableType::CONTIGUOUS_BLOCK_AFFINITY, StableHash);
+    config.hashTable.contiguousBlockAffinity.blockCount = kContiguousBlockCount;
+    config.hashTable.contiguousBlockAffinity.fullSpreadType = HashTableType::MAGLEV_FULL_SPREAD;
+
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto keys = MakeKeys(kKeyCount);
+    auto status = client->Query(keys, QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    std::unordered_map<CacheKey, AsuId> routes;
+    for (const auto& item : state->queryKeys) {
+        for (const auto& key : item.second) { routes.emplace(key, item.first); }
+    }
+
+    std::vector<UC::KV::NodeId> nodeIds(asuIds.begin(), asuIds.end());
+    auto maglevConfig = config.hashTable;
+    maglevConfig.type = HashTableType::MAGLEV_FULL_SPREAD;
+    auto maglevRouter = UC::KV::CreateRouter(nodeIds, StableHash, maglevConfig);
+
+    for (std::size_t begin = 0; begin < keys.size(); begin += kContiguousBlockCount) {
+        const auto expectedRoute = maglevRouter->RouteKeys({keys[begin]});
+        ASSERT_EQ(expectedRoute.size(), std::size_t{1});
+        const auto expectedAsuId = expectedRoute.begin()->first;
+        const auto end = std::min<std::size_t>(keys.size(), begin + kContiguousBlockCount);
+        for (std::size_t index = begin; index < end; ++index) {
+            auto iter = routes.find(keys[index]);
+            ASSERT_NE(iter, routes.end());
+            EXPECT_EQ(iter->second, expectedAsuId) << "key=" << keys[index];
+        }
+    }
+}
+
+TEST(AsuClientImplTest, Hash_ContiguousBlockAffinityRejectsNonFullSpreadType)
+{
+    auto state = std::make_shared<TestState>();
+    auto config =
+        MakeDistributionConfig(MakeAsuIds(8), HashTableType::CONTIGUOUS_BLOCK_AFFINITY, StableHash);
+    config.hashTable.contiguousBlockAffinity.blockCount = 2;
+    config.hashTable.contiguousBlockAffinity.fullSpreadType = HashTableType::BATCH_TOPK_AFFINITY;
+
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query(MakeKeys(8), QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_TRUE(state->queryCalls.empty());
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>(8, 0));
+}
+
+TEST(AsuClientImplTest, Hash_BatchTopKAffinityLimitsTouchedAsus)
+{
+    constexpr std::size_t kAsuCount = 16;
+    constexpr std::size_t kKeyCount = 100;
+    constexpr std::size_t kTopK = 3;
+
+    auto state = std::make_shared<TestState>();
+    auto config = MakeDistributionConfig(MakeAsuIds(kAsuCount), HashTableType::BATCH_TOPK_AFFINITY,
+                                         StableHash);
+    config.hashTable.batchTopKAffinity.topK = kTopK;
+    config.hashTable.batchTopKAffinity.dynamicAdjustEnabled = true;
+
+    auto client = CreateAsuClient(MakeFactory(state));
+    ASSERT_TRUE(client->Init(config).ok());
+
+    QueryResult result;
+    auto status = client->Query(MakeKeys(kKeyCount), QueryOptions{}, result);
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_LE(state->queryKeyCounts.size(), kTopK);
+    std::size_t routedKeyCount = 0;
+    for (const auto& item : state->queryKeyCounts) { routedKeyCount += item.second; }
+    EXPECT_EQ(routedKeyCount, kKeyCount);
 }
 
 TEST(AsuClientImplTest, Hash_RingHashMigrationRatioIsBoundedWhenAsuIsAdded)

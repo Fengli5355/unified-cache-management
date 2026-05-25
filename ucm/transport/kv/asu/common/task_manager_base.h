@@ -45,8 +45,7 @@ public:
     {
         if (!ctx) {
             taskId = kInvalidTaskId;
-            return Status::Error(StatusCode::INVALID_ARGUMENT,
-                                 taskName_ + " task context is null");
+            return Status::Error(StatusCode::INVALID_ARGUMENT, taskName_ + " task context is null");
         }
 
         auto sharedCtx = std::shared_ptr<Context>(std::move(ctx));

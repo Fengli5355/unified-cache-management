@@ -94,6 +94,43 @@ bool IsPrime(std::uint64_t value)
     return true;
 }
 
+std::vector<NodeId> NormalizeNodeIds(const std::vector<NodeId>& nodeIds)
+{
+    std::vector<NodeId> activeNodeIds;
+    for (auto nodeId : nodeIds) {
+        if (nodeId == kInvalidNodeId ||
+            std::find(activeNodeIds.begin(), activeNodeIds.end(), nodeId) != activeNodeIds.end()) {
+            continue;
+        }
+        activeNodeIds.emplace_back(nodeId);
+    }
+    return activeNodeIds;
+}
+
+std::string BuildBatchKey(const std::vector<CacheKey>& keys)
+{
+    std::string batchKey = "batch-size#" + std::to_string(keys.size());
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        batchKey += "#";
+        batchKey += std::to_string(index);
+        batchKey += ":";
+        batchKey += keys[index];
+    }
+    return batchKey;
+}
+
+std::shared_ptr<Router> CreateFullSpreadRouter(const std::vector<NodeId>& nodeIds,
+                                               HashFunction hash, HashTableConfig config)
+{
+    switch (config.type) {
+        case HashTableType::MAGLEV_FULL_SPREAD:
+            return std::make_shared<MaglevRouter>(nodeIds, std::move(hash), config);
+        case HashTableType::RING_HASH_FULL_SPREAD:
+            return std::make_shared<RingHashRouter>(nodeIds, std::move(hash), config);
+        default: return nullptr;
+    }
+}
+
 Router::Router(HashFunction hash) : hash_(std::move(hash))
 {
     if (!hash_) { hash_ = Crc32IEEE; }
@@ -120,15 +157,9 @@ RingHashRouter::RingHashRouter(const std::vector<NodeId>& nodeIds, HashFunction 
 void RingHashRouter::Build(const std::vector<NodeId>& nodeIds)
 {
     RingData ringData;
-    std::vector<NodeId> addedNodeIds;
-    for (auto nodeId : nodeIds) {
-        if (nodeId == kInvalidNodeId ||
-            std::find(addedNodeIds.begin(), addedNodeIds.end(), nodeId) != addedNodeIds.end()) {
-            continue;
-        }
-
-        addedNodeIds.emplace_back(nodeId);
-        for (std::uint64_t index = 0; index < config_.virtualNodeCount; ++index) {
+    const auto activeNodeIds = NormalizeNodeIds(nodeIds);
+    for (auto nodeId : activeNodeIds) {
+        for (std::uint64_t index = 0; index < config_.ringHash.virtualNodeCount; ++index) {
             if (!InsertVirtualNode(ringData, nodeId, index, hash_)) { break; }
         }
     }
@@ -158,19 +189,12 @@ MaglevRouter::MaglevRouter(const std::vector<NodeId>& nodeIds, HashFunction hash
 
 void MaglevRouter::Build(const std::vector<NodeId>& nodeIds)
 {
-    if (!IsPrime(config_.maglevTableSize)) { config_.maglevTableSize = kDefaultMaglevTableSize; }
+    if (!IsPrime(config_.maglev.tableSize)) { config_.maglev.tableSize = kDefaultMaglevTableSize; }
 
-    std::vector<NodeId> activeNodeIds;
-    for (auto nodeId : nodeIds) {
-        if (nodeId == kInvalidNodeId ||
-            std::find(activeNodeIds.begin(), activeNodeIds.end(), nodeId) != activeNodeIds.end()) {
-            continue;
-        }
-        activeNodeIds.emplace_back(nodeId);
-    }
+    auto activeNodeIds = NormalizeNodeIds(nodeIds);
     if (activeNodeIds.empty()) { return; }
 
-    lookupTable_.assign(config_.maglevTableSize, kInvalidNodeId);
+    lookupTable_.assign(config_.maglev.tableSize, kInvalidNodeId);
     std::vector<std::uint64_t> offsets;
     std::vector<std::uint64_t> skips;
     std::vector<std::uint64_t> next;
@@ -180,19 +204,20 @@ void MaglevRouter::Build(const std::vector<NodeId>& nodeIds)
 
     for (auto nodeId : activeNodeIds) {
         auto value = std::to_string(nodeId);
-        offsets.emplace_back(hash_("maglev-offset#node-" + value) % config_.maglevTableSize);
-        skips.emplace_back(hash_("maglev-skip#node-" + value) % (config_.maglevTableSize - 1) + 1);
+        offsets.emplace_back(hash_("maglev-offset#node-" + value) % config_.maglev.tableSize);
+        skips.emplace_back(hash_("maglev-skip#node-" + value) % (config_.maglev.tableSize - 1) + 1);
     }
 
     std::uint64_t filled = 0;
-    while (filled < config_.maglevTableSize) {
+    while (filled < config_.maglev.tableSize) {
         for (std::size_t index = 0;
-             index < activeNodeIds.size() && filled < config_.maglevTableSize; ++index) {
+             index < activeNodeIds.size() && filled < config_.maglev.tableSize; ++index) {
             auto candidate =
-                (offsets[index] + next[index] * skips[index]) % config_.maglevTableSize;
+                (offsets[index] + next[index] * skips[index]) % config_.maglev.tableSize;
             ++next[index];
             while (lookupTable_[candidate] != kInvalidNodeId) {
-                candidate = (offsets[index] + next[index] * skips[index]) % config_.maglevTableSize;
+                candidate =
+                    (offsets[index] + next[index] * skips[index]) % config_.maglev.tableSize;
                 ++next[index];
             }
             lookupTable_[candidate] = activeNodeIds[index];
@@ -207,13 +232,112 @@ NodeId MaglevRouter::RouteKey(const CacheKey& key) const
     return lookupTable_[hash_(key) % lookupTable_.size()];
 }
 
+ContiguousBlockAffinityRouter::ContiguousBlockAffinityRouter(const std::vector<NodeId>& nodeIds,
+                                                             HashFunction hash,
+                                                             HashTableConfig config)
+    : Router(hash), config_(config)
+{
+    if (config_.contiguousBlockAffinity.blockCount == 0) {
+        config_.contiguousBlockAffinity.blockCount = 1;
+    }
+
+    auto fullSpreadConfig = config_;
+    fullSpreadConfig.type = config_.contiguousBlockAffinity.fullSpreadType;
+    fullSpreadRouter_ = CreateFullSpreadRouter(nodeIds, std::move(hash), fullSpreadConfig);
+}
+
+std::unordered_map<NodeId, std::vector<Router::EntryIndex>>
+ContiguousBlockAffinityRouter::RouteKeys(const std::vector<CacheKey>& keys) const
+{
+    std::unordered_map<NodeId, std::vector<EntryIndex>> routes;
+    if (!fullSpreadRouter_) { return routes; }
+
+    const auto blockCount = std::max<std::uint64_t>(1, config_.contiguousBlockAffinity.blockCount);
+    for (EntryIndex begin = 0; begin < keys.size(); begin += blockCount) {
+        const auto nodeId = RouteKey(keys[begin]);
+        if (nodeId == kInvalidNodeId) { continue; }
+
+        const auto end = std::min<std::uint64_t>(keys.size(), begin + blockCount);
+        auto& indices = routes[nodeId];
+        for (EntryIndex index = begin; index < end; ++index) { indices.emplace_back(index); }
+    }
+    return routes;
+}
+
+NodeId ContiguousBlockAffinityRouter::RouteKey(const CacheKey& key) const
+{
+    if (!fullSpreadRouter_) { return kInvalidNodeId; }
+    auto routes = fullSpreadRouter_->RouteKeys({key});
+    if (routes.empty()) { return kInvalidNodeId; }
+    return routes.begin()->first;
+}
+
+BatchTopKAffinityRouter::BatchTopKAffinityRouter(const std::vector<NodeId>& nodeIds,
+                                                 HashFunction hash, HashTableConfig config)
+    : Router(std::move(hash)), config_(config), nodeIds_(NormalizeNodeIds(nodeIds))
+{
+    if (config_.batchTopKAffinity.topK == 0) { config_.batchTopKAffinity.topK = 1; }
+}
+
+std::unordered_map<NodeId, std::vector<Router::EntryIndex>> BatchTopKAffinityRouter::RouteKeys(
+    const std::vector<CacheKey>& keys) const
+{
+    std::unordered_map<NodeId, std::vector<EntryIndex>> routes;
+    auto candidates = SelectCandidates(BuildBatchKey(keys));
+    if (candidates.empty()) { return routes; }
+
+    for (EntryIndex index = 0; index < keys.size(); ++index) {
+        auto nodeId = candidates[hash_("batch-topk-key#" + keys[index]) % candidates.size()];
+        routes[nodeId].emplace_back(index);
+    }
+    return routes;
+}
+
+NodeId BatchTopKAffinityRouter::RouteKey(const CacheKey& key) const
+{
+    if (nodeIds_.empty()) { return kInvalidNodeId; }
+    return nodeIds_[hash_(key) % nodeIds_.size()];
+}
+
+std::vector<NodeId> BatchTopKAffinityRouter::SelectCandidates(const CacheKey& batchKey) const
+{
+    if (nodeIds_.empty()) { return {}; }
+
+    std::vector<std::pair<std::uint64_t, NodeId>> scores;
+    scores.reserve(nodeIds_.size());
+    for (auto nodeId : nodeIds_) {
+        scores.emplace_back(
+            hash_("batch-topk-candidate#" + batchKey + "#node-" + std::to_string(nodeId)), nodeId);
+    }
+
+    std::sort(scores.begin(), scores.end());
+    const auto candidateCount = std::min<std::size_t>(
+        scores.size(), static_cast<std::size_t>(config_.batchTopKAffinity.topK));
+    std::vector<NodeId> candidates;
+    candidates.reserve(candidateCount);
+    for (std::size_t index = 0; index < candidateCount; ++index) {
+        candidates.emplace_back(scores[index].second);
+    }
+    return candidates;
+}
+
 std::shared_ptr<Router> CreateRouter(const std::vector<NodeId>& nodeIds, HashFunction hash,
                                      HashTableConfig config)
 {
-    if (config.type == HashTableType::MAGLEV) {
-        return std::make_shared<MaglevRouter>(nodeIds, std::move(hash), config);
+    switch (config.type) {
+        case HashTableType::MAGLEV_FULL_SPREAD:
+            return CreateFullSpreadRouter(nodeIds, std::move(hash), config);
+        case HashTableType::CONTIGUOUS_BLOCK_AFFINITY:
+            return std::make_shared<ContiguousBlockAffinityRouter>(nodeIds, std::move(hash),
+                                                                   config);
+        case HashTableType::BATCH_TOPK_AFFINITY:
+            return std::make_shared<BatchTopKAffinityRouter>(nodeIds, std::move(hash), config);
+        case HashTableType::RING_HASH_FULL_SPREAD:
+            return CreateFullSpreadRouter(nodeIds, std::move(hash), config);
+        default:
+            config.type = HashTableType::RING_HASH_FULL_SPREAD;
+            return CreateFullSpreadRouter(nodeIds, std::move(hash), config);
     }
-    return std::make_shared<RingHashRouter>(nodeIds, std::move(hash), config);
 }
 
 }  // namespace UC::KV
