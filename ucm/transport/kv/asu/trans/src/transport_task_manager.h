@@ -26,6 +26,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 #include "asu_transport/types.h"
@@ -57,6 +58,11 @@ struct BatchView {
     bool empty() const noexcept { return size == 0; }
 };
 
+struct TransportSubBatchResult {
+    std::uint32_t batchIndex{0};
+    std::vector<Status> entryStatus;
+};
+
 struct TransportTaskContext {
     TaskId taskId{kInvalidTaskId};
     TransportOpType opType{TransportOpType::QUERY};
@@ -65,6 +71,7 @@ struct TransportTaskContext {
     QueryOptions queryOptions;
     QueryResult queryResult;
     std::vector<Status> entryStatus;
+    std::vector<TransportSubBatchResult> subBatchResults;
 
     std::atomic<TransportTaskState> state{TransportTaskState::PENDING};
     Status finalStatus{Status::OK()};

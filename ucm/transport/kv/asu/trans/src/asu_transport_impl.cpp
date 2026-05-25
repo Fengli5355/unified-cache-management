@@ -251,11 +251,25 @@ void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
         return;
     }
 
+    std::vector<TransportSubBatchResult> subBatchResults;
+    if (ctx->opType == TransportOpType::LOAD || ctx->opType == TransportOpType::STORE) {
+        const auto subBatches = io_scheduler_.SplitForAsu(ctx->entries, kAsuIoMaxNum);
+        subBatchResults.reserve(subBatches.size());
+        for (const auto& subBatch : subBatches) {
+            // TODO: submit each split IO batch to current ASU.
+            TransportSubBatchResult subResult;
+            subResult.batchIndex = subBatch.batchIndex;
+            subResult.entryStatus.assign(subBatch.entries.size, Status::OK());
+            subBatchResults.push_back(std::move(subResult));
+        }
+    }
+
     std::lock_guard<std::mutex> lock(ctx->waitMu);
     if (ctx->state.load(std::memory_order_acquire) == TransportTaskState::CANCELED) {
         ctx->cv.notify_all();
         return;
     }
+    if (!subBatchResults.empty()) { ctx->subBatchResults = std::move(subBatchResults); }
     if (ctx->opType == TransportOpType::QUERY) {
         ctx->queryResult.exists.assign(ctx->keys.size, 0);
         ctx->queryResult.prefixHitKeys = 0;
@@ -269,6 +283,23 @@ void AsuTransportImpl::BuildResult(const TransportTaskContext& ctx, TaskResult& 
 {
     result.status = ctx.finalStatus;
     result.entryStatus = ctx.entryStatus;
+    if (!ctx.subBatchResults.empty()) {
+        std::vector<const TransportSubBatchResult*> orderedResults;
+        orderedResults.reserve(ctx.subBatchResults.size());
+        for (const auto& subResult : ctx.subBatchResults) { orderedResults.push_back(&subResult); }
+        std::sort(orderedResults.begin(), orderedResults.end(),
+                  [](const auto* lhs, const auto* rhs) {
+                      return lhs->batchIndex < rhs->batchIndex;
+                  });
+
+        std::size_t resultIndex = 0;
+        for (const auto* subResult : orderedResults) {
+            for (const auto& status : subResult->entryStatus) {
+                if (resultIndex >= result.entryStatus.size()) { break; }
+                result.entryStatus[resultIndex++] = status;
+            }
+        }
+    }
     result.queryResult.reset();
     if (ctx.opType == TransportOpType::QUERY) { result.queryResult = ctx.queryResult; }
 }

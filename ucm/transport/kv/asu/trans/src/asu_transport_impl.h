@@ -29,6 +29,7 @@
 #include <thread>
 #include <unordered_map>
 #include "asu_transport/asu_transport.h"
+#include "io_scheduler.h"
 #include "template/spsc_ring_queue.h"
 #include "transport_task_manager.h"
 
@@ -66,12 +67,15 @@ public:
 
 private:
     using TransportTaskContextPtr = std::shared_ptr<TransportTaskContext>;
+    static constexpr std::size_t kAsuIoMaxNum = 128;
+
     Status SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& taskId);
     void WorkerLoop();
     void CompleteTask(const TransportTaskContextPtr& ctx);
     void BuildResult(const TransportTaskContext& ctx, TaskResult& result);
 
     TransportConfig config_;
+    IoScheduler io_scheduler_;
 
     TransportTaskManager taskManager_;
     // TODO: optimize spsc pattern or just submit to RDMA/UB directly ?
