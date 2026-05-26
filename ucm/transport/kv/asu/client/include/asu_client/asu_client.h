@@ -22,18 +22,17 @@
  * SOFTWARE.
  * */
 #pragma once
+#include <string>
 #include <vector>
 #include "asu_transport/types.h"
 
 namespace UC::ASU {
 
-struct AsuClientConfig;
-
 class AsuClient {
 public:
     virtual ~AsuClient() = default;
 
-    virtual Status Init(const AsuClientConfig& config) = 0;
+    virtual Status Init(const std::string& configPath) = 0;
     virtual Status Shutdown() = 0;
 
     virtual Status Query(const std::vector<CacheKey>& keys, const QueryOptions& options,

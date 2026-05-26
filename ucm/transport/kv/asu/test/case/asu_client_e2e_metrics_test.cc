@@ -498,7 +498,7 @@ public:
         std::lock_guard<std::mutex> lock{mutex_};
         view = GlobalView{};
         view.viewEpoch = epoch_;
-        for (auto asuId : asuIds_) { view.asuMap.emplace(asuId, AsuIps{}); }
+        for (auto asuId : asuIds_) { view.asuMap.emplace(asuId, AsuInfo{}); }
         ++fetchCount_;
         return Status::OK();
     }
@@ -552,12 +552,10 @@ std::uint64_t StableHash(const std::string& value)
     return hash ^ (hash >> 31U);
 }
 
-AsuClientConfig MakeClientConfig(const std::vector<AsuId>& allAsuIds,
-                                 std::shared_ptr<ViewServer> viewServer)
+AsuClientConfig MakeClientConfig(const std::vector<AsuId>& allAsuIds)
 {
     AsuClientConfig config;
     config.clientId = "asu-client-e2e-metrics-test";
-    config.viewServer = std::move(viewServer);
     config.defaultWaitTimeoutMs = 1000;
     config.hash = StableHash;
     config.hashTable.ringHash.virtualNodeCount = 64;
@@ -569,6 +567,11 @@ AsuClientConfig MakeClientConfig(const std::vector<AsuId>& allAsuIds,
         config.transportConfigs.emplace_back(std::move(transportConfig));
     }
     return config;
+}
+
+ViewServerFactory MakeViewServerFactory(const std::shared_ptr<ViewServer>& viewServer)
+{
+    return [viewServer](const AsuClientConfig&) { return viewServer; };
 }
 
 TransportFactory MakeFactory(const std::shared_ptr<ClusterState>& state)
@@ -757,8 +760,8 @@ TEST(AsuClientE2EMetricsTest, NormalWorkloadReportsPrecisionPerformanceAndResour
 {
     auto state = std::make_shared<ClusterState>();
     auto viewServer = std::make_shared<DynamicViewServer>(state, std::vector<AsuId>{1, 2, 3});
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2, 3}, viewServer)).ok());
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
+    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2, 3})).ok());
 
     MetricsRecorder metrics;
     std::vector<std::vector<std::uint8_t>> payloads;
@@ -812,8 +815,8 @@ TEST(AsuClientE2EMetricsTest, DiskMembershipChangesRefreshAndContinueWorkload)
 {
     auto state = std::make_shared<ClusterState>();
     auto viewServer = std::make_shared<DynamicViewServer>(state, std::vector<AsuId>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2, 3}, viewServer)).ok());
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
+    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2, 3})).ok());
 
     MetricsRecorder metrics;
     std::vector<std::vector<std::uint8_t>> payloads;
@@ -872,8 +875,8 @@ TEST(AsuClientE2EMetricsTest, NoDiskAndEmptyRequestsReturnStableStatuses)
     {
         auto state = std::make_shared<ClusterState>();
         auto viewServer = std::make_shared<DynamicViewServer>(state, std::vector<AsuId>{});
-        auto client = CreateAsuClient(MakeFactory(state));
-        ASSERT_TRUE(client->Init(MakeClientConfig({}, viewServer)).ok());
+        auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
+        ASSERT_TRUE(client->Init(MakeClientConfig({})).ok());
 
         QueryResult queryResult;
         auto status = client->Query({"missing-on-empty-view"}, QueryOptions{}, queryResult);
@@ -891,8 +894,8 @@ TEST(AsuClientE2EMetricsTest, NoDiskAndEmptyRequestsReturnStableStatuses)
 
     auto state = std::make_shared<ClusterState>();
     auto viewServer = std::make_shared<DynamicViewServer>(state, std::vector<AsuId>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2}, viewServer)).ok());
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
+    ASSERT_TRUE(client->Init(MakeClientConfig({1, 2})).ok());
 
     MetricsRecorder metrics;
     ASSERT_TRUE(QueryAndMeasure(*client, {}, {}, metrics));

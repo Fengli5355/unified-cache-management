@@ -19,6 +19,7 @@ namespace UC::ASU {
 
 struct TestState {
     std::uint32_t createdTransports{0};
+    std::unordered_map<AsuId, TransportConfig> initConfigs;
     bool failFirstQuery{false};
     bool firstQueryFailed{false};
     StatusCode firstQueryFailureCode{StatusCode::CONNECTION_ERROR};
@@ -60,6 +61,7 @@ public:
     Status Init(const TransportConfig& config) override
     {
         config_ = config;
+        state_->initConfigs[config_.asuId] = config_;
         initialized_ = true;
         return Status::OK();
     }
@@ -247,7 +249,7 @@ public:
         ++fetchCount_;
 
         view = GlobalView{};
-        for (auto asuId : views_[index]) { view.asuMap.emplace(asuId, AsuIps{}); }
+        for (auto asuId : views_[index]) { view.asuMap.emplace(asuId, AsuInfo{}); }
         view.viewEpoch = index < epochs_.size() ? epochs_[index] : fetchCount_;
         return Status::OK();
     }
@@ -279,6 +281,11 @@ bool WaitForFetchCount(const std::shared_ptr<FakeViewServer>& viewServer,
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return false;
+}
+
+ViewServerFactory MakeViewServerFactory(const std::shared_ptr<ViewServer>& viewServer)
+{
+    return [viewServer](const AsuClientConfig&) { return viewServer; };
 }
 
 AsuClientConfig MakeConfig(const std::vector<AsuId>& asuIds)
@@ -584,6 +591,10 @@ TEST(AsuClientImplTest, ViewServer_ConfigFileViewServerLoadsView)
         configFile << "viewEpoch=9\n";
         configFile << "viewId=7\n";
         configFile << "asuIds=20\n";
+        configFile << "asuInfo.20=protocol=uboe,placement=device,port=6000,"
+                   << "local.comm_id=192.168.1.20,local.phy_device_id=0,"
+                   << "tc=0,sl=0,send_size=4096,flag_size=8,"
+                   << "remote_send_addr=0x100000000,remote_flag_addr=0x200000000\n";
     }
 
     auto state = std::make_shared<TestState>();
@@ -601,18 +612,51 @@ TEST(AsuClientImplTest, ViewServer_ConfigFileViewServerLoadsView)
     EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1}));
     EXPECT_EQ(state->queryCalls, std::vector<AsuId>({20}));
+    ASSERT_EQ(state->initConfigs[20].endpoints.size(), std::size_t{1});
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].ip, "192.168.1.20");
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].port, std::uint16_t{6000});
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].protocol, Protocol::UB);
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].attrs["protocol"], "uboe");
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].attrs["placement"], "device");
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].attrs["send_size"], "4096");
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].attrs["remote_send_addr"], "4294967296");
+}
+
+TEST(AsuClientImplTest, Lifecycle_PublicInitLoadsClientConfigFile)
+{
+    constexpr const char* kConfigPath = "asu_client_impl_client_config_test.conf";
+    {
+        std::ofstream configFile{kConfigPath};
+        ASSERT_TRUE(configFile.is_open());
+        configFile << "clientId=file-init-test\n";
+        configFile << "transport.asuIds=10,20\n";
+        configFile << "hashTable.ringHash.virtualNodeCount=1\n";
+        configFile << "asuInfo.20=protocol=roce,placement=device,port=6000,"
+                   << "local.comm_id=192.168.1.20,local.phy_device_id=0\n";
+    }
+
+    auto state = std::make_shared<TestState>();
+    std::unique_ptr<AsuClient> client = CreateAsuClient(MakeFactory(state));
+    auto status = client->Init(kConfigPath);
+    std::remove(kConfigPath);
+
+    ASSERT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(state->createdTransports, std::uint32_t{2});
+    ASSERT_EQ(state->initConfigs[20].endpoints.size(), std::size_t{1});
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].ip, "192.168.1.20");
+    EXPECT_EQ(state->initConfigs[20].endpoints[0].protocol, Protocol::ROCE);
 }
 
 TEST(AsuClientImplTest, ViewServer_InitFailsWhenViewReferencesMissingTransportConfig)
 {
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10, 20}
     },
         std::vector<std::uint64_t>{1});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
 
     auto status = client->Init(config);
 
@@ -790,8 +834,7 @@ TEST(AsuClientImplTest, BackgroundRefresh_QueryDoesNotRefreshNonRefreshableError
     },
         std::vector<std::uint64_t>{1, 2});
     auto config = MakeConfig({10, 20});
-    config.viewServer = viewServer;
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -809,13 +852,13 @@ TEST(AsuClientImplTest, BackgroundRefresh_QueryRefreshesOnIoError)
     state->firstQueryFailureCode = StatusCode::IO_ERROR;
     state->firstQueryFailureMessage = "fake io error";
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -833,13 +876,13 @@ TEST(AsuClientImplTest, BackgroundRefresh_QueryRefreshesOnTimeout)
     state->firstQueryFailureCode = StatusCode::TIMEOUT;
     state->firstQueryFailureMessage = "fake timeout";
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -862,8 +905,7 @@ TEST(AsuClientImplTest, BackgroundRefresh_QueryKeepsOriginalErrorWhenViewFetchFa
         std::vector<std::uint64_t>{1, 2});
     viewServer->FailFetchAt(2);
     auto config = MakeConfig({10, 20});
-    config.viewServer = viewServer;
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -879,13 +921,13 @@ TEST(AsuClientImplTest, BackgroundRefresh_LoadReturnsErrorWithoutRetry)
     auto state = std::make_shared<TestState>();
     state->failFirstLoad = true;
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     TaskId taskId = kInvalidTaskId;
@@ -907,13 +949,13 @@ TEST(AsuClientImplTest, BackgroundRefresh_StoreReturnsErrorWithoutRetry)
     auto state = std::make_shared<TestState>();
     state->failFirstStore = true;
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     TaskId taskId = kInvalidTaskId;
@@ -935,13 +977,13 @@ TEST(AsuClientImplTest, BackgroundRefresh_DeleteReturnsErrorWithoutRetry)
     auto state = std::make_shared<TestState>();
     state->failFirstDelete = true;
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     TaskId taskId = kInvalidTaskId;
@@ -966,8 +1008,7 @@ TEST(AsuClientImplTest, ViewEpoch_DoesNotPublishSameOrOlderViewEpoch)
     },
         std::vector<std::uint64_t>{5, 5, 4});
     auto config = MakeConfig({10, 20});
-    config.viewServer = viewServer;
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -984,8 +1025,7 @@ TEST(AsuClientImplTest, SnapshotRefresh_BuildFailureKeepsOldSnapshot)
     auto config = MakeConfig({10});
     auto viewServer = std::make_shared<FakeViewServer>(std::vector<std::vector<AsuId>>{{10}, {20}},
                                                        std::vector<std::uint64_t>{1, 2});
-    config.viewServer = viewServer;
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     QueryResult result;
@@ -1035,16 +1075,18 @@ TEST(AsuClientImplTest, MemoryRegister_FirstRegisterFailureIncludesAsuContext)
 
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient([state] {
-        ++state->createdTransports;
-        return std::unique_ptr<AsuTransport>(new FailingRegisterTransport(state));
-    });
+    auto client = CreateAsuClient(
+        [state] {
+            ++state->createdTransports;
+            return std::unique_ptr<AsuTransport>(new FailingRegisterTransport(state));
+        },
+        MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     std::vector<RegisterResult> results;
@@ -1115,19 +1157,21 @@ TEST(AsuClientImplTest, MemoryRegister_BindFailureDoesNotCacheResource)
 
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20, 30});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10, 20},
             {10, 20, 30}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient([state] {
-        ++state->createdTransports;
-        if (state->createdTransports == 2) {
-            return std::unique_ptr<AsuTransport>(new FailingBindTransport(state));
-        }
-        return std::unique_ptr<AsuTransport>(new FakeTransport(state));
-    });
+    auto client = CreateAsuClient(
+        [state] {
+            ++state->createdTransports;
+            if (state->createdTransports == 2) {
+                return std::unique_ptr<AsuTransport>(new FailingBindTransport(state));
+            }
+            return std::unique_ptr<AsuTransport>(new FakeTransport(state));
+        },
+        MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     std::vector<RegisterResult> results;
@@ -1177,13 +1221,13 @@ TEST(AsuClientImplTest, MemoryRegister_UnregisterRemovesCachedResourceBeforeFutu
 {
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10},
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     std::vector<RegisterResult> results;
@@ -1264,8 +1308,7 @@ TEST(AsuClientImplTest, Task_CheckRefreshesViewOnRefreshableChildFailure)
             {10, 20}
     },
         std::vector<std::uint64_t>{1, 2});
-    config.viewServer = viewServer;
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     TaskId taskId = 0;
@@ -1463,11 +1506,11 @@ TEST(AsuClientImplTest, SnapshotRefresh_ReusesExistingTransportAndBindsResources
 {
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(std::vector<std::vector<AsuId>>{
+    auto viewServer = std::make_shared<FakeViewServer>(std::vector<std::vector<AsuId>>{
         {10},
         {10, 20}
     });
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     std::vector<RegisterResult> results;
@@ -1489,13 +1532,13 @@ TEST(AsuClientImplTest,
 {
     auto state = std::make_shared<TestState>();
     auto config = MakeConfig({10, 20});
-    config.viewServer = std::make_shared<FakeViewServer>(
+    auto viewServer = std::make_shared<FakeViewServer>(
         std::vector<std::vector<AsuId>>{
             {10, 20},
             {10}
     },
         std::vector<std::uint64_t>{1, 2});
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient(MakeFactory(state), MakeViewServerFactory(viewServer));
     ASSERT_TRUE(client->Init(config).ok());
 
     TaskId taskId = 0;
@@ -1511,7 +1554,7 @@ TEST(AsuClientImplTest,
     QueryResult queryResult;
     status = client->Query({"k05"}, QueryOptions{}, queryResult);
     ASSERT_EQ(status.code, StatusCode::CONNECTION_ERROR);
-    ASSERT_TRUE(WaitForFetchCount(std::static_pointer_cast<FakeViewServer>(config.viewServer), 2));
+    ASSERT_TRUE(WaitForFetchCount(viewServer, 2));
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     TaskResult taskResult;

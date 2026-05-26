@@ -24,6 +24,7 @@
 #include "asu_client_impl.h"
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -71,14 +72,151 @@ std::vector<UC::KV::CacheKey> ExtractEntryKeys(const std::vector<KVBuffer>& entr
     return keys;
 }
 
-std::vector<std::string> ExtractEndpointIps(const TransportConfig& config)
+std::uint64_t ParseUint64(const std::string& value) { return std::stoull(value, nullptr, 0); }
+
+Protocol ToTransportProtocol(const std::string& value)
 {
-    std::vector<std::string> ips;
-    ips.reserve(config.endpoints.size());
-    for (const auto& endpoint : config.endpoints) {
-        if (!endpoint.ip.empty()) { ips.emplace_back(endpoint.ip); }
+    auto protocol = value;
+    std::transform(protocol.begin(), protocol.end(), protocol.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    if (protocol == "UB" || protocol == "UBOE") { return Protocol::UB; }
+    if (protocol == "ROCE") { return Protocol::ROCE; }
+    if (protocol == "TCP") { return Protocol::TCP; }
+    return Protocol::TCP;
+}
+
+std::string ToEndpointProtocol(Protocol protocol)
+{
+    switch (protocol) {
+        case Protocol::UB: return "ub";
+        case Protocol::ROCE: return "roce";
+        case Protocol::TCP: return "tcp";
+        default: return "tcp";
     }
-    return ips;
+}
+
+AsuInfo ExtractAsuInfo(const TransportConfig& config)
+{
+    AsuInfo info;
+    info.endpoints.reserve(config.endpoints.size());
+    for (const auto& endpoint : config.endpoints) {
+        EndpointInfo endpointInfo;
+        endpointInfo.protocol = ToEndpointProtocol(endpoint.protocol);
+        endpointInfo.port = endpoint.port;
+        endpointInfo.local.commId = endpoint.ip;
+        endpointInfo.local.phyDeviceId =
+            endpoint.deviceId < 0 ? 0 : static_cast<std::uint32_t>(endpoint.deviceId);
+        auto placementIter = endpoint.attrs.find("placement");
+        if (placementIter != endpoint.attrs.end()) {
+            endpointInfo.placement = placementIter->second;
+        }
+        info.endpoints.emplace_back(std::move(endpointInfo));
+    }
+    return info;
+}
+
+void ApplyAsuInfoToTransportConfig(const AsuInfo& info, TransportConfig& config)
+{
+    if (info.endpoints.empty()) { return; }
+
+    config.endpoints.clear();
+    config.endpoints.reserve(info.endpoints.size());
+    for (const auto& endpointInfo : info.endpoints) {
+        AsuEndpoint endpoint;
+        endpoint.ip = endpointInfo.local.commId;
+        endpoint.port = endpointInfo.port;
+        endpoint.protocol = ToTransportProtocol(endpointInfo.protocol);
+        endpoint.deviceId = static_cast<std::int32_t>(endpointInfo.local.phyDeviceId);
+        endpoint.attrs["protocol"] = endpointInfo.protocol;
+        endpoint.attrs["placement"] = endpointInfo.placement;
+        endpoint.attrs["tc"] = std::to_string(endpointInfo.tc);
+        endpoint.attrs["sl"] = std::to_string(endpointInfo.sl);
+        endpoint.attrs["send_size"] = std::to_string(endpointInfo.sendSize);
+        endpoint.attrs["flag_size"] = std::to_string(endpointInfo.flagSize);
+        endpoint.attrs["remote_send_addr"] = std::to_string(endpointInfo.remoteSendAddr);
+        endpoint.attrs["remote_flag_addr"] = std::to_string(endpointInfo.remoteFlagAddr);
+        config.endpoints.emplace_back(std::move(endpoint));
+    }
+}
+
+bool TryParseAsuInfoKey(const std::string& key, AsuId& asuId)
+{
+    constexpr const char* kCamelPrefix = "asuInfo.";
+    constexpr const char* kSnakePrefix = "asu_info.";
+    if (key.rfind(kCamelPrefix, 0) == 0) {
+        asuId = std::stoull(key.substr(std::string{kCamelPrefix}.size()));
+        return true;
+    }
+    if (key.rfind(kSnakePrefix, 0) == 0) {
+        asuId = std::stoull(key.substr(std::string{kSnakePrefix}.size()));
+        return true;
+    }
+    return false;
+}
+
+EndpointInfo ParseEndpointInfo(const std::string& value)
+{
+    EndpointInfo info;
+    if (value.find('=') == std::string::npos) {
+        auto parts = Split(value, ':');
+        if (!parts.empty()) { info.local.commId = parts[0]; }
+        if (parts.size() > 1) {
+            auto port = std::stoul(parts[1]);
+            info.port = static_cast<std::uint16_t>(port);
+        }
+        if (parts.size() > 2) { info.protocol = parts[2]; }
+        return info;
+    }
+
+    for (const auto& item : Split(value, ',')) {
+        const auto pos = item.find('=');
+        if (pos == std::string::npos) { continue; }
+
+        const auto key = Trim(item.substr(0, pos));
+        const auto fieldValue = Trim(item.substr(pos + 1));
+        if (key == "protocol") {
+            info.protocol = fieldValue;
+        } else if (key == "placement") {
+            info.placement = fieldValue;
+        } else if (key == "port") {
+            info.port = static_cast<std::uint16_t>(ParseUint64(fieldValue));
+        } else if (key == "local.comm_id" || key == "localCommId") {
+            info.local.commId = fieldValue;
+        } else if (key == "local.phy_device_id" || key == "localPhyDeviceId") {
+            info.local.phyDeviceId = static_cast<std::uint32_t>(ParseUint64(fieldValue));
+        } else if (key == "tc") {
+            info.tc = static_cast<std::uint32_t>(ParseUint64(fieldValue));
+        } else if (key == "sl") {
+            info.sl = static_cast<std::uint32_t>(ParseUint64(fieldValue));
+        } else if (key == "send_size" || key == "sendSize") {
+            info.sendSize = static_cast<std::uint32_t>(ParseUint64(fieldValue));
+        } else if (key == "flag_size" || key == "flagSize") {
+            info.flagSize = static_cast<std::uint32_t>(ParseUint64(fieldValue));
+        } else if (key == "remote_send_addr" || key == "remoteSendAddr") {
+            info.remoteSendAddr = ParseUint64(fieldValue);
+        } else if (key == "remote_flag_addr" || key == "remoteFlagAddr") {
+            info.remoteFlagAddr = ParseUint64(fieldValue);
+        }
+    }
+    return info;
+}
+
+AsuInfo ParseAsuInfo(const std::string& value)
+{
+    AsuInfo info;
+    for (const auto& endpointValue : Split(value, ';')) {
+        info.endpoints.emplace_back(ParseEndpointInfo(endpointValue));
+    }
+    return info;
+}
+
+GlobalView BuildConfigGlobalView(const AsuClientConfig& config)
+{
+    GlobalView view;
+    for (const auto& transportConfig : config.transportConfigs) {
+        view.asuMap.emplace(transportConfig.asuId, ExtractAsuInfo(transportConfig));
+    }
+    return view;
 }
 
 class ConfigFileViewServer final : public ViewServer {
@@ -115,7 +253,12 @@ public:
             } else if (key == "asuIds" || key == "asu_ids") {
                 nextView.asuMap.clear();
                 for (const auto& asuId : Split(value, ',')) {
-                    nextView.asuMap.emplace(std::stoull(asuId), AsuIps{});
+                    nextView.asuMap.emplace(std::stoull(asuId), AsuInfo{});
+                }
+            } else {
+                AsuId asuId{0};
+                if (TryParseAsuInfoKey(key, asuId)) {
+                    nextView.asuMap[asuId] = ParseAsuInfo(value);
                 }
             }
         }
@@ -128,12 +271,73 @@ private:
     std::string configPath_;
 };
 
-AsuClientImpl::AsuClientImpl(TransportFactory factory) : transportFactory_(std::move(factory))
+class ConfigBackedViewServer final : public ViewServer {
+public:
+    explicit ConfigBackedViewServer(GlobalView view) : view_(std::move(view)) {}
+
+    Status GetGlobalView(GlobalView& view) override
+    {
+        view = view_;
+        return Status::OK();
+    }
+
+private:
+    GlobalView view_;
+};
+
+bool HasKnownViewEpoch(const GlobalView& view) { return view.viewEpoch != 0; }
+
+bool ViewServer::ShouldPublishView(const GlobalView& publishedView,
+                                   const GlobalView& fetchedView) const
+{
+    if (!HasKnownViewEpoch(fetchedView) || !HasKnownViewEpoch(publishedView)) { return true; }
+    return fetchedView.viewEpoch > publishedView.viewEpoch;
+}
+
+bool ViewServer::ShouldRefreshView(const Status& status) const
+{
+    switch (status.code) {
+        case StatusCode::CONNECTION_ERROR:
+        case StatusCode::IO_ERROR:
+        case StatusCode::TIMEOUT:
+        case StatusCode::NOT_FOUND:
+        case StatusCode::BUFFER_NOT_REGISTERED: return true;
+        default: return false;
+    }
+}
+
+bool ViewServer::ShouldRefreshView(const TaskResult& result) const
+{
+    if (ShouldRefreshView(result.status)) { return true; }
+    return std::any_of(result.entryStatus.begin(), result.entryStatus.end(),
+                       [this](const Status& status) { return ShouldRefreshView(status); });
+}
+
+std::shared_ptr<ViewServer> CreateDefaultViewServer(const AsuClientConfig& config)
+{
+    if (config.viewServiceAddrs.empty()) {
+        return std::make_shared<ConfigBackedViewServer>(BuildConfigGlobalView(config));
+    }
+    return std::make_shared<ConfigFileViewServer>(config.viewServiceAddrs.front());
+}
+
+AsuClientImpl::AsuClientImpl(TransportFactory transportFactory, ViewServerFactory viewServerFactory)
+    : transportFactory_(std::move(transportFactory)),
+      viewServerFactory_(std::move(viewServerFactory))
 {
     if (!transportFactory_) { transportFactory_ = CreateAsuTransport; }
+    if (!viewServerFactory_) { viewServerFactory_ = CreateDefaultViewServer; }
 }
 
 AsuClientImpl::~AsuClientImpl() { Shutdown(); }
+
+Status AsuClientImpl::Init(const std::string& configPath)
+{
+    AsuClientConfig config;
+    auto status = LoadConfig(configPath, config);
+    if (!status.ok()) { return status; }
+    return Init(config);
+}
 
 Status AsuClientImpl::Init(const AsuClientConfig& config)
 {
@@ -142,9 +346,9 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
     }
 
     config_ = config;
-    viewServer_ = config.viewServer;
-    if (viewServer_ == nullptr && !config.viewServiceAddrs.empty()) {
-        viewServer_ = std::make_shared<ConfigFileViewServer>(config.viewServiceAddrs.front());
+    viewServer_ = viewServerFactory_(config);
+    if (viewServer_ == nullptr) {
+        return Status::Error(StatusCode::NOT_INITIALIZED, "view server factory returned null");
     }
     transportConfigs_.clear();
     for (const auto& transportConfig : config.transportConfigs) {
@@ -152,7 +356,7 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
     }
 
     GlobalView view;
-    auto status = FetchGlobalView(view);
+    auto status = viewServer_->GetGlobalView(view);
     if (!status.ok()) { return status; }
 
     std::shared_ptr<ViewSnapshot> nextSnapshot;
@@ -302,7 +506,10 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
         PollTask(ctx);
         auto status = BuildResult(ctx, result);
         if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
-        if (ShouldRefreshView(status) || ShouldRefreshView(result)) { RequestBackgroundRefresh(); }
+        if (viewServer_ != nullptr &&
+            (viewServer_->ShouldRefreshView(status) || viewServer_->ShouldRefreshView(result))) {
+            RequestBackgroundRefresh();
+        }
         return status;
     }
 
@@ -315,7 +522,10 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
     if (ctx != nullptr) {
         auto status = WaitTaskContext(ctx, timeoutMs, result);
         if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
-        if (ShouldRefreshView(status) || ShouldRefreshView(result)) { RequestBackgroundRefresh(); }
+        if (viewServer_ != nullptr &&
+            (viewServer_->ShouldRefreshView(status) || viewServer_->ShouldRefreshView(result))) {
+            RequestBackgroundRefresh();
+        }
         return status;
     }
 
@@ -772,30 +982,6 @@ Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles
     return finalStatus;
 }
 
-Status AsuClientImpl::FetchGlobalView(GlobalView& view)
-{
-    std::shared_ptr<ViewServer> viewServer;
-    AsuClientConfig config;
-    {
-        std::lock_guard<std::mutex> lock{mutex_};
-        config = config_;
-        viewServer = viewServer_;
-    }
-
-    if (viewServer != nullptr) { return viewServer->GetGlobalView(view); }
-
-    view = MakeConfigGlobalView(config);
-    return Status::OK();
-}
-
-bool AsuClientImpl::IsStaleViewLocked(const GlobalView& view) const
-{
-    if (!HasKnownViewEpoch(view) || snapshot_ == nullptr || !HasKnownViewEpoch(snapshot_->view)) {
-        return false;
-    }
-    return view.viewEpoch <= snapshot_->view.viewEpoch;
-}
-
 Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalView& view,
                                     const std::shared_ptr<ViewSnapshot>& oldSnapshot,
                                     std::shared_ptr<ViewSnapshot>& snapshot)
@@ -813,7 +999,9 @@ Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalV
         }
 
         if (transport == nullptr) {
-            auto status = BuildTransport(asuId, transport);
+            auto viewIter = view.asuMap.find(asuId);
+            auto asuInfo = viewIter == view.asuMap.end() ? AsuInfo{} : viewIter->second;
+            auto status = BuildTransport(asuId, asuInfo, transport);
             if (!status.ok()) {
                 return WithContext(status, "asuIndex=" + std::to_string(asuIndex) +
                                                " asuId=" + std::to_string(asuId));
@@ -838,7 +1026,8 @@ Status AsuClientImpl::BuildSnapshot(const AsuClientConfig& config, const GlobalV
     return Status::OK();
 }
 
-Status AsuClientImpl::BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>& transport)
+Status AsuClientImpl::BuildTransport(AsuId asuId, const AsuInfo& asuInfo,
+                                     std::shared_ptr<AsuTransport>& transport)
 {
     TransportConfig config;
     {
@@ -850,6 +1039,7 @@ Status AsuClientImpl::BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>&
         }
         config = configIter->second;
     }
+    ApplyAsuInfoToTransportConfig(asuInfo, config);
 
     auto nextTransport = transportFactory_();
     if (!nextTransport) {
@@ -897,21 +1087,28 @@ Status AsuClientImpl::BindRegisteredResources(AsuId asuId,
 Status AsuClientImpl::RefreshView()
 {
     AsuClientConfig config;
+    std::shared_ptr<ViewServer> viewServer;
     std::shared_ptr<ViewSnapshot> oldSnapshot;
     {
         std::lock_guard<std::mutex> lock{mutex_};
         if (!initialized_) { return NotInitialized(); }
         config = config_;
+        viewServer = viewServer_;
         oldSnapshot = snapshot_;
+    }
+    if (viewServer == nullptr) {
+        return Status::Error(StatusCode::NOT_INITIALIZED, "view server is not initialized");
     }
 
     GlobalView view;
-    auto status = FetchGlobalView(view);
+    auto status = viewServer->GetGlobalView(view);
     if (!status.ok()) { return status; }
     {
         std::lock_guard<std::mutex> lock{mutex_};
         if (!initialized_) { return NotInitialized(); }
-        if (IsStaleViewLocked(view)) { return Status::OK(); }
+        if (snapshot_ != nullptr && !viewServer->ShouldPublishView(snapshot_->view, view)) {
+            return Status::OK();
+        }
     }
 
     std::shared_ptr<ViewSnapshot> nextSnapshot;
@@ -921,7 +1118,9 @@ Status AsuClientImpl::RefreshView()
     {
         std::lock_guard<std::mutex> lock{mutex_};
         if (!initialized_) { return NotInitialized(); }
-        if (IsStaleViewLocked(view)) { return Status::OK(); }
+        if (snapshot_ != nullptr && !viewServer->ShouldPublishView(snapshot_->view, view)) {
+            return Status::OK();
+        }
         if (oldSnapshot != nullptr) {
             for (const auto& item : oldSnapshot->transports) {
                 if (nextSnapshot->transports.find(item.first) == nextSnapshot->transports.end()) {
@@ -994,9 +1193,9 @@ std::shared_ptr<ViewSnapshot> AsuClientImpl::GetSnapshot() const
     return snapshot_;
 }
 
-void AsuClientImpl::MarkRefreshIfNeeded(const Status& status, bool& needRefresh)
+void AsuClientImpl::MarkRefreshIfNeeded(const Status& status, bool& needRefresh) const
 {
-    if (ShouldRefreshView(status)) { needRefresh = true; }
+    if (viewServer_ != nullptr && viewServer_->ShouldRefreshView(status)) { needRefresh = true; }
 }
 
 std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
@@ -1014,32 +1213,72 @@ std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
 
 GlobalView AsuClientImpl::MakeConfigGlobalView(const AsuClientConfig& config)
 {
-    GlobalView view;
-    for (const auto& transportConfig : config.transportConfigs) {
-        view.asuMap.emplace(transportConfig.asuId, ExtractEndpointIps(transportConfig));
-    }
-    return view;
+    return BuildConfigGlobalView(config);
 }
 
-bool AsuClientImpl::HasKnownViewEpoch(const GlobalView& view) { return view.viewEpoch != 0; }
-
-bool AsuClientImpl::ShouldRefreshView(const Status& status)
+Status AsuClientImpl::LoadConfig(const std::string& configPath, AsuClientConfig& config)
 {
-    switch (status.code) {
-        case StatusCode::CONNECTION_ERROR:
-        case StatusCode::IO_ERROR:
-        case StatusCode::TIMEOUT:
-        case StatusCode::NOT_FOUND:
-        case StatusCode::BUFFER_NOT_REGISTERED: return true;
-        default: return false;
+    std::ifstream configFile{configPath};
+    if (!configFile.is_open()) {
+        return Status::Error(StatusCode::NOT_FOUND,
+                             "failed to open asu client config, path=" + configPath);
     }
-}
 
-bool AsuClientImpl::ShouldRefreshView(const TaskResult& result)
-{
-    if (ShouldRefreshView(result.status)) { return true; }
-    return std::any_of(result.entryStatus.begin(), result.entryStatus.end(),
-                       [](const Status& status) { return ShouldRefreshView(status); });
+    config = AsuClientConfig{};
+    std::unordered_map<AsuId, AsuInfo> asuInfos;
+    std::string line;
+    while (std::getline(configFile, line)) {
+        line = Trim(line);
+        if (line.empty() || line[0] == '#') { continue; }
+
+        const auto pos = line.find('=');
+        if (pos == std::string::npos) { continue; }
+
+        const auto key = Trim(line.substr(0, pos));
+        const auto value = Trim(line.substr(pos + 1));
+        if (key == "clientId" || key == "client_id") {
+            config.clientId = value;
+        } else if (key == "viewServiceAddrs" || key == "view_service_addrs") {
+            config.viewServiceAddrs = Split(value, ',');
+        } else if (key == "defaultWaitTimeoutMs" || key == "default_wait_timeout_ms") {
+            config.defaultWaitTimeoutMs = ParseUint64(value);
+        } else if (key == "hashTable.type" || key == "hash_table.type") {
+            auto type = value;
+            std::transform(type.begin(), type.end(), type.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+            if (type == "MAGLEV" || type == "MAGLEV_FULL_SPREAD") {
+                config.hashTable.type = HashTableType::MAGLEV;
+            } else if (type == "CONTIGUOUS_BLOCK_AFFINITY") {
+                config.hashTable.type = HashTableType::CONTIGUOUS_BLOCK_AFFINITY;
+            } else if (type == "BATCH_TOPK_AFFINITY") {
+                config.hashTable.type = HashTableType::BATCH_TOPK_AFFINITY;
+            } else {
+                config.hashTable.type = HashTableType::RING_HASH;
+            }
+        } else if (key == "hashTable.ringHash.virtualNodeCount" ||
+                   key == "ring_hash.virtual_node_count") {
+            config.hashTable.ringHash.virtualNodeCount = ParseUint64(value);
+        } else if (key == "hashTable.maglev.tableSize" || key == "maglev.table_size") {
+            config.hashTable.maglev.tableSize = ParseUint64(value);
+        } else if (key == "transport.asuIds" || key == "transport_asu_ids" || key == "asuIds" ||
+                   key == "asu_ids") {
+            for (const auto& asuIdText : Split(value, ',')) {
+                TransportConfig transportConfig;
+                transportConfig.asuId = ParseUint64(asuIdText);
+                config.transportConfigs.emplace_back(std::move(transportConfig));
+            }
+        } else {
+            AsuId asuId{0};
+            if (TryParseAsuInfoKey(key, asuId)) { asuInfos[asuId] = ParseAsuInfo(value); }
+        }
+    }
+
+    for (auto& transportConfig : config.transportConfigs) {
+        auto iter = asuInfos.find(transportConfig.asuId);
+        if (iter == asuInfos.end()) { continue; }
+        ApplyAsuInfoToTransportConfig(iter->second, transportConfig);
+    }
+    return Status::OK();
 }
 
 bool AsuClientImpl::IsTaskComplete(const TaskResult& result)
@@ -1070,9 +1309,11 @@ Status AsuClientImpl::NotInitialized()
     return Status::Error(StatusCode::NOT_INITIALIZED, "asu client is not initialized");
 }
 
-std::unique_ptr<AsuClient> CreateAsuClient(TransportFactory factory)
+std::unique_ptr<AsuClientImpl> CreateAsuClient(TransportFactory transportFactory,
+                                               ViewServerFactory viewServerFactory)
 {
-    return std::make_unique<AsuClientImpl>(std::move(factory));
+    return std::make_unique<AsuClientImpl>(std::move(transportFactory),
+                                           std::move(viewServerFactory));
 }
 
 }  // namespace UC::ASU

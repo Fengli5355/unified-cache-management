@@ -38,7 +38,10 @@ enum class TransportOpType {
     QUERY = 0,
     LOAD = 1,
     STORE = 2,
-    DELETE = 3,
+    BATCH_LOAD = 3,
+    BATCH_STORE = 4,
+    DELETE = 5,
+    KEEP_ALIVE = 6,
 };
 
 enum class TransportTaskState {

@@ -46,32 +46,41 @@ using HashTableType = UC::KV::HashTableType;
 constexpr std::uint64_t kDefaultVirtualNodeCount = UC::KV::kDefaultVirtualNodeCount;
 constexpr std::uint64_t kDefaultMaglevTableSize = UC::KV::kDefaultMaglevTableSize;
 
-// AsuIps lists the IP addresses available on one ASU disk.
-using AsuIps = std::vector<std::string>;
+struct LocalEndpointInfo {
+    std::string commId;
+    std::uint32_t phyDeviceId{0};
+};
+
+struct EndpointInfo {
+    std::string protocol{"tcp"};
+    std::string placement;
+    std::uint16_t port{0};
+    LocalEndpointInfo local;
+    std::uint32_t tc{0};
+    std::uint32_t sl{0};
+    std::uint32_t sendSize{0};
+    std::uint32_t flagSize{0};
+    std::uint64_t remoteSendAddr{0};
+    std::uint64_t remoteFlagAddr{0};
+};
+
+struct AsuInfo {
+    std::vector<EndpointInfo> endpoints;
+};
 
 // GlobalView carries the routing membership and view metadata.
 struct GlobalView {
     std::uint64_t viewEpoch{0};
     std::uint64_t viewId{0};
-    std::unordered_map<AsuId, AsuIps> asuMap;
+    std::unordered_map<AsuId, AsuInfo> asuMap;
     std::uint64_t createTimeMs{0};
     std::uint64_t expireTimeMs{0};
 };
 
-// ViewServer fetches the newest global view for the client.
-class ViewServer {
-public:
-    // Destroys the view server interface.
-    virtual ~ViewServer() = default;
-    // Fetches the current global view.
-    virtual Status GetGlobalView(GlobalView& view) = 0;
-};
-
-// AsuClientConfig contains all client initialization dependencies.
+// AsuClientConfig contains client initialization parameters.
 struct AsuClientConfig {
     std::string clientId;
     std::vector<std::string> viewServiceAddrs;
-    std::shared_ptr<ViewServer> viewServer;
 
     std::vector<TransportConfig> transportConfigs;
 
@@ -81,6 +90,24 @@ struct AsuClientConfig {
     std::unordered_map<std::string, std::string> attrs;
 };
 
+// ViewServer owns global view fetching and refresh decisions.
+class ViewServer {
+public:
+    // Destroys the view server interface.
+    virtual ~ViewServer() = default;
+    // Fetches the current global view.
+    virtual Status GetGlobalView(GlobalView& view) = 0;
+    // Returns whether a fetched view should replace the published view.
+    virtual bool ShouldPublishView(const GlobalView& publishedView,
+                                   const GlobalView& fetchedView) const;
+    // Returns whether an operation status should schedule view refresh.
+    virtual bool ShouldRefreshView(const Status& status) const;
+    // Returns whether any task status should schedule view refresh.
+    virtual bool ShouldRefreshView(const TaskResult& result) const;
+};
+
+using ViewServerFactory = std::function<std::shared_ptr<ViewServer>(const AsuClientConfig&)>;
+
 // ViewSnapshot is the immutable routing state used by foreground IO and submitted tasks.
 struct ViewSnapshot {
     std::shared_ptr<UC::KV::Router> router;
@@ -89,19 +116,26 @@ struct ViewSnapshot {
     std::unordered_map<AsuId, std::shared_ptr<AsuTransport>> transports;
 };
 
+class AsuClientImpl;
+
 // Creates the default ASU client implementation.
-std::unique_ptr<AsuClient> CreateAsuClient(TransportFactory factory = CreateAsuTransport);
+std::unique_ptr<AsuClientImpl> CreateAsuClient(
+    TransportFactory transportFactory = CreateAsuTransport,
+    ViewServerFactory viewServerFactory = nullptr);
 
 // AsuClientImpl coordinates routing, transports, and aggregate task tracking.
 class AsuClientImpl final : public AsuClient {
 public:
     // Builds a client with the provided transport factory.
-    explicit AsuClientImpl(TransportFactory factory);
+    explicit AsuClientImpl(TransportFactory transportFactory,
+                           ViewServerFactory viewServerFactory = nullptr);
     // Shuts down the client during destruction.
     ~AsuClientImpl() override;
 
     // Initializes routing and transport resources.
-    Status Init(const AsuClientConfig& config) override;
+    Status Init(const std::string& configPath) override;
+    // Initializes from an already parsed config; intended for internal tests and adapters.
+    Status Init(const AsuClientConfig& config);
     // Gracefully drains tracked client tasks and releases resources.
     Status Shutdown() override;
 
@@ -166,16 +200,13 @@ private:
     // Performs one unregister operation on the current snapshot.
     Status UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh);
 
-    // Fetches the next global view from the configured source.
-    Status FetchGlobalView(GlobalView& view);
-    // Checks whether a view is stale while mutex_ is held.
-    bool IsStaleViewLocked(const GlobalView& view) const;
     // Builds a complete immutable snapshot for a view.
     Status BuildSnapshot(const AsuClientConfig& config, const GlobalView& view,
                          const std::shared_ptr<ViewSnapshot>& oldSnapshot,
                          std::shared_ptr<ViewSnapshot>& snapshot);
     // Creates and initializes a transport for one ASU.
-    Status BuildTransport(AsuId asuId, std::shared_ptr<AsuTransport>& transport);
+    Status BuildTransport(AsuId asuId, const AsuInfo& asuInfo,
+                          std::shared_ptr<AsuTransport>& transport);
     // Binds remembered registered resources to a transport.
     Status BindRegisteredResources(AsuId asuId, const std::shared_ptr<AsuTransport>& transport);
     // Returns the current immutable snapshot if initialized.
@@ -194,17 +225,13 @@ private:
     Status DrainTasksBeforeShutdown(std::uint64_t waitTimeoutMs);
 
     // Marks whether a status suggests the published snapshot should be refreshed.
-    static void MarkRefreshIfNeeded(const Status& status, bool& needRefresh);
+    void MarkRefreshIfNeeded(const Status& status, bool& needRefresh) const;
     // Extracts sorted ASU ids from a view.
     static std::vector<AsuId> GetSortedAsuIds(const GlobalView& view);
+    // Parses client config from a file path supplied through the public interface.
+    static Status LoadConfig(const std::string& configPath, AsuClientConfig& config);
     // Builds a static view from transport configs.
     static GlobalView MakeConfigGlobalView(const AsuClientConfig& config);
-    // Returns whether a view carries a comparable epoch.
-    static bool HasKnownViewEpoch(const GlobalView& view);
-    // Returns whether an operation status should schedule view refresh.
-    static bool ShouldRefreshView(const Status& status);
-    // Returns whether any task status should schedule view refresh.
-    static bool ShouldRefreshView(const TaskResult& result);
     // Returns whether all child statuses are terminal.
     static bool IsTaskComplete(const TaskResult& result);
     // Returns whether one task status is terminal.
@@ -218,6 +245,8 @@ private:
     ClientTaskManager taskManager_;
     // Creates ASU transports; tests inject fake transports through this hook.
     TransportFactory transportFactory_;
+    // Creates the external view server during Init.
+    ViewServerFactory viewServerFactory_;
     // mutex_ protects background refresh state and resource/view caches.
     mutable std::mutex mutex_;
     // Tracks whether Init has published a usable snapshot.
