@@ -24,6 +24,7 @@
 #include "kv_common/router.h"
 #include <algorithm>
 #include <array>
+#include <unordered_set>
 #include <utility>
 
 namespace UC::KV {
@@ -63,18 +64,12 @@ std::string BuildVirtualNodeKey(NodeId nodeId, std::uint64_t index, std::uint64_
     return key + "#" + std::to_string(salt);
 }
 
-bool HasHash(const RingData& ringData, std::uint64_t hashValue)
-{
-    return std::any_of(ringData.begin(), ringData.end(),
-                       [hashValue](const RingNode& node) { return node.first == hashValue; });
-}
-
-bool InsertVirtualNode(RingData& ringData, NodeId nodeId, std::uint64_t index,
-                       const HashFunction& hash)
+bool InsertVirtualNode(RingData& ringData, std::unordered_set<std::uint64_t>& usedHashes,
+                       NodeId nodeId, std::uint64_t index, const HashFunction& hash)
 {
     std::uint64_t salt = 0;
     auto hashValue = hash(BuildVirtualNodeKey(nodeId, index, salt));
-    while (HasHash(ringData, hashValue)) {
+    while (!usedHashes.emplace(hashValue).second) {
         if (salt >= kMaxVirtualNodeSaltAttempts) { return false; }
         ++salt;
         hashValue = hash(BuildVirtualNodeKey(nodeId, index, salt));
@@ -158,9 +153,12 @@ void RingHashRouter::Build(const std::vector<NodeId>& nodeIds)
 {
     RingData ringData;
     const auto activeNodeIds = NormalizeNodeIds(nodeIds);
+    ringData.reserve(activeNodeIds.size() * config_.ringHash.virtualNodeCount);
+    std::unordered_set<std::uint64_t> usedHashes;
+    usedHashes.reserve(activeNodeIds.size() * config_.ringHash.virtualNodeCount);
     for (auto nodeId : activeNodeIds) {
         for (std::uint64_t index = 0; index < config_.ringHash.virtualNodeCount; ++index) {
-            if (!InsertVirtualNode(ringData, nodeId, index, hash_)) { break; }
+            if (!InsertVirtualNode(ringData, usedHashes, nodeId, index, hash_)) { break; }
         }
     }
 
