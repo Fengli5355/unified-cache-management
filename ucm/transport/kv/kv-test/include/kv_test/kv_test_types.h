@@ -110,6 +110,7 @@ struct CommandOptions {
     bool check{false};
     bool verbose{false};
     bool helpRequested{false};
+    bool singleKeyRequested{false};
     std::string outputPath;
 };
 

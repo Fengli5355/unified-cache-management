@@ -200,6 +200,7 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             auto status = requireValue();
             if (!status.Ok()) { return status; }
             hasKey = true;
+            options.singleKeyRequested = true;
             options.keys.push_back(value);
         } else if (option == "--keys") {
             auto status = requireValue();
