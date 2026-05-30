@@ -730,3 +730,11 @@ connect -> bench --op batch-retrieve
 - 需要批量请求语义时使用 `batch-store`、`batch-retrieve`。
 - 需要掉电前后数据一致性时使用 `power-cycle prepare` 和 `power-cycle verify`。
 - 需要 IOPS、带宽、时延和 QOS 指标时使用 `bench`。
+
+## Local/offline validation additions
+
+- `asu.client.mode=local` is a kv-test-only mode. It uses a file-system backed ASU transport so Store/Retrieve/Delete/Exist can be validated without ViewServer, network, Hcomm, or ASU hardware.
+- `local_store.path=<path>` selects the persistent local KV directory used by local mode. Files remain across separate `kv-test` commands.
+- `view.config_path=<path>` selects the ASU view config file. Initial view load and later refresh read this file; view changes are made by editing the file externally.
+- Example config: `ucm/transport/kv/kv-test/asu_kv_test.conf`.
+- Example view config: `ucm/transport/kv/kv-test/asu_view.conf`.

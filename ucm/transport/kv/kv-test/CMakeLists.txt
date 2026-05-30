@@ -8,6 +8,7 @@ add_executable(kv-test
     src/key_value_generator.cpp
     src/kv_test_app.cpp
     src/kv_test_config_loader.cpp
+    src/local_asu_transport.cpp
     src/kv_test_main.cpp
     src/result_writer.cpp
 )
