@@ -1,4 +1,5 @@
 ﻿#include "kv_test/kv_test_app.h"
+#include <iostream>
 #include "asu_client/asu_client.h"
 
 namespace UC::KVTest {
@@ -10,6 +11,74 @@ constexpr int kExitInvalidArgument = 1;
 
 int ToExitCode(const Status& status) { return status.Ok() ? kExitSuccess : status.code; }
 
+std::string CommandTypeName(CommandType command)
+{
+    switch (command) {
+        case CommandType::CONNECT: return "connect";
+        case CommandType::STORE: return "store";
+        case CommandType::RETRIEVE: return "retrieve";
+        case CommandType::DELETE: return "delete";
+        case CommandType::EXIST: return "exist";
+        case CommandType::BATCH_STORE: return "batch-store";
+        case CommandType::BATCH_RETRIEVE: return "batch-retrieve";
+        case CommandType::POWER_CYCLE_PREPARE: return "power-cycle prepare";
+        case CommandType::POWER_CYCLE_VERIFY: return "power-cycle verify";
+        case CommandType::BENCH: return "bench";
+        case CommandType::UNKNOWN:
+        default: return "unknown";
+    }
+}
+
+void PrintHelp()
+{
+    std::cout
+        << "Usage:\n"
+        << "  kv-test <command> [options]\n"
+        << "  kv-test --help\n\n"
+        << "Config:\n"
+        << "  --configpath <path>      Override config file path for this run.\n"
+        << "  KV_TEST_CONFIG=<path>    Default config file path when --configpath is omitted.\n\n"
+        << "Commands:\n"
+        << "  connect\n"
+        << "  store | retrieve | delete | exist\n"
+        << "  batch-store | batch-retrieve\n"
+        << "  power-cycle prepare | power-cycle verify\n"
+        << "  bench [store|retrieve|batch-store|batch-retrieve|mix]\n\n"
+        << "Common options:\n"
+        << "  --key <key>              Use one key.\n"
+        << "  --keys <k1,k2,...>       Use a comma-separated key list.\n"
+        << "  --count <n>              Generate n keys from kv.key_prefix.\n"
+        << "  --seed <n>               Override kv.seed.\n"
+        << "  --value-size <bytes>     Override kv.value_size.\n"
+        << "  --batch-size <n>         Override bench.batch_size.\n"
+        << "  --timeout <ms>           Override default wait timeout.\n"
+        << "  --check                  Run consistency check when supported.\n"
+        << "  --output <path>          Override output.path.\n"
+        << "  --verbose                Enable verbose mode.\n\n"
+        << "Bench options:\n"
+        << "  --op <op>, --bench-op <op>, --io-size <bytes>, --concurrency <n>,\n"
+        << "  --duration <sec>, --warmup <sec>, --read-ratio <n>, --write-ratio <n>\n\n"
+        << "Examples:\n"
+        << "  export KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf\n"
+        << "  kv-test connect\n"
+        << "  kv-test store --key hello --check\n"
+        << "  kv-test retrieve --keys hello,world --check\n";
+}
+
+void PrintFailure(const Status& status)
+{
+    std::cerr << "kv-test: failed";
+    if (!status.message.empty()) { std::cerr << ": " << status.message; }
+    std::cerr << " (exit_code=" << ToExitCode(status) << ")\n";
+}
+
+void PrintSuccess(const CommandOptions& options)
+{
+    std::cout << "kv-test: succeeded"
+              << " command=" << CommandTypeName(options.command) << " config=" << options.configPath
+              << '\n';
+}
+
 }  // namespace
 
 KvTestApp::KvTestApp() = default;
@@ -18,20 +87,45 @@ int KvTestApp::Run(int argc, char** argv)
 {
     CommandOptions options;
     auto status = argParser_.Parse(argc, argv, options);
-    if (!status.Ok()) { return ToExitCode(status); }
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
+    if (options.helpRequested) {
+        PrintHelp();
+        return kExitSuccess;
+    }
+
+    status = configLoader_.ResolveConfigPath(options.configPath, options.configPath);
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
 
     KvTestConfig config;
     status = configLoader_.Load(options.configPath, config);
-    if (!status.Ok()) { return ToExitCode(status); }
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
 
     status = configLoader_.MergeCommandOptions(options, config);
-    if (!status.Ok()) { return ToExitCode(status); }
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
 
     status = hcommConfigAdapter_.ValidateChannelSource(config);
-    if (!status.Ok()) { return ToExitCode(status); }
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
 
     status = resultWriter_.Open(config.output);
-    if (!status.Ok()) { return ToExitCode(status); }
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
+    }
 
     CommandResult result;
     AsuClientRunner clientRunner(UC::ASU::CreateAsuClient());
@@ -48,6 +142,11 @@ int KvTestApp::Run(int argc, char** argv)
     auto closeStatus = resultWriter_.Close();
     if (status.Ok() && !closeStatus.Ok()) { status = closeStatus; }
 
+    if (status.Ok()) {
+        PrintSuccess(options);
+    } else {
+        PrintFailure(status);
+    }
     return ToExitCode(status);
 }
 

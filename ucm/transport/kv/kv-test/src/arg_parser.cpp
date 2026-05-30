@@ -12,7 +12,10 @@ namespace {
 constexpr int kExitSuccess = 0;
 constexpr int kExitInvalidArgument = 1;
 
-bool IsOption(const std::string& argument) { return argument.rfind("--", 0) == 0; }
+bool IsOption(const std::string& argument)
+{
+    return argument.rfind("--", 0) == 0 || argument == "-h";
+}
 
 std::vector<std::string> SplitCommaList(const std::string& value)
 {
@@ -174,7 +177,12 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             return Status::Success();
         };
 
-        if (option == "--check") {
+        if (option == "--help" || option == "-h") {
+            if (hasInlineValue) {
+                return Status::Error(kExitInvalidArgument, option + " does not take a value");
+            }
+            options.helpRequested = true;
+        } else if (option == "--check") {
             if (hasInlineValue) {
                 return Status::Error(kExitInvalidArgument, "--check does not take a value");
             }
@@ -271,6 +279,8 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             return Status::Error(kExitInvalidArgument, "unknown option: " + option);
         }
     }
+
+    if (options.helpRequested) { return Status::Success(); }
 
     const int keySelectorCount = (hasKey ? 1 : 0) + (hasKeys ? 1 : 0) + (hasCount ? 1 : 0);
     if (keySelectorCount > 1) {

@@ -1,0 +1,2 @@
+export KV_TEST_CONFIG="/home/feng/Codes/unified-cache-management/ucm/transport/kv/kv-test/asu_kv_test.conf"
+export PATH=$PATH:"/home/feng/Codes/unified-cache-management/build-kv-test/ucm/transport/kv/kv-test"

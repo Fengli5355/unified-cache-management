@@ -1,6 +1,7 @@
 ﻿#include "kv_test/kv_test_config_loader.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -12,6 +13,7 @@ namespace UC::KVTest {
 namespace {
 
 constexpr int kExitInvalidArgument = 1;
+constexpr const char* kConfigPathEnvVar = "KV_TEST_CONFIG";
 
 std::string Trim(const std::string& value)
 {
@@ -136,6 +138,24 @@ Status ToKvTestConfigStatus(const UC::ASU::Status& status)
 }
 
 }  // namespace
+
+Status KvTestConfigLoader::ResolveConfigPath(const std::string& configPath,
+                                             std::string& resolvedPath) const
+{
+    if (!configPath.empty()) {
+        resolvedPath = configPath;
+        return Status::Success();
+    }
+
+    const char* envValue = std::getenv(kConfigPathEnvVar);
+    if (envValue != nullptr && envValue[0] != '\0') {
+        resolvedPath = envValue;
+        return Status::Success();
+    }
+
+    return Status::Error(kExitInvalidArgument,
+                         "missing config path: set KV_TEST_CONFIG or pass --configpath");
+}
 
 Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& config) const
 {
