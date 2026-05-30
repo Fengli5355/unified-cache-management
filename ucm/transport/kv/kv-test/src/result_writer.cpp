@@ -136,6 +136,7 @@ std::string ResultStatusName(const CommandResult& result)
 std::uint64_t KeyCount(const CommandOptions& options, const CommandResult& result)
 {
     if (!options.keys.empty()) { return options.keys.size(); }
+    if (options.keyStartSet && options.keyEndSet) { return options.keyEnd - options.keyStart + 1; }
     if (options.count != 0) { return options.count; }
     if (!result.taskResult.entryStatus.empty()) { return result.taskResult.entryStatus.size(); }
     if (!result.queryResult.exists.empty()) { return result.queryResult.exists.size(); }

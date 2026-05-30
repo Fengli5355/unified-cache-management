@@ -99,7 +99,11 @@ struct CommandOptions {
     BenchOpType benchOp{BenchOpType::UNKNOWN};
     std::string configPath;
     std::vector<std::string> keys;
+    std::string keysFile;
+    std::string keyPrefix;
     std::uint64_t count{0};
+    std::uint64_t keyStart{0};
+    std::uint64_t keyEnd{0};
     std::uint64_t seed{0};
     std::uint64_t valueSize{0};
     std::uint32_t batchSize{0};
@@ -114,6 +118,8 @@ struct CommandOptions {
     bool helpRequested{false};
     bool versionRequested{false};
     bool singleKeyRequested{false};
+    bool keyStartSet{false};
+    bool keyEndSet{false};
     std::string outputPath;
 };
 

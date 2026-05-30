@@ -156,6 +156,7 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
     std::vector<std::string> positionals;
     bool hasKey = false;
     bool hasKeys = false;
+    bool hasKeysFile = false;
     bool hasCount = false;
 
     for (int index = 1; index < argc; ++index) {
@@ -231,6 +232,27 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
                 }
                 options.keys.push_back(key);
             }
+        } else if (option == "--keys_file" || option == "--keys-file") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            hasKeysFile = true;
+            options.keysFile = value;
+        } else if (option == "--prefix") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            options.keyPrefix = value;
+        } else if (option == "--key_start" || option == "--key-start") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            options.keyStartSet = true;
+            status = ParseUint64(option, value, options.keyStart);
+            if (!status.Ok()) { return status; }
+        } else if (option == "--key_end" || option == "--key-end") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            options.keyEndSet = true;
+            status = ParseUint64(option, value, options.keyEnd);
+            if (!status.Ok()) { return status; }
         } else if (option == "--count") {
             auto status = requireValue();
             if (!status.Ok()) { return status; }
@@ -308,10 +330,24 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
     }
     if (options.helpRequested && positionals.empty()) { return Status::Success(); }
 
-    const int keySelectorCount = (hasKey ? 1 : 0) + (hasKeys ? 1 : 0) + (hasCount ? 1 : 0);
+    const bool hasRangePart =
+        !options.keyPrefix.empty() || options.keyStartSet || options.keyEndSet;
+    if (hasRangePart && (options.keyPrefix.empty() || !options.keyStartSet || !options.keyEndSet)) {
+        return Status::Error(kExitInvalidArgument,
+                             "--prefix, --key_start, and --key_end must be specified together");
+    }
+    if (options.keyStartSet && options.keyEndSet && options.keyStart > options.keyEnd) {
+        return Status::Error(kExitInvalidArgument,
+                             "--key_start must be less than or equal to "
+                             "--key_end");
+    }
+
+    const int keySelectorCount = (hasKey ? 1 : 0) + (hasKeys ? 1 : 0) + (hasKeysFile ? 1 : 0) +
+                                 (hasCount ? 1 : 0) + (hasRangePart ? 1 : 0);
     if (keySelectorCount > 1) {
         return Status::Error(kExitInvalidArgument,
-                             "--key, --keys, and --count are mutually exclusive");
+                             "--key, --keys, --keys_file, --count, and prefix range are mutually "
+                             "exclusive");
     }
 
     auto status = SetCommand(positionals, options);

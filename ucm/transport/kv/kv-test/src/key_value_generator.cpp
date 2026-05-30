@@ -1,4 +1,6 @@
 ﻿#include "kv_test/key_value_generator.h"
+#include <algorithm>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -59,6 +61,70 @@ std::vector<std::uint8_t> GenerateValueBytes(const UC::ASU::CacheKey& key, std::
     return value;
 }
 
+std::string Trim(const std::string& value)
+{
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) { return ""; }
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+Status AddCommaSeparatedKeys(const std::string& value, const std::string& source,
+                             std::vector<UC::ASU::CacheKey>& keys)
+{
+    std::string normalized = value;
+    std::replace(normalized.begin(), normalized.end(), '\n', ',');
+    std::replace(normalized.begin(), normalized.end(), '\r', ',');
+
+    std::string item;
+    std::stringstream stream(normalized);
+    while (std::getline(stream, item, ',')) {
+        item = Trim(item);
+        if (item.empty()) {
+            return Status::Error(kExitInvalidArgument, source + " contains an empty key");
+        }
+        keys.push_back(item);
+    }
+
+    return Status::Success();
+}
+
+Status LoadKeysFile(const std::string& keysFile, std::vector<UC::ASU::CacheKey>& keys)
+{
+    std::ifstream input{keysFile};
+    if (!input.is_open()) {
+        return Status::Error(kExitInvalidArgument, "failed to open keys file: " + keysFile);
+    }
+
+    std::ostringstream content;
+    content << input.rdbuf();
+    auto status = AddCommaSeparatedKeys(content.str(), "--keys_file", keys);
+    if (!status.Ok()) { return status; }
+    if (keys.empty()) {
+        return Status::Error(kExitInvalidArgument, "--keys_file does not contain any keys");
+    }
+    return Status::Success();
+}
+
+Status GenerateRangeKeys(const CommandOptions& options, std::vector<UC::ASU::CacheKey>& keys)
+{
+    if (!options.keyStartSet && !options.keyEndSet) { return Status::Success(); }
+
+    const auto rangeSpan = options.keyEnd - options.keyStart;
+    const auto maxCount = static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max());
+    if (rangeSpan >= maxCount) {
+        return Status::Error(kExitInvalidArgument, "key range exceeds addressable memory");
+    }
+    const auto rangeCount = rangeSpan + 1;
+
+    keys.reserve(static_cast<std::size_t>(rangeCount));
+    for (std::uint64_t index = options.keyStart; index <= options.keyEnd; ++index) {
+        keys.push_back(options.keyPrefix + std::to_string(index));
+        if (index == std::numeric_limits<std::uint64_t>::max()) { break; }
+    }
+    return Status::Success();
+}
+
 }  // namespace
 
 Status KeyValueGenerator::Generate(const CommandOptions& options, const KvTestConfig& config,
@@ -81,6 +147,12 @@ Status KeyValueGenerator::Generate(const CommandOptions& options, const KvTestCo
             if (key.empty()) { return Status::Error(kExitInvalidArgument, "key cannot be empty"); }
             data.keys.push_back(key);
         }
+    } else if (!options.keysFile.empty()) {
+        auto status = LoadKeysFile(options.keysFile, data.keys);
+        if (!status.Ok()) { return status; }
+    } else if (options.keyStartSet || options.keyEndSet) {
+        auto status = GenerateRangeKeys(options, data.keys);
+        if (!status.Ok()) { return status; }
     } else {
         if (count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
             return Status::Error(kExitInvalidArgument, "count exceeds addressable memory");
