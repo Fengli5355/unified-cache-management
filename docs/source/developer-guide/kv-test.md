@@ -1,12 +1,12 @@
 # kv-test 命令行工具规范
 
-## Summary
+## 功能摘要
 
 `kv-test` 是面向 ASU KV 接口的命令行测试工具。它负责完成建链、Store、Retrieve、Delete、Exist、BatchStore、BatchRetrieve、掉电前后数据一致性测试和性能测试。工具从命令行参数和配置文件读取输入，向 ASU KV 后端下发请求，并输出文本、JSON 和 CSV 格式的测试结果。
 
 当前文档定义工具的目标行为，未实现或需实测确认的内容使用中文方括号标记。
 
-## When To Use
+## 使用场景
 
 适用场景：
 
@@ -22,7 +22,7 @@
 - 不用于存储侧执行快路径操作。工具只提供测试入口。
 - 不用于执行 ASU 物理下电或上电动作。工具只负责 `prepare` 和 `verify` 两个阶段，下电上电动作由测试人员或外部系统完成。
 
-## Terminology
+## 术语
 
 工具命名必须使用以下术语：
 
@@ -35,24 +35,24 @@
 | `BatchStore` | 批量写入 KV 数据。 | BatchStore |
 | `BatchRetrieve` | 批量读取 KV 数据。 | BatchLoad |
 
-## Command Syntax
+## 命令格式
 
 ```bash
-kv-test <command> [options]
+kv-test <命令> [参数]
 ```
 
-Current implementation notes:
+当前实现说明：
 
-- `kv-test --help` and `kv-test -h` print the command help and exit successfully.
-- `--configpath <path>` is optional when `KV_TEST_CONFIG` is set.
-- Config path priority is: `--configpath` first, then `KV_TEST_CONFIG`.
-- If neither `--configpath` nor `KV_TEST_CONFIG` is set, the tool exits with an error message.
-- Every invocation prints a terminal result line. Successful commands print `kv-test: succeeded ...`; failed commands print `kv-test: failed ...`.
-- The implemented config format is the existing ASU client key-value format, not YAML. A runnable example is provided at `ucm/transport/kv/kv-test/asu_kv_test.conf`.
+- `kv-test --help` 和 `kv-test -h` 打印命令帮助并成功退出。
+- 设置 `KV_TEST_CONFIG` 后，`--configpath <path>` 可省略。
+- 配置路径优先级为：先使用 `--configpath`，再使用 `KV_TEST_CONFIG`。
+- 如果既未设置 `--configpath`，也未设置 `KV_TEST_CONFIG`，工具输出错误信息并退出。
+- 每次调用都会打印终端结果行。成功命令打印 `kv-test: succeeded ...`；失败命令打印 `kv-test: failed ...`。
+- 当前实现使用已有 ASU 客户端 key-value 配置格式，不使用 YAML。配置示例位于 `ucm/transport/kv/kv-test/asu_kv_test.conf`。
 
-支持的 `command`：
+支持的命令：
 
-| command | 功能 |
+| 命令 | 功能 |
 | --- | --- |
 | `connect` | 只执行建链流程。 |
 | `store` | 下发单条或多条 Store 请求。 |
@@ -75,23 +75,23 @@ kv-test exist --keys key1,key2,key3 --configpath ./config/asu_kv_test.yaml
 kv-test bench --op batch-retrieve --configpath ./config/asu_kv_test.yaml
 ```
 
-## Input
+## 输入
 
-### Common Options
+### 通用参数
 
 | 参数 | 类型 | 必填 | 默认值 | 允许为空 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `--configpath <path>` | string | 是 | 无 | 否 | 配置文件路径。 |
-| `--key <key>` | string | 否 | 无 | 否 | 单个 key。与 `--keys`、`--count` 互斥。 |
-| `--keys <k1,k2,...>` | string list | 否 | 无 | 否 | 多个 key，使用英文逗号分隔。与 `--key`、`--count` 互斥。 |
-| `--count <n>` | uint64 | 否 | 配置文件 `kv.count` | 否 | 使用 seed 生成的 key 数量。 |
-| `--seed <n>` | uint64 | 否 | 配置文件 `kv.seed` | 否 | key/value 数据生成随机数种子。 |
-| `--value-size <bytes>` | uint64 | 否 | 配置文件 `kv.value_size` | 否 | 单个 value 大小，单位为 byte。 |
-| `--batch-size <n>` | uint32 | 否 | 配置文件对应 batch size | 否 | 单个批量请求包含的最大 entry 数，仅支持batch-store/batch-retrieve。 |
-| `--check` | bool | 否 | `false` | 是 | 开启一致性检查。 |
-| `--timeout <ms>` | uint64 | 否 | 配置文件 `connection.timeout_ms` | 否 | 单请求或单批请求超时时间，单位 ms。 |
-| `--output <path>` | string | 否 | 配置文件 `output.path` | 否 | 结果输出目录。 |
-| `--verbose` | bool | 否 | `false` | 是 | 输出详细日志。 |
+| `--configpath <path>` | 字符串 | 是 | 无 | 否 | 配置文件路径。 |
+| `--key <key>` | 字符串 | 否 | 无 | 否 | 单个 key。与 `--keys`、`--count` 互斥。 |
+| `--keys <k1,k2,...>` | 字符串列表 | 否 | 无 | 否 | 多个 key，使用英文逗号分隔。与 `--key`、`--count` 互斥。 |
+| `--count <n>` | 无符号 64 位整数 | 否 | 配置文件 `kv.count` | 否 | 使用 seed 生成的 key 数量。 |
+| `--seed <n>` | 无符号 64 位整数 | 否 | 配置文件 `kv.seed` | 否 | key/value 数据生成随机数种子。 |
+| `--value-size <bytes>` | 无符号 64 位整数 | 否 | 配置文件 `kv.value_size` | 否 | 单个 value 大小，单位为字节。 |
+| `--batch-size <n>` | 无符号 32 位整数 | 否 | 配置文件对应批量大小 | 否 | 单个批量请求包含的最大条目数，仅支持 `batch-store`/`batch-retrieve`。 |
+| `--check` | 布尔值 | 否 | `false` | 是 | 开启一致性检查。 |
+| `--timeout <ms>` | 无符号 64 位整数 | 否 | 配置文件 `connection.timeout_ms` | 否 | 单请求或单批请求超时时间，单位 ms。 |
+| `--output <path>` | 字符串 | 否 | 配置文件 `output.path` | 否 | 结果输出目录。 |
+| `--verbose` | 布尔值 | 否 | `false` | 是 | 输出详细日志。 |
 
 输入优先级：
 
@@ -99,17 +99,17 @@ kv-test bench --op batch-retrieve --configpath ./config/asu_kv_test.yaml
 2. `--key`、`--keys`、`--count` 三者最多指定一个。
 3. 指定 `--count` 时，必须能从命令行或配置文件读取 `seed`、`value_size` 和 `key_prefix`。
 
-### Bench Options
+### 性能测试参数
 
 | 参数 | 类型 | 必填 | 默认值 | 枚举值或范围 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `--op <op>` | enum | 是 | 无 | `store`、`retrieve`、`batch-store`、`batch-retrieve`、`mix` | 压测操作类型。 |
-| `--io-size <bytes>` | uint64 | 否 | 配置文件 `bench.io_size` | `>0` | 单个 KV value 大小。 |
-| `--concurrency <n>` | uint32 | 否 | 配置文件 `bench.concurrency` | `>0` | 并发 IO 数。 |
-| `--duration <sec>` | uint64 | 否 | 配置文件 `bench.duration_sec` | `>0` | 统计阶段时长。 |
-| `--warmup <sec>` | uint64 | 否 | 配置文件 `bench.warmup_sec` | `>=0` | 预热时长，预热数据不计入性能结果。 |
-| `--read-ratio <n>` | uint32 | 否 | 配置文件 `bench.read_ratio` | `0..100` | 读比例。 |
-| `--write-ratio <n>` | uint32 | 否 | 配置文件 `bench.write_ratio` | `0..100` | 写比例。 |
+| `--op <op>` | 枚举 | 是 | 无 | `store`、`retrieve`、`batch-store`、`batch-retrieve`、`mix` | 压测操作类型。 |
+| `--io-size <bytes>` | 无符号 64 位整数 | 否 | 配置文件 `bench.io_size` | `>0` | 单个 KV value 大小。 |
+| `--concurrency <n>` | 无符号 32 位整数 | 否 | 配置文件 `bench.concurrency` | `>0` | 并发 IO 数。 |
+| `--duration <sec>` | 无符号 64 位整数 | 否 | 配置文件 `bench.duration_sec` | `>0` | 统计阶段时长。 |
+| `--warmup <sec>` | 无符号 64 位整数 | 否 | 配置文件 `bench.warmup_sec` | `>=0` | 预热时长，预热数据不计入性能结果。 |
+| `--read-ratio <n>` | 无符号 32 位整数 | 否 | 配置文件 `bench.read_ratio` | `0..100` | 读比例。 |
+| `--write-ratio <n>` | 无符号 32 位整数 | 否 | 配置文件 `bench.write_ratio` | `0..100` | 写比例。 |
 
 约束：
 
@@ -118,16 +118,16 @@ kv-test bench --op batch-retrieve --configpath ./config/asu_kv_test.yaml
 - `--op store` 和 `--op batch-store` 时，读写比例无需提供，自动使用`read_ratio` 为 `0`，`write_ratio` 为 `100`。
 - 预热阶段不执行一致性检查；指定 `--check` 时，工具在预热完成后、统计开始前执行一次一致性采样检查。
 
-## Config File
+## 配置文件
 
-Current implementation:
+当前实现：
 
-- The config file uses the ASU client key-value format.
-- Set `KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf` once to reuse the same config for later commands.
-- `--configpath <path>` can still override the environment variable for a single command.
-- Example file: `ucm/transport/kv/kv-test/asu_kv_test.conf`.
+- 配置文件使用 ASU 客户端 key-value 格式。
+- 设置一次 `KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf` 后，后续命令可复用同一配置。
+- 单次命令仍可通过 `--configpath <path>` 覆盖环境变量。
+- 示例文件为 `ucm/transport/kv/kv-test/asu_kv_test.conf`。
 
-配置文件使用 YAML。`--configpath` 文件必须包含建链参数、KV 生成参数、批量限制、性能参数和输出参数。
+以下 YAML 片段为规划配置结构示例；当前实现以 ASU 客户端 key-value 配置格式为准。配置应能表达建链参数、KV 生成参数、批量限制、性能参数和输出参数。
 
 ```yaml
 connection:
@@ -175,22 +175,22 @@ output:
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `connection.target` | string | 是 | ASU 服务地址或设备标识，具体格式为 `[ASU建链配置字段]`。 |
-| `connection.protocol` | enum | 是 | `UB`、`ROCE` 或 `TCP`。 |
-| `connection.timeout_ms` | uint64 | 是 | 默认请求超时时间。 |
-| `connection.retry` | uint32 | 是 | 建链或请求失败后的重试次数。 |
-| `kv.key_prefix` | string | 是 | 使用 `--count` 生成 key 时的 key 前缀。 |
-| `kv.value_size` | uint64 | 是 | 默认 value 大小。 |
-| `kv.seed` | uint64 | 是 | 默认随机数种子。 |
-| `limits.batch_store_max` | uint32 | 是 | BatchStore 最大 entry 数，规格值为 `110`。 |
-| `limits.batch_retrieve_max` | uint32 | 是 | BatchRetrieve 最大 entry 数，规格值为 `110`。 |
-| `limits.delete_max` | uint32 | 是 | Delete 单次最大 entry 数，规格值为 `254`。 |
-| `limits.exist_max` | uint32 | 是 | Exist 单次最大 entry 数，规格值为 `256`。 |
-| `output.realtime_file_max_bytes` | uint64 | 是 | 实时 CSV 文件大小上限，超过后滚动到下一个文件。 |
+| `connection.target` | 字符串 | 是 | ASU 服务地址或设备标识，具体格式为 `[ASU建链配置字段]`。 |
+| `connection.protocol` | 枚举 | 是 | `UB`、`ROCE` 或 `TCP`。 |
+| `connection.timeout_ms` | 无符号 64 位整数 | 是 | 默认请求超时时间。 |
+| `connection.retry` | 无符号 32 位整数 | 是 | 建链或请求失败后的重试次数。 |
+| `kv.key_prefix` | 字符串 | 是 | 使用 `--count` 生成 key 时的 key 前缀。 |
+| `kv.value_size` | 无符号 64 位整数 | 是 | 默认 value 大小。 |
+| `kv.seed` | 无符号 64 位整数 | 是 | 默认随机数种子。 |
+| `limits.batch_store_max` | 无符号 32 位整数 | 是 | BatchStore 最大条目数，规格值为 `110`。 |
+| `limits.batch_retrieve_max` | 无符号 32 位整数 | 是 | BatchRetrieve 最大条目数，规格值为 `110`。 |
+| `limits.delete_max` | 无符号 32 位整数 | 是 | Delete 单次最大条目数，规格值为 `254`。 |
+| `limits.exist_max` | 无符号 32 位整数 | 是 | Exist 单次最大条目数，规格值为 `256`。 |
+| `output.realtime_file_max_bytes` | 无符号 64 位整数 | 是 | 实时 CSV 文件大小上限，超过后滚动到下一个文件。 |
 
-## Output
+## 输出
 
-### Result Directory
+### 结果目录
 
 ```text
 results/kv-test/
@@ -211,7 +211,7 @@ results/kv-test/
 - 单个文件大小达到 `output.realtime_file_max_bytes` 后，新建 `bench-realtime-1.csv`。
 - 后缀按 `-0`、`-1`、`-2` 递增。
 
-### Summary JSON
+### 汇总 JSON
 
 ```json
 {
@@ -266,7 +266,7 @@ results/kv-test/
 
 字段说明：
 
-| 字段 | nullable | 说明 |
+| 字段 | 可为空 | 说明 |
 | --- | --- | --- |
 | `status` | 否 | `success`、`partial_failed` 或 `failed`。 |
 | `exit_code` | 否 | 进程退出码。 |
@@ -274,7 +274,7 @@ results/kv-test/
 | `consistency` | 是 | 未启用一致性检查时可为 `null`。 |
 | `error` | 是 | 成功时为 `null`，失败时使用错误结构。 |
 
-### Error JSON
+### 错误 JSON
 
 ```json
 {
@@ -284,7 +284,7 @@ results/kv-test/
   "exit_code": 4,
   "error": {
     "code": "CONSISTENCY_FAILED",
-    "message": "value mismatch",
+    "message": "value 不一致",
     "asu_status_code": "OK",
     "retryable": false,
     "request_id": "[请求编号]",
@@ -293,7 +293,7 @@ results/kv-test/
 }
 ```
 
-### Realtime CSV
+### 实时 CSV
 
 ```csv
 timestamp_sec,op,bandwidth_value,bandwidth_unit,iops_value,iops_unit,avg_latency_value,avg_latency_unit,error_count
@@ -301,16 +301,16 @@ timestamp_sec,op,bandwidth_value,bandwidth_unit,iops_value,iops_unit,avg_latency
 2,batch-retrieve,[待实测],MB/s,[待实测],1/s,[待实测],us,0
 ```
 
-### Latency CSV
+### 时延 CSV
 
 ```csv
 op,avg_value,avg_unit,min_value,min_unit,max_value,max_unit,p99_9_value,p99_9_unit,p99_99_value,p99_99_unit,p99_999_value,p99_999_unit
 batch-retrieve,[待实测],us,[待实测],us,[待实测],us,[待实测],us,[待实测],us,[待实测],us
 ```
 
-## Metrics Rules
+## 指标规则
 
-### Unit Formatting
+### 单位格式
 
 | 指标 | 单位 | 格式规则 |
 | --- | --- | --- |
@@ -318,7 +318,7 @@ batch-retrieve,[待实测],us,[待实测],us,[待实测],us,[待实测],us,[待�
 | 带宽 | `B/s`、`KB/s`、`MB/s`、`GB/s` | 保留 2 位小数，选择数值小于 `1000` 的最大单位。 |
 | 时延 | `s`、`ms`、`us`、`ns` | 保留 2 位小数，选择数值小于 `1000` 的最大单位。 |
 
-### Batch Metrics
+### 批量指标
 
 批量维度只统计 Batch 命令本身：
 
@@ -326,9 +326,9 @@ batch-retrieve,[待实测],us,[待实测],us,[待实测],us,[待实测],us,[待�
 - Batch 带宽：已完成 Batch 命令包含的总数据量除以统计窗口时长。
 - Batch 时延：单个 Batch 命令从下发到完成的耗时。
 
-不统计“批内单条命令维度带宽”。如果需要观察批内 entry 数，可通过 `batch_size` 和完成的 Batch 命令数量推导。
+不统计“批内单条命令维度带宽”。如果需要观察批内条目数，可通过 `batch_size` 和完成的 Batch 命令数量推导。
 
-## Consistency Rules
+## 一致性规则
 
 | 操作 | 检查规则 |
 | --- | --- |
@@ -354,7 +354,7 @@ Delete 不存在 key 的规则：
 
 `value_generator` 和 `digest_algorithm` 的具体算法为 `[value生成算法和摘要算法待确认]`。实现前不得把随机值、哈希算法或摘要长度写死到调用方逻辑中。
 
-## Commands
+## 命令
 
 ### connect
 
@@ -394,9 +394,9 @@ kv-test store --count 10000 --seed 20260527 --configpath ./config/asu_kv_test.ya
 - 启用 `--check` 时输出一致性结果。
 
 功能说明：
-- 使用 store 功能最终实现为逐个 key 调用底层Store接口；
-- 使用 `--key`, `--keys` 指定时，随机生成提供的键对应的values张量；
-- 使用 `--count` 随机时，按顺序生成`key1`, `key2`, ...等键，随机生成键对应的values张量。
+- 使用 store 功能最终实现为逐个 key 调用底层 Store 接口；
+- 使用 `--key`、`--keys` 指定时，随机生成指定 key 对应的 value 张量；
+- 使用 `--count` 随机时，按顺序生成 `key1`、`key2` 等 key，并随机生成对应的 value 张量。
 
 ### retrieve
 
@@ -414,7 +414,7 @@ kv-test retrieve --keys key1,key2,key3 --configpath ./config/asu_kv_test.yaml --
 - 启用 `--check` 时输出 value 比对结果。
 
 功能说明：
-- 使用 retrieve 功能最终实现为逐个 key 调用底层Load接口；
+- 使用 retrieve 功能最终实现为逐个 key 调用底层 Load 接口；
 
 ### delete
 
@@ -427,8 +427,8 @@ kv-test delete --keys key1,key2,key3 --configpath ./config/asu_kv_test.yaml --ch
 
 约束：无。
 
-功能说明：（仅提示代码生成）
-Client接收的keys会首先被Router打散到各个Transport，每个Transport在切分IO的阶段用配置项
+功能说明：
+客户端接收的 keys 会首先被 Router 分散到各个 Transport，每个 Transport 在切分 IO 的阶段用配置项
  `limits.delete_max` 进行切分。
 
 ### exist
@@ -442,8 +442,8 @@ kv-test exist --keys key1,key2,key3 --configpath ./config/asu_kv_test.yaml
 
 约束：无。
 
-功能说明：（近体诗代码生成）
-Client接收的keys会首先被Router打散到各个Transport，每个Transport在切分IO的阶段用配置项
+功能说明：
+客户端接收的 keys 会首先被 Router 分散到各个 Transport，每个 Transport 在切分 IO 的阶段用配置项
  `limits.exist_max` 进行切分。
 
 ### batch-store
@@ -459,7 +459,7 @@ kv-test batch-store --count 10000 --seed 20260527 --batch-size 64 --configpath .
 - 超过限制时返回参数错误，不自动提升规格上限。
 
 功能说明：
-Client接收的keys会首先被Router打散到各个Transport，每个Transport在切分IO的阶段用配置项 `limits.batch_store_max` 进行切分。
+客户端接收的 keys 会首先被 Router 分散到各个 Transport，每个 Transport 在切分 IO 的阶段用配置项 `limits.batch_store_max` 进行切分。
 
 ### batch-retrieve
 
@@ -529,7 +529,7 @@ kv-test power-cycle verify \
 
 功能：执行 KV 性能测试。
 
-底层调用BatchLoad：
+底层调用 BatchLoad：
 ```bash
 kv-test bench \
   --configpath ./config/asu_kv_test.yaml \
@@ -541,7 +541,7 @@ kv-test bench \
   --write-ratio 0
 ```
 
-底层调用BatchStore：
+底层调用 BatchStore：
 ```bash
 kv-test bench \
   --configpath ./config/asu_kv_test.yaml \
@@ -553,7 +553,7 @@ kv-test bench \
   --write-ratio 100
 ```
 
-底层调用BatchStore、BatchLoad：
+底层调用 BatchStore、BatchLoad：
 ```bash
 kv-test bench \
   --configpath ./config/asu_kv_test.yaml \
@@ -579,9 +579,9 @@ kv-test bench \
 - P99.99 时延。
 - P99.999 时延。
 
-## Examples
+## 示例
 
-### Normal Example
+### 正常示例
 
 ```bash
 kv-test batch-store --count 10000 --seed 20260527 --batch-size 64 --configpath ./config/asu_kv_test.yaml --check
@@ -595,7 +595,7 @@ kv-test batch-retrieve --count 10000 --seed 20260527 --batch-size 64 --configpat
 - 所有 value 一致性检查通过。
 - 输出 `summary.json`、`realtime-0.csv`、`latency.csv` 和日志文件。
 
-### Boundary Example
+### 边界示例
 
 ```bash
 kv-test batch-store --count 110 --seed 20260527 --batch-size 110 --configpath ./config/asu_kv_test.yaml
@@ -609,7 +609,7 @@ kv-test exist --count 256 --seed 20260527 --configpath ./config/asu_kv_test.yaml
 - `delete` 使用最大 Delete entry 数 `254`。
 - `exist` 使用最大 Exist entry 数 `256`。
 
-### Error Example
+### 错误示例
 
 ```bash
 kv-test batch-retrieve --count 111 --seed 20260527 --batch-size 111 --configpath ./config/asu_kv_test.yaml
@@ -634,9 +634,9 @@ kv-test batch-retrieve --count 111 --seed 20260527 --batch-size 111 --configpath
 }
 ```
 
-## Error Handling
+## 错误处理
 
-### Exit Codes
+### 退出码
 
 | 退出码 | 含义 | 可重试 |
 | --- | --- | --- |
@@ -649,7 +649,7 @@ kv-test batch-retrieve --count 111 --seed 20260527 --batch-size 111 --configpath
 | `6` | 部分请求失败，且失败策略允许继续执行。 | 按失败 entry 判断 |
 | `>=100` | ASU 底层状态码映射。 | 按状态码判断 |
 
-### ASU StatusCode Mapping
+### ASU 状态码映射
 
 `kv-test` 使用 `UC::ASU::StatusCode` 作为底层错误来源，定义位置为 `ucm/transport/kv/asu/trans/include/asu_transport/types.h`。
 
@@ -672,7 +672,7 @@ kv-test batch-retrieve --count 111 --seed 20260527 --batch-size 111 --configpath
 | `INTERNAL_ERROR` | `14` | `INTERNAL_ERROR` | 是 |
 | `CANCELED` | `15` | `CANCELED` | 按取消原因判断 |
 
-### Idempotency
+### 幂等性
 
 | 命令 | 幂等性 |
 | --- | --- |
@@ -687,14 +687,14 @@ kv-test batch-retrieve --count 111 --seed 20260527 --batch-size 111 --configpath
 | `power-cycle verify` | 幂等。 |
 | `bench` | 不保证幂等；写压测会改变目标 key 的 value。 |
 
-### Timeout Behavior
+### 超时行为
 
 - 单请求超时后，工具将该请求标记为 `TIMEOUT`。
 - 如果配置允许重试，工具最多重试 `connection.retry` 次。
 - 重试仍失败时，命令返回非零退出码。
 - 批量请求返回 `PARTIAL_FAILED` 时，工具必须记录每个失败 entry 的状态。
 
-## Tool Relationship
+## 工具关系
 
 推荐调用链：
 
