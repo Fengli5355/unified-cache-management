@@ -75,11 +75,32 @@ void PrintFailure(const Status& status)
     std::cerr << " (exit_code=" << ToExitCode(status) << ")\n";
 }
 
-void PrintSuccess(const CommandOptions& options)
+void PrintExistSummary(const CommandOptions& options, const CommandResult& result)
+{
+    if (options.command != CommandType::EXIST) { return; }
+
+    if (options.singleKeyRequested && options.keys.size() == 1 &&
+        result.queryResult.exists.size() == 1) {
+        std::cout << "exist: key=" << options.keys.front()
+                  << " result=" << (result.queryResult.exists.front() != 0 ? "exists" : "missing")
+                  << '\n';
+        return;
+    }
+
+    const auto existsCount = static_cast<std::uint64_t>(
+        std::count_if(result.queryResult.exists.begin(), result.queryResult.exists.end(),
+                      [](std::uint8_t exists) { return exists != 0; }));
+    const auto total = static_cast<std::uint64_t>(result.queryResult.exists.size());
+    std::cout << "exist: total=" << total << " exists=" << existsCount
+              << " missing=" << (total - existsCount) << '\n';
+}
+
+void PrintSuccess(const CommandOptions& options, const CommandResult& result)
 {
     std::cout << "kv-test: succeeded"
               << " command=" << CommandTypeName(options.command) << " config=" << options.configPath
               << '\n';
+    PrintExistSummary(options, result);
 }
 
 std::string NormalizeAttrValue(std::string value)
@@ -168,7 +189,7 @@ int KvTestApp::Run(int argc, char** argv)
     if (status.Ok() && !closeStatus.Ok()) { status = closeStatus; }
 
     if (status.Ok()) {
-        PrintSuccess(options);
+        PrintSuccess(options, result);
     } else {
         PrintFailure(status);
     }
