@@ -60,6 +60,7 @@ CommandType ParseCommand(const std::string& command)
 {
     static const std::unordered_map<std::string, CommandType> kCommands = {
         {"connect",        CommandType::CONNECT       },
+        {"version",        CommandType::VERSION       },
         {"store",          CommandType::STORE         },
         {"retrieve",       CommandType::RETRIEVE      },
         {"delete",         CommandType::DELETE        },
@@ -91,6 +92,17 @@ Status SetCommand(const std::vector<std::string>& positionals, CommandOptions& o
 {
     if (positionals.empty()) {
         return Status::Error(kExitInvalidArgument, "missing kv-test command");
+    }
+
+    if (positionals[0] == "config") {
+        if (positionals.size() != 2) {
+            return Status::Error(kExitInvalidArgument, "config expects check subcommand");
+        }
+        if (positionals[1] == "check") {
+            options.command = CommandType::CONFIG_CHECK;
+            return Status::Success();
+        }
+        return Status::Error(kExitInvalidArgument, "unknown config subcommand: " + positionals[1]);
     }
 
     if (positionals[0] == "power-cycle") {
@@ -182,6 +194,12 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
                 return Status::Error(kExitInvalidArgument, option + " does not take a value");
             }
             options.helpRequested = true;
+        } else if (option == "--version") {
+            if (hasInlineValue) {
+                return Status::Error(kExitInvalidArgument, "--version does not take a value");
+            }
+            options.versionRequested = true;
+            options.command = CommandType::VERSION;
         } else if (option == "--check") {
             if (hasInlineValue) {
                 return Status::Error(kExitInvalidArgument, "--check does not take a value");
@@ -281,7 +299,14 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
         }
     }
 
-    if (options.helpRequested) { return Status::Success(); }
+    if (options.versionRequested) {
+        if (!positionals.empty()) {
+            return Status::Error(kExitInvalidArgument,
+                                 "--version does not take positional arguments");
+        }
+        return Status::Success();
+    }
+    if (options.helpRequested && positionals.empty()) { return Status::Success(); }
 
     const int keySelectorCount = (hasKey ? 1 : 0) + (hasKeys ? 1 : 0) + (hasCount ? 1 : 0);
     if (keySelectorCount > 1) {
@@ -291,6 +316,8 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
 
     auto status = SetCommand(positionals, options);
     if (!status.Ok()) { return status; }
+
+    if (options.helpRequested) { return Status::Success(); }
 
     return Status::Success();
 }
