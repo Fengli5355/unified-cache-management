@@ -96,16 +96,33 @@ Status DigestValue(const std::vector<std::uint8_t>& value, std::string& digest)
     return generator.Digest(value, digest);
 }
 
+void SetValueComparison(ConsistencySummary& summary, const UC::ASU::CacheKey& key,
+                        const std::string& expectedDigest, const std::string& actualDigest)
+{
+    summary.key = key;
+    summary.expected = "digest=" + expectedDigest;
+    summary.actual = "digest=" + actualDigest;
+}
+
+void SetExistComparison(ConsistencySummary& summary, const UC::ASU::CacheKey& key,
+                        bool expectedExists, bool actualExists)
+{
+    summary.key = key;
+    summary.expected = expectedExists ? "exists=true" : "exists=false";
+    summary.actual = actualExists ? "exists=true" : "exists=false";
+}
+
 Status CheckRetrievedValues(const GeneratedData& expected, const BufferSet& retrieved,
-                            const std::string& operation)
+                            const std::string& operation, ConsistencySummary& summary)
 {
     auto status = ValidateExpectedBuffers(expected, retrieved, operation);
     if (!status.Ok()) { return status; }
 
+    summary.enabled = true;
+    summary.checked = expected.values.size();
     for (std::size_t index = 0; index < expected.values.size(); ++index) {
         const auto& expectedValue = expected.values[index];
         const auto& actualValue = retrieved.ownedBuffers[index];
-        if (actualValue == expectedValue) { continue; }
 
         std::string expectedDigest;
         std::string actualDigest;
@@ -113,7 +130,14 @@ Status CheckRetrievedValues(const GeneratedData& expected, const BufferSet& retr
         if (!status.Ok()) { return status; }
         status = DigestValue(actualValue, actualDigest);
         if (!status.Ok()) { return status; }
+        SetValueComparison(summary, expected.keys[index], expectedDigest, actualDigest);
 
+        if (actualValue == expectedValue) {
+            ++summary.passed;
+            continue;
+        }
+
+        summary.failed = summary.checked - summary.passed;
         return ConsistencyError(operation, expected.keys[index],
                                 "value mismatch expected_digest=" + expectedDigest +
                                     " actual_digest=" + actualDigest +
@@ -121,6 +145,7 @@ Status CheckRetrievedValues(const GeneratedData& expected, const BufferSet& retr
                                     " actual_size=" + std::to_string(actualValue.size()));
     }
 
+    summary.failed = 0;
     return Status::Success();
 }
 
@@ -140,26 +165,28 @@ Status ValidateQueryResultForConsistency(const std::vector<UC::ASU::CacheKey>& k
 }  // namespace
 
 Status ConsistencyChecker::CheckStoreResult(const GeneratedData& expected,
-                                            const BufferSet& retrieved,
-                                            const CommandResult& result) const
+                                            const BufferSet& retrieved, const CommandResult& result,
+                                            ConsistencySummary& summary) const
 {
     auto status = ValidateTaskForConsistency(result, "store", expected.keys.size());
     if (!status.Ok()) { return status; }
-    return CheckRetrievedValues(expected, retrieved, "store");
+    return CheckRetrievedValues(expected, retrieved, "store", summary);
 }
 
 Status ConsistencyChecker::CheckRetrieveResult(const GeneratedData& expected,
                                                const BufferSet& retrieved,
-                                               const CommandResult& result) const
+                                               const CommandResult& result,
+                                               ConsistencySummary& summary) const
 {
     auto status = ValidateTaskForConsistency(result, "retrieve", expected.keys.size());
     if (!status.Ok()) { return status; }
-    return CheckRetrievedValues(expected, retrieved, "retrieve");
+    return CheckRetrievedValues(expected, retrieved, "retrieve", summary);
 }
 
 Status ConsistencyChecker::CheckDeleteResult(const std::vector<UC::ASU::CacheKey>& keys,
                                              const CommandResult& deleteResult,
-                                             const CommandResult& existResult) const
+                                             const CommandResult& existResult,
+                                             ConsistencySummary& summary) const
 {
     auto status = ValidateTaskForConsistency(deleteResult, "delete", keys.size());
     if (!status.Ok()) { return status; }
@@ -167,31 +194,45 @@ Status ConsistencyChecker::CheckDeleteResult(const std::vector<UC::ASU::CacheKey
     status = ValidateQueryResultForConsistency(keys, existResult, "delete-exist");
     if (!status.Ok()) { return status; }
 
+    summary.enabled = true;
+    summary.checked = keys.size();
     for (std::size_t index = 0; index < keys.size(); ++index) {
-        if (existResult.queryResult.exists[index] != 0) {
+        const bool actualExists = existResult.queryResult.exists[index] != 0;
+        SetExistComparison(summary, keys[index], false, actualExists);
+        if (actualExists) {
+            summary.failed = summary.checked - summary.passed;
             return ConsistencyError("delete", keys[index],
                                     "expected_exists=false actual_exists=true");
         }
+        ++summary.passed;
     }
+    summary.failed = 0;
     return Status::Success();
 }
 
 Status ConsistencyChecker::CheckExistResult(const std::vector<UC::ASU::CacheKey>& keys,
-                                            const CommandResult& result, bool expectedExists) const
+                                            const CommandResult& result, bool expectedExists,
+                                            ConsistencySummary& summary) const
 {
     auto status = ValidateQueryResultForConsistency(keys, result, "exist");
     if (!status.Ok()) { return status; }
 
     const std::uint8_t expectedValue = expectedExists ? 1 : 0;
+    summary.enabled = true;
+    summary.checked = keys.size();
     for (std::size_t index = 0; index < keys.size(); ++index) {
         const bool actualExists = result.queryResult.exists[index] != 0;
+        SetExistComparison(summary, keys[index], expectedExists, actualExists);
         if (actualExists != expectedExists) {
+            summary.failed = summary.checked - summary.passed;
             return ConsistencyError(
                 "exist", keys[index],
                 "expected_exists=" + std::to_string(expectedValue) +
                     " actual_exists=" + std::to_string(result.queryResult.exists[index]));
         }
+        ++summary.passed;
     }
+    summary.failed = 0;
     return Status::Success();
 }
 

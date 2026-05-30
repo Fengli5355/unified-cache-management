@@ -67,6 +67,7 @@ std::string CommandTypeName(CommandType command)
 {
     switch (command) {
         case CommandType::CONNECT: return "connect";
+        case CommandType::CONFIG_CHECK: return "config check";
         case CommandType::STORE: return "store";
         case CommandType::RETRIEVE: return "retrieve";
         case CommandType::DELETE: return "delete";
@@ -76,6 +77,7 @@ std::string CommandTypeName(CommandType command)
         case CommandType::POWER_CYCLE_PREPARE: return "power-cycle prepare";
         case CommandType::POWER_CYCLE_VERIFY: return "power-cycle verify";
         case CommandType::BENCH: return "bench";
+        case CommandType::VERSION: return "version";
         case CommandType::UNKNOWN:
         default: return "unknown";
     }
@@ -249,26 +251,44 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "  },\n";
     if (options.command == CommandType::BENCH) {
         jsonFile << "  \"metrics\": {\n"
-                 << "    \"bandwidth\": {\"avg\": {\"value\": 0.0, \"unit\": \"MB/s\"}, "
+                 << "    \"bandwidth\": {\"avg\": {\"value\": "
+                 << (result.benchMetrics.avgBandwidthBytesPerSec / (1024.0 * 1024.0))
+                 << ", \"unit\": \"MiB/s\"}, "
                     "\"realtime_file_pattern\": \"bench-realtime-*.csv\"},\n"
-                 << "    \"iops\": {\"avg\": {\"value\": 0.0, \"unit\": \"1/s\"}, "
-                    "\"avg_batch\": {\"value\": 0.0, \"unit\": \"1/s\"}},\n"
-                 << "    \"latency\": {\"avg\": {\"value\": 0.0, \"unit\": \"us\"}, "
-                    "\"min\": {\"value\": 0.0, \"unit\": \"us\"}, "
-                    "\"max\": {\"value\": 0.0, \"unit\": \"us\"}, "
-                    "\"p99_9\": {\"value\": 0.0, \"unit\": \"us\"}, "
-                    "\"p99_99\": {\"value\": 0.0, \"unit\": \"us\"}, "
-                    "\"p99_999\": {\"value\": 0.0, \"unit\": \"us\"}}\n"
+                 << "    \"iops\": {\"avg\": {\"value\": " << result.benchMetrics.avgIops
+                 << ", \"unit\": \"1/s\"}, \"avg_batch\": {\"value\": "
+                 << result.benchMetrics.avgBatchIops << ", \"unit\": \"1/s\"}},\n"
+                 << "    \"latency\": {\"avg\": {\"value\": " << result.benchMetrics.latency.avgUs
+                 << ", \"unit\": \"us\"}, \"min\": {\"value\": "
+                 << result.benchMetrics.latency.minUs
+                 << ", \"unit\": \"us\"}, \"max\": {\"value\": "
+                 << result.benchMetrics.latency.maxUs
+                 << ", \"unit\": \"us\"}, \"p99_9\": {\"value\": "
+                 << result.benchMetrics.latency.p99_9Us
+                 << ", \"unit\": \"us\"}, \"p99_99\": {\"value\": "
+                 << result.benchMetrics.latency.p99_99Us
+                 << ", \"unit\": \"us\"}, \"p99_999\": {\"value\": "
+                 << result.benchMetrics.latency.p99_999Us << ", \"unit\": \"us\"}}\n"
                  << "  },\n";
     } else {
         jsonFile << "  \"metrics\": null,\n";
     }
 
-    jsonFile << "  \"consistency\": "
-             << (options.check ? "{\"enabled\": true, \"checked\": 0, \"passed\": 0, "
-                                 "\"failed\": 0, \"pass_rate\": 0.0}"
-                               : "null")
-             << ",\n";
+    if (result.consistency.enabled) {
+        const auto passRate = result.consistency.checked == 0
+                                  ? 0.0
+                                  : static_cast<double>(result.consistency.passed) /
+                                        static_cast<double>(result.consistency.checked);
+        jsonFile << "  \"consistency\": {\"enabled\": true, \"checked\": "
+                 << result.consistency.checked << ", \"passed\": " << result.consistency.passed
+                 << ", \"failed\": " << result.consistency.failed << ", \"pass_rate\": " << passRate
+                 << ", \"key\": " << JsonString(result.consistency.key)
+                 << ", \"expected\": " << JsonString(result.consistency.expected)
+                 << ", \"actual\": " << JsonString(result.consistency.actual) << "},\n";
+    } else {
+        jsonFile << "  \"consistency\": " << (options.check ? "{\"enabled\": true}" : "null")
+                 << ",\n";
+    }
     if (result.status.Ok() && result.taskResult.status.ok()) {
         jsonFile << "  \"error\": null\n";
     } else {

@@ -1,7 +1,10 @@
 ﻿#include "kv_test/kv_test_app.h"
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include "asu_client/asu_client.h"
 #include "kv_test/local_asu_transport.h"
 
@@ -18,6 +21,7 @@ std::string CommandTypeName(CommandType command)
 {
     switch (command) {
         case CommandType::CONNECT: return "connect";
+        case CommandType::CONFIG_CHECK: return "config check";
         case CommandType::STORE: return "store";
         case CommandType::RETRIEVE: return "retrieve";
         case CommandType::DELETE: return "delete";
@@ -27,22 +31,39 @@ std::string CommandTypeName(CommandType command)
         case CommandType::POWER_CYCLE_PREPARE: return "power-cycle prepare";
         case CommandType::POWER_CYCLE_VERIFY: return "power-cycle verify";
         case CommandType::BENCH: return "bench";
+        case CommandType::VERSION: return "version";
         case CommandType::UNKNOWN:
         default: return "unknown";
     }
 }
 
-void PrintHelp()
+std::string BenchOpTypeName(BenchOpType op)
+{
+    switch (op) {
+        case BenchOpType::STORE: return "store";
+        case BenchOpType::RETRIEVE: return "retrieve";
+        case BenchOpType::BATCH_STORE: return "batch-store";
+        case BenchOpType::BATCH_RETRIEVE: return "batch-retrieve";
+        case BenchOpType::MIX: return "mix";
+        case BenchOpType::UNKNOWN:
+        default: return "unknown";
+    }
+}
+
+void PrintGeneralHelp()
 {
     std::cout
         << "Usage:\n"
         << "  kv-test <command> [options]\n"
+        << "  kv-test <command> --help\n"
         << "  kv-test --help\n\n"
         << "Config:\n"
         << "  --configpath <path>      Override config file path for this run.\n"
         << "  KV_TEST_CONFIG=<path>    Default config file path when --configpath is omitted.\n\n"
         << "Commands:\n"
         << "  connect\n"
+        << "  config check\n"
+        << "  version\n"
         << "  store | retrieve | delete | exist\n"
         << "  batch-store | batch-retrieve\n"
         << "  power-cycle prepare | power-cycle verify\n"
@@ -67,6 +88,74 @@ void PrintHelp()
         << "  kv-test store --key hello --check\n"
         << "  kv-test retrieve --keys hello,world --check\n";
 }
+
+void PrintCommandHelp(CommandType command)
+{
+    switch (command) {
+        case CommandType::CONNECT:
+            std::cout << "Usage: kv-test connect [--configpath <path>] [--timeout <ms>]\n";
+            break;
+        case CommandType::CONFIG_CHECK:
+            std::cout << "Usage: kv-test config check [--configpath <path>]\n";
+            break;
+        case CommandType::VERSION:
+            std::cout << "Usage: kv-test version\n       kv-test --version\n";
+            break;
+        case CommandType::STORE:
+            std::cout << "Usage: kv-test store (--key <key>|--keys <list>|--count <n>) "
+                         "[--value-size <bytes>] [--seed <n>] [--check]\n";
+            break;
+        case CommandType::RETRIEVE:
+            std::cout << "Usage: kv-test retrieve (--key <key>|--keys <list>|--count <n>) "
+                         "[--value-size <bytes>] [--seed <n>] [--check]\n";
+            break;
+        case CommandType::DELETE:
+            std::cout << "Usage: kv-test delete (--key <key>|--keys <list>|--count <n>) "
+                         "[--seed <n>] [--check]\n";
+            break;
+        case CommandType::EXIST:
+            std::cout << "Usage: kv-test exist (--key <key>|--keys <list>|--count <n>) "
+                         "[--seed <n>]\n";
+            break;
+        case CommandType::BATCH_STORE:
+            std::cout << "Usage: kv-test batch-store (--keys <list>|--count <n>) "
+                         "[--batch-size <n>] [--value-size <bytes>] [--check]\n";
+            break;
+        case CommandType::BATCH_RETRIEVE:
+            std::cout << "Usage: kv-test batch-retrieve (--keys <list>|--count <n>) "
+                         "[--batch-size <n>] [--value-size <bytes>] [--check]\n";
+            break;
+        case CommandType::POWER_CYCLE_PREPARE:
+            std::cout << "Usage: kv-test power-cycle prepare (--keys <list>|--count <n>) "
+                         "[--value-size <bytes>] [--seed <n>]\n";
+            break;
+        case CommandType::POWER_CYCLE_VERIFY:
+            std::cout << "Usage: kv-test power-cycle verify (--keys <list>|--count <n>) "
+                         "[--value-size <bytes>] [--seed <n>] [--check]\n";
+            break;
+        case CommandType::BENCH:
+            std::cout << "Usage: kv-test bench [store|retrieve|batch-store|batch-retrieve|mix] "
+                         "[--io-size <bytes>] [--concurrency <n>] [--duration <sec>]\n"
+                      << "       kv-test bench --op <op> [--batch-size <n>] [--warmup <sec>] "
+                         "[--read-ratio <n>] [--write-ratio <n>]\n";
+            break;
+        case CommandType::UNKNOWN:
+        default: PrintGeneralHelp(); break;
+    }
+}
+
+std::string LoadVersion()
+{
+    std::ifstream versionFile{"version.ini"};
+    std::string line;
+    while (std::getline(versionFile, line)) {
+        const std::string prefix = "VLLM_UC_VERSION=";
+        if (line.rfind(prefix, 0) == 0) { return line.substr(prefix.size()); }
+    }
+    return "unknown";
+}
+
+void PrintVersion() { std::cout << "kv-test version " << LoadVersion() << '\n'; }
 
 void PrintFailure(const Status& status)
 {
@@ -95,12 +184,52 @@ void PrintExistSummary(const CommandOptions& options, const CommandResult& resul
               << " missing=" << (total - existsCount) << '\n';
 }
 
+void PrintConsistencySummary(const CommandResult& result)
+{
+    const auto& summary = result.consistency;
+    if (!summary.enabled) { return; }
+
+    std::cout << "check: checked=" << summary.checked << " passed=" << summary.passed
+              << " failed=" << summary.failed;
+    if (!summary.key.empty()) {
+        std::cout << " key=" << summary.key << " expected=" << summary.expected
+                  << " actual=" << summary.actual;
+    }
+    std::cout << '\n';
+}
+
+std::string FormatBytesPerSec(double bytesPerSec)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2) << (bytesPerSec / (1024.0 * 1024.0));
+    return stream.str();
+}
+
+void PrintBenchSummary(const CommandOptions& options, const CommandResult& result)
+{
+    if (options.command != CommandType::BENCH) { return; }
+
+    const auto& metrics = result.benchMetrics;
+    std::cout << "bench: op=" << BenchOpTypeName(metrics.op) << " elapsed_sec=" << std::fixed
+              << std::setprecision(3) << metrics.elapsedSec
+              << " operations=" << metrics.completedOperations
+              << " entries=" << metrics.completedEntries << " bytes=" << metrics.completedBytes
+              << " bandwidth_mib_s=" << FormatBytesPerSec(metrics.avgBandwidthBytesPerSec)
+              << " iops=" << std::fixed << std::setprecision(2) << metrics.avgIops
+              << " batch_iops=" << metrics.avgBatchIops
+              << " latency_avg_us=" << metrics.latency.avgUs
+              << " latency_p99_9_us=" << metrics.latency.p99_9Us << " errors=" << metrics.errorCount
+              << '\n';
+}
+
 void PrintSuccess(const CommandOptions& options, const CommandResult& result)
 {
     std::cout << "kv-test: succeeded"
               << " command=" << CommandTypeName(options.command) << " config=" << options.configPath
               << '\n';
     PrintExistSummary(options, result);
+    PrintConsistencySummary(result);
+    PrintBenchSummary(options, result);
 }
 
 std::string NormalizeAttrValue(std::string value)
@@ -138,7 +267,15 @@ int KvTestApp::Run(int argc, char** argv)
         return ToExitCode(status);
     }
     if (options.helpRequested) {
-        PrintHelp();
+        if (options.command == CommandType::UNKNOWN) {
+            PrintGeneralHelp();
+        } else {
+            PrintCommandHelp(options.command);
+        }
+        return kExitSuccess;
+    }
+    if (options.command == CommandType::VERSION) {
+        PrintVersion();
         return kExitSuccess;
     }
 
@@ -167,6 +304,16 @@ int KvTestApp::Run(int argc, char** argv)
         return ToExitCode(status);
     }
 
+    if (options.command == CommandType::CONFIG_CHECK) {
+        std::cout << "kv-test: succeeded command=config check config=" << options.configPath
+                  << '\n';
+        std::cout << "config: key_prefix=" << config.keyPrefix << " count=" << config.count
+                  << " value_size=" << config.valueSize
+                  << " timeout_ms=" << config.asuClientConfig.defaultWaitTimeoutMs
+                  << " output=" << config.output.path << '\n';
+        return kExitSuccess;
+    }
+
     status = resultWriter_.Open(config.output);
     if (!status.Ok()) {
         PrintFailure(status);
@@ -192,6 +339,7 @@ int KvTestApp::Run(int argc, char** argv)
         PrintSuccess(options, result);
     } else {
         PrintFailure(status);
+        PrintConsistencySummary(result);
     }
     return ToExitCode(status);
 }
@@ -201,6 +349,8 @@ Status KvTestApp::RunCommand(const CommandOptions& options, const KvTestConfig& 
 {
     switch (options.command) {
         case CommandType::CONNECT: return Status::Success();
+        case CommandType::CONFIG_CHECK:
+        case CommandType::VERSION: return Status::Success();
         case CommandType::STORE:
         case CommandType::BATCH_STORE:
         case CommandType::POWER_CYCLE_PREPARE:
@@ -258,7 +408,8 @@ Status KvTestApp::RunStoreLikeCommand(const CommandOptions& options, const KvTes
     CommandResult retrieveResult;
     status = clientRunner.Retrieve(retrievedBuffers, submitMode, options.timeoutMs, retrieveResult);
     if (status.Ok()) {
-        status = consistencyChecker_.CheckStoreResult(data, retrievedBuffers, retrieveResult);
+        status = consistencyChecker_.CheckStoreResult(data, retrievedBuffers, retrieveResult,
+                                                      result.consistency);
     }
 
     auto retrieveUnregisterStatus = clientRunner.UnregisterBuffers(retrievedBuffers);
@@ -288,8 +439,9 @@ Status KvTestApp::RunRetrieveLikeCommand(const CommandOptions& options, const Kv
                                       ? SubmitMode::SINGLE_ENTRY_PER_CALL
                                       : SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
     status = clientRunner.Retrieve(buffers, submitMode, options.timeoutMs, result);
-    if (status.Ok() && options.check) {
-        status = consistencyChecker_.CheckRetrieveResult(data, buffers, result);
+    const bool checkResult = options.check || options.command == CommandType::POWER_CYCLE_VERIFY;
+    if (status.Ok() && checkResult) {
+        status = consistencyChecker_.CheckRetrieveResult(data, buffers, result, result.consistency);
     }
 
     auto unregisterStatus = clientRunner.UnregisterBuffers(buffers);
@@ -310,7 +462,8 @@ Status KvTestApp::RunDeleteCommand(const CommandOptions& options, const KvTestCo
     CommandResult existResult;
     status = clientRunner.Exist(data.keys, options.timeoutMs, existResult);
     if (!status.Ok()) { return status; }
-    return consistencyChecker_.CheckDeleteResult(data.keys, result, existResult);
+    return consistencyChecker_.CheckDeleteResult(data.keys, result, existResult,
+                                                 result.consistency);
 }
 
 Status KvTestApp::RunExistCommand(const CommandOptions& options, const KvTestConfig& config,

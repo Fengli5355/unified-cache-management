@@ -11,6 +11,7 @@ namespace UC::KVTest {
 
 enum class CommandType {
     CONNECT = 0,
+    CONFIG_CHECK,
     STORE,
     RETRIEVE,
     DELETE,
@@ -20,6 +21,7 @@ enum class CommandType {
     POWER_CYCLE_PREPARE,
     POWER_CYCLE_VERIFY,
     BENCH,
+    VERSION,
     UNKNOWN,
 };
 
@@ -110,6 +112,7 @@ struct CommandOptions {
     bool check{false};
     bool verbose{false};
     bool helpRequested{false};
+    bool versionRequested{false};
     bool singleKeyRequested{false};
     std::string outputPath;
 };
@@ -218,11 +221,22 @@ struct BenchMetrics {
     std::vector<BenchRealtimeSample> realtimeSamples;
 };
 
+struct ConsistencySummary {
+    bool enabled{false};
+    std::uint64_t checked{0};
+    std::uint64_t passed{0};
+    std::uint64_t failed{0};
+    std::string key;
+    std::string expected;
+    std::string actual;
+};
+
 struct CommandResult {
     Status status;
     UC::ASU::TaskResult taskResult;
     UC::ASU::QueryResult queryResult;
     BenchMetrics benchMetrics;
+    ConsistencySummary consistency;
 };
 
 }  // namespace UC::KVTest
