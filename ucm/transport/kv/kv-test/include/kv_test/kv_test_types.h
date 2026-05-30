@@ -109,6 +109,7 @@ struct CommandOptions {
     std::uint64_t timeoutMs{0};
     bool check{false};
     bool verbose{false};
+    bool helpRequested{false};
     std::string outputPath;
 };
 

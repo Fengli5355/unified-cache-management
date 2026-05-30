@@ -41,6 +41,15 @@
 kv-test <command> [options]
 ```
 
+Current implementation notes:
+
+- `kv-test --help` and `kv-test -h` print the command help and exit successfully.
+- `--configpath <path>` is optional when `KV_TEST_CONFIG` is set.
+- Config path priority is: `--configpath` first, then `KV_TEST_CONFIG`.
+- If neither `--configpath` nor `KV_TEST_CONFIG` is set, the tool exits with an error message.
+- Every invocation prints a terminal result line. Successful commands print `kv-test: succeeded ...`; failed commands print `kv-test: failed ...`.
+- The implemented config format is the existing ASU client key-value format, not YAML. A runnable example is provided at `ucm/transport/kv/kv-test/asu_kv_test.conf`.
+
 支持的 `command`：
 
 | command | 功能 |
@@ -110,6 +119,13 @@ kv-test bench --op batch-retrieve --configpath ./config/asu_kv_test.yaml
 - 预热阶段不执行一致性检查；指定 `--check` 时，工具在预热完成后、统计开始前执行一次一致性采样检查。
 
 ## Config File
+
+Current implementation:
+
+- The config file uses the ASU client key-value format.
+- Set `KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf` once to reuse the same config for later commands.
+- `--configpath <path>` can still override the environment variable for a single command.
+- Example file: `ucm/transport/kv/kv-test/asu_kv_test.conf`.
 
 配置文件使用 YAML。`--configpath` 文件必须包含建链参数、KV 生成参数、批量限制、性能参数和输出参数。
 
