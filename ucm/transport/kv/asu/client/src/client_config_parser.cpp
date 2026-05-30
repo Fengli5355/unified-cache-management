@@ -170,8 +170,17 @@ Status LoadAsuClientConfig(const std::string& configPath, AsuClientConfig& confi
             config.clientId = value;
         } else if (key == "viewServiceAddrs" || key == "view_service_addrs") {
             config.viewServiceAddrs = Split(value, ',');
+        } else if (key == "view.config_path" || key == "viewConfigPath" ||
+                   key == "view_config_path") {
+            config.attrs["view.config_path"] = value;
         } else if (key == "defaultWaitTimeoutMs" || key == "default_wait_timeout_ms") {
             config.defaultWaitTimeoutMs = ParseUint64(value);
+        } else if (key == "asu.client.mode" || key == "asu_client.mode" ||
+                   key == "asuClient.mode") {
+            config.attrs["asu_client.mode"] = value;
+        } else if (key == "local_store.path" || key == "localStore.path" ||
+                   key == "localStorePath") {
+            config.attrs["local_store.path"] = value;
         } else if (key == "hashTable.type" || key == "hash_table.type") {
             auto type = value;
             std::transform(type.begin(), type.end(), type.begin(),

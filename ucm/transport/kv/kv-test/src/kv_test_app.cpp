@@ -1,6 +1,9 @@
 ﻿#include "kv_test/kv_test_app.h"
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include "asu_client/asu_client.h"
+#include "kv_test/local_asu_transport.h"
 
 namespace UC::KVTest {
 
@@ -79,6 +82,28 @@ void PrintSuccess(const CommandOptions& options)
               << '\n';
 }
 
+std::string NormalizeAttrValue(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+std::string GetConfigAttr(const KvTestConfig& config, const std::string& key)
+{
+    auto iter = config.asuClientConfig.attrs.find(key);
+    return iter == config.asuClientConfig.attrs.end() ? "" : iter->second;
+}
+
+std::unique_ptr<UC::ASU::AsuClient> CreateClientForConfig(const KvTestConfig& config)
+{
+    if (NormalizeAttrValue(GetConfigAttr(config, "asu_client.mode")) == "local") {
+        return UC::ASU::CreateAsuClient(
+            CreateLocalAsuTransportFactory(GetConfigAttr(config, "local_store.path")));
+    }
+    return UC::ASU::CreateAsuClient();
+}
+
 }  // namespace
 
 KvTestApp::KvTestApp() = default;
@@ -128,7 +153,7 @@ int KvTestApp::Run(int argc, char** argv)
     }
 
     CommandResult result;
-    AsuClientRunner clientRunner(UC::ASU::CreateAsuClient());
+    AsuClientRunner clientRunner(CreateClientForConfig(config));
     status = clientRunner.Init(config);
     if (status.Ok()) { status = RunCommand(options, config, clientRunner, result); }
 
