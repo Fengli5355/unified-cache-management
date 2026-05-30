@@ -224,23 +224,23 @@ void PrintBenchSummary(const CommandOptions& options, const CommandResult& resul
     if (options.command != CommandType::BENCH) { return; }
 
     const auto& metrics = result.benchMetrics;
-    std::cout << "bench: op=" << BenchOpTypeName(metrics.op) << " elapsed_sec=" << std::fixed
+    std::cout << "bench: op=" << BenchOpTypeName(metrics.op) << "\nelapsed_sec=" << std::fixed
               << std::setprecision(3) << metrics.elapsedSec
-              << " operations=" << metrics.completedOperations
-              << " entries=" << metrics.completedEntries << " bytes=" << metrics.completedBytes
-              << " bandwidth_mib_s=" << FormatBytesPerSec(metrics.avgBandwidthBytesPerSec)
-              << " iops=" << std::fixed << std::setprecision(2) << metrics.avgIops
-              << " batch_iops=" << metrics.avgBatchIops
-              << " latency_avg_us=" << metrics.latency.avgUs
-              << " latency_p99_9_us=" << metrics.latency.p99_9Us << " errors=" << metrics.errorCount
-              << '\n';
+              << "\noperations=" << metrics.completedOperations
+              << "\nentries=" << metrics.completedEntries << "\nbytes=" << metrics.completedBytes
+              << "\nbandwidth_mib_s=" << FormatBytesPerSec(metrics.avgBandwidthBytesPerSec)
+              << "\niops=" << std::fixed << std::setprecision(2) << metrics.avgIops
+              << "\nbatch_iops=" << metrics.avgBatchIops
+              << "\nlatency_avg_us=" << metrics.latency.avgUs
+              << "\nlatency_p99_9_us=" << metrics.latency.p99_9Us
+              << "\nerrors=" << metrics.errorCount << '\n';
 }
 
 void PrintSuccess(const CommandOptions& options, const CommandResult& result)
 {
     std::cout << "kv-test: succeeded"
-              << " command=" << CommandTypeName(options.command) << " config=" << options.configPath
-              << '\n';
+              << "\ncommand=" << CommandTypeName(options.command)
+              << "\nconfig=" << options.configPath << '\n';
     PrintExistSummary(options, result);
     PrintConsistencySummary(result);
     PrintBenchSummary(options, result);
