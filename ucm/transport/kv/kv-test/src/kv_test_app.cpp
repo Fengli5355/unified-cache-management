@@ -71,7 +71,10 @@ void PrintGeneralHelp()
         << "Common options:\n"
         << "  --key <key>              Use one key.\n"
         << "  --keys <k1,k2,...>       Use a comma-separated key list.\n"
+        << "  --keys_file <path>       Read comma-separated keys from a file.\n"
         << "  --count <n>              Generate n keys from kv.key_prefix.\n"
+        << "  --prefix <p> --key_start <n> --key_end <n>\n"
+        << "                           Generate keys in the closed interval [start, end].\n"
         << "  --seed <n>               Override kv.seed.\n"
         << "  --value-size <bytes>     Override kv.value_size.\n"
         << "  --batch-size <n>         Override bench.batch_size.\n"
@@ -86,7 +89,9 @@ void PrintGeneralHelp()
         << "  export KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf\n"
         << "  kv-test connect\n"
         << "  kv-test store --key hello --check\n"
-        << "  kv-test retrieve --keys hello,world --check\n";
+        << "  kv-test retrieve --keys hello,world --check\n"
+        << "  kv-test delete --keys_file ./keys.txt\n"
+        << "  kv-test exist --prefix user- --key_start 100 --key_end 199\n";
 }
 
 void PrintCommandHelp(CommandType command)
@@ -102,35 +107,44 @@ void PrintCommandHelp(CommandType command)
             std::cout << "Usage: kv-test version\n       kv-test --version\n";
             break;
         case CommandType::STORE:
-            std::cout << "Usage: kv-test store (--key <key>|--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test store (--key <key>|--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--value-size <bytes>] [--seed <n>] [--check]\n";
             break;
         case CommandType::RETRIEVE:
-            std::cout << "Usage: kv-test retrieve (--key <key>|--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test retrieve (--key <key>|--keys <list>|"
+                         "--keys_file <path>|--count <n>|--prefix <p> --key_start <n> "
+                         "--key_end <n>) "
                          "[--value-size <bytes>] [--seed <n>] [--check]\n";
             break;
         case CommandType::DELETE:
-            std::cout << "Usage: kv-test delete (--key <key>|--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test delete (--key <key>|--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--seed <n>] [--check]\n";
             break;
         case CommandType::EXIST:
-            std::cout << "Usage: kv-test exist (--key <key>|--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test exist (--key <key>|--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--seed <n>]\n";
             break;
         case CommandType::BATCH_STORE:
-            std::cout << "Usage: kv-test batch-store (--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test batch-store (--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--batch-size <n>] [--value-size <bytes>] [--check]\n";
             break;
         case CommandType::BATCH_RETRIEVE:
-            std::cout << "Usage: kv-test batch-retrieve (--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test batch-retrieve (--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--batch-size <n>] [--value-size <bytes>] [--check]\n";
             break;
         case CommandType::POWER_CYCLE_PREPARE:
-            std::cout << "Usage: kv-test power-cycle prepare (--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test power-cycle prepare (--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--value-size <bytes>] [--seed <n>]\n";
             break;
         case CommandType::POWER_CYCLE_VERIFY:
-            std::cout << "Usage: kv-test power-cycle verify (--keys <list>|--count <n>) "
+            std::cout << "Usage: kv-test power-cycle verify (--keys <list>|--keys_file <path>|"
+                         "--count <n>|--prefix <p> --key_start <n> --key_end <n>) "
                          "[--value-size <bytes>] [--seed <n>] [--check]\n";
             break;
         case CommandType::BENCH:

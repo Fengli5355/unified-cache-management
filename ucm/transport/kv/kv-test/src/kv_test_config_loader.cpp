@@ -246,7 +246,9 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
         return Status::Error(kExitInvalidArgument, "batch_size exceeds limits.batch_retrieve_max");
     }
 
-    if (config.count != 0 && config.keyPrefix.empty() && options.keys.empty()) {
+    const bool hasExplicitKeys = !options.keys.empty() || !options.keysFile.empty() ||
+                                 options.keyStartSet || options.keyEndSet;
+    if (config.count != 0 && config.keyPrefix.empty() && !hasExplicitKeys) {
         return Status::Error(kExitInvalidArgument,
                              "kv.key_prefix is required when count-based key generation is used");
     }
