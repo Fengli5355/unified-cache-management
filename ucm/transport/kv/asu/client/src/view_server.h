@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 #include "asu_transport/asu_transport.h"
@@ -50,10 +52,18 @@ struct GlobalView {
 // ViewServer owns global view fetching and refresh decisions.
 class ViewServer {
 public:
+    using RefreshCallback = std::function<Status()>;
+
     // Destroys the view server interface.
-    virtual ~ViewServer() = default;
+    virtual ~ViewServer();
     // Fetches the current global view.
     virtual Status GetGlobalView(GlobalView& view) = 0;
+    // Starts a background refresh for a refreshable operation status.
+    void MaybeRefreshView(const Status& status, RefreshCallback refresh);
+    // Starts a background refresh for a refreshable status or task result.
+    void MaybeRefreshView(const Status& status, const TaskResult& result, RefreshCallback refresh);
+    // Waits for the background refresh worker to finish.
+    void JoinBackgroundRefresh();
     // Returns whether a fetched view should replace the published view.
     virtual bool ShouldPublishView(const GlobalView& publishedView,
                                    const GlobalView& fetchedView) const;
@@ -61,6 +71,13 @@ public:
     virtual bool ShouldRefreshView(const Status& status) const;
     // Returns whether any task status should schedule view refresh.
     virtual bool ShouldRefreshView(const TaskResult& result) const;
+
+private:
+    void RequestBackgroundRefresh(RefreshCallback refresh);
+
+    std::mutex refreshMutex_;
+    bool refreshInProgress_{false};
+    std::thread refreshThread_;
 };
 
 using ViewServerFactory = std::function<std::shared_ptr<ViewServer>(const AsuClientConfig&)>;

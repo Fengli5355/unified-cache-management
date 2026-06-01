@@ -26,7 +26,6 @@
 #include <chrono>
 #include <functional>
 #include <limits>
-#include <thread>
 #include <utility>
 #include "asu_transport/types.h"
 #include "client_config_parser.h"
@@ -74,17 +73,18 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
     }
 
     config_ = config;
-    viewServer_ = viewServerFactory_(config);
-    if (viewServer_ == nullptr) {
+    auto viewServer = viewServerFactory_(config);
+    if (viewServer == nullptr) {
         return Status::Error(StatusCode::NOT_INITIALIZED, "view server factory returned null");
     }
+    std::atomic_store(&viewServer_, viewServer);
     transportConfigs_.clear();
     for (const auto& transportConfig : config.transportConfigs) {
         transportConfigs_[transportConfig.asuId] = transportConfig;
     }
 
     GlobalView view;
-    auto status = viewServer_->GetGlobalView(view);
+    auto status = viewServer->GetGlobalView(view);
     if (!status.ok()) { return status; }
 
     std::shared_ptr<ViewSnapshot> nextSnapshot;
@@ -98,18 +98,19 @@ Status AsuClientImpl::Init(const AsuClientConfig& config)
 
 Status AsuClientImpl::Shutdown()
 {
-    JoinBackgroundRefresh();
-
     std::shared_ptr<ViewSnapshot> snapshot;
     std::vector<std::shared_ptr<AsuTransport>> retiredTransports;
     std::uint64_t waitTimeoutMs = 0;
+    auto viewServer = GetViewServer();
+    if (viewServer != nullptr) { viewServer->JoinBackgroundRefresh(); }
+
     {
         std::lock_guard<std::mutex> lock{mutex_};
         snapshot = std::move(snapshot_);
         retiredTransports = std::move(retiredTransports_);
         waitTimeoutMs = config_.defaultWaitTimeoutMs;
         config_ = AsuClientConfig{};
-        viewServer_.reset();
+        std::atomic_store(&viewServer_, std::shared_ptr<ViewServer>{});
         transportConfigs_.clear();
         registeredResources_.clear();
         initialized_ = false;
@@ -133,14 +134,13 @@ Status AsuClientImpl::Shutdown()
 Status AsuClientImpl::Query(const std::vector<CacheKey>& keys, const QueryOptions& options,
                             QueryResult& result)
 {
-    bool needRefresh = false;
-    auto status = QueryOnce(keys, options, result, needRefresh);
-    if (needRefresh) { RequestBackgroundRefresh(); }
+    auto status = QueryOnce(keys, options, result);
+    MaybeRefreshView(status);
     return status;
 }
 
 Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                                QueryResult& result, bool& needRefresh)
+                                QueryResult& result)
 {
     result.exists.assign(keys.size(), 0);
     result.prefixHitKeys = 0;
@@ -154,7 +154,7 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
             QueryResult childResult;
             auto status = item.second->Query(keys, options, childResult);
             if (!status.ok()) {
-                MarkRefreshIfNeeded(status, needRefresh);
+                MaybeRefreshView(status);
                 finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
                                           "asuId=" + std::to_string(item.first));
                 continue;
@@ -180,7 +180,6 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
         auto transportIter = snapshot->transports.find(route.first);
         if (transportIter == snapshot->transports.end()) {
             auto status = Status::Error(StatusCode::NOT_FOUND, "routed asu transport not found");
-            MarkRefreshIfNeeded(status, needRefresh);
             return WithContext(status, "asuId=" + std::to_string(route.first));
         }
 
@@ -191,7 +190,6 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
         QueryResult childResult;
         auto status = transportIter->second->Query(childKeys, options, childResult);
         if (!status.ok()) {
-            MarkRefreshIfNeeded(status, needRefresh);
             return WithContext(status, "asuId=" + std::to_string(route.first) +
                                            " key_count=" + std::to_string(childKeys.size()));
         }
@@ -234,10 +232,7 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
         PollTask(ctx);
         auto status = BuildResult(ctx, result);
         if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
-        if (viewServer_ != nullptr &&
-            (viewServer_->ShouldRefreshView(status) || viewServer_->ShouldRefreshView(result))) {
-            RequestBackgroundRefresh();
-        }
+        MaybeRefreshView(status, result);
         return status;
     }
 
@@ -250,10 +245,7 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
     if (ctx != nullptr) {
         auto status = WaitTaskContext(ctx, timeoutMs, result);
         if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
-        if (viewServer_ != nullptr &&
-            (viewServer_->ShouldRefreshView(status) || viewServer_->ShouldRefreshView(result))) {
-            RequestBackgroundRefresh();
-        }
+        MaybeRefreshView(status, result);
         return status;
     }
 
@@ -263,14 +255,13 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
 Status AsuClientImpl::RegisterRegions(const std::vector<MemoryRegion>& regions,
                                       std::vector<RegisterResult>& results)
 {
-    bool needRefresh = false;
-    auto status = RegisterRegionsOnce(regions, results, needRefresh);
-    if (needRefresh) { RequestBackgroundRefresh(); }
+    auto status = RegisterRegionsOnce(regions, results);
+    MaybeRefreshView(status);
     return status;
 }
 
 Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
-                                          std::vector<RegisterResult>& results, bool& needRefresh)
+                                          std::vector<RegisterResult>& results)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot) { return NotInitialized(); }
@@ -281,13 +272,11 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
     auto firstIter = snapshot->transports.find(snapshot->asuIds.front());
     if (firstIter == snapshot->transports.end()) {
         auto status = Status::Error(StatusCode::NOT_FOUND, "first asu transport not found");
-        MarkRefreshIfNeeded(status, needRefresh);
         return WithContext(status, "asuIndex=0 asuId=" + std::to_string(snapshot->asuIds.front()));
     }
 
     auto status = firstIter->second->RegisterRegions(regions, results);
     if (!status.ok()) {
-        MarkRefreshIfNeeded(status, needRefresh);
         return WithContext(status, "asuIndex=0 asuId=" + std::to_string(snapshot->asuIds.front()) +
                                        " region_count=" + std::to_string(regions.size()));
     }
@@ -306,7 +295,7 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
         auto iter = snapshot->transports.find(snapshot->asuIds[asuIndex]);
         if (iter == snapshot->transports.end()) {
             auto status = Status::Error(StatusCode::NOT_FOUND, "bound asu transport not found");
-            MarkRefreshIfNeeded(status, needRefresh);
+            MaybeRefreshView(status);
             finalStatus = WithContext(PartialFailed("one or more asu region bindings failed"),
                                       "asuIndex=" + std::to_string(asuIndex) +
                                           " asuId=" + std::to_string(snapshot->asuIds[asuIndex]));
@@ -316,7 +305,7 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
         std::vector<RegisterResult> childResults;
         status = iter->second->BindRegisteredRegions(registeredRegions, childResults);
         if (!status.ok() && finalStatus.ok()) {
-            MarkRefreshIfNeeded(status, needRefresh);
+            MaybeRefreshView(status);
             finalStatus =
                 WithContext(PartialFailed("one or more asu region bindings failed"),
                             "asuIndex=" + std::to_string(asuIndex) +
@@ -337,14 +326,13 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
 Status AsuClientImpl::SubmitAsync(ClientOpType opType, const std::vector<KVBuffer>& entries,
                                   TaskId& taskId)
 {
-    bool needRefresh = false;
-    auto status = SubmitAsyncOnce(opType, entries, taskId, needRefresh);
-    if (needRefresh) { RequestBackgroundRefresh(); }
+    auto status = SubmitAsyncOnce(opType, entries, taskId);
+    MaybeRefreshView(status);
     return status;
 }
 
 Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<KVBuffer>& entries,
-                                      TaskId& taskId, bool& needRefresh)
+                                      TaskId& taskId)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot || !snapshot->router || snapshot->transports.empty()) {
@@ -375,7 +363,6 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<KVB
 
     status = DispatchTask(rawCtx, ExtractEntryKeys(entries), &entries);
     if (!status.ok()) {
-        MarkRefreshIfNeeded(status, needRefresh);
         taskManager_.Remove(taskId);
         taskId = kInvalidTaskId;
         return status;
@@ -388,14 +375,13 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<KVB
 Status AsuClientImpl::SubmitAsync(ClientOpType opType, const std::vector<CacheKey>& keys,
                                   TaskId& taskId)
 {
-    bool needRefresh = false;
-    auto status = SubmitAsyncOnce(opType, keys, taskId, needRefresh);
-    if (needRefresh) { RequestBackgroundRefresh(); }
+    auto status = SubmitAsyncOnce(opType, keys, taskId);
+    MaybeRefreshView(status);
     return status;
 }
 
 Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<CacheKey>& keys,
-                                      TaskId& taskId, bool& needRefresh)
+                                      TaskId& taskId)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot || !snapshot->router || snapshot->transports.empty()) {
@@ -424,7 +410,6 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<Cac
 
     status = DispatchTask(rawCtx, keys);
     if (!status.ok()) {
-        MarkRefreshIfNeeded(status, needRefresh);
         taskManager_.Remove(taskId);
         taskId = kInvalidTaskId;
         return status;
@@ -684,13 +669,12 @@ Status AsuClientImpl::WaitTaskContext(const ClientTaskContextPtr& ctx, std::uint
 
 Status AsuClientImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
 {
-    bool needRefresh = false;
-    auto status = UnregisterRegionsOnce(handles, needRefresh);
-    if (needRefresh) { RequestBackgroundRefresh(); }
+    auto status = UnregisterRegionsOnce(handles);
+    MaybeRefreshView(status);
     return status;
 }
 
-Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh)
+Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles)
 {
     auto snapshot = GetSnapshot();
     if (!snapshot) { return NotInitialized(); }
@@ -699,7 +683,6 @@ Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles
     for (const auto& item : snapshot->transports) {
         auto status = item.second->UnregisterRegions(handles);
         if (!status.ok() && finalStatus.ok()) {
-            MarkRefreshIfNeeded(status, needRefresh);
             finalStatus =
                 WithContext(status, "asuId=" + std::to_string(item.first) +
                                         " handle_count=" + std::to_string(handles.size()));
@@ -823,18 +806,16 @@ Status AsuClientImpl::BindRegisteredResources(AsuId asuId,
 
 Status AsuClientImpl::RefreshView()
 {
-    AsuClientConfig config;
-    std::shared_ptr<ViewServer> viewServer;
+    auto viewServer = GetViewServer();
+    if (viewServer == nullptr) {
+        return Status::Error(StatusCode::NOT_INITIALIZED, "view server is not initialized");
+    }
+
     std::shared_ptr<ViewSnapshot> oldSnapshot;
     {
         std::lock_guard<std::mutex> lock{mutex_};
         if (!initialized_) { return NotInitialized(); }
-        config = config_;
-        viewServer = viewServer_;
         oldSnapshot = snapshot_;
-    }
-    if (viewServer == nullptr) {
-        return Status::Error(StatusCode::NOT_INITIALIZED, "view server is not initialized");
     }
 
     GlobalView view;
@@ -871,29 +852,18 @@ Status AsuClientImpl::RefreshView()
     return Status::OK();
 }
 
-void AsuClientImpl::RequestBackgroundRefresh()
+void AsuClientImpl::MaybeRefreshView(const Status& status)
 {
-    bool shouldStart = false;
-    {
-        std::lock_guard<std::mutex> lock{mutex_};
-        if (!initialized_ || refreshInProgress_) { return; }
-        refreshInProgress_ = true;
-        shouldStart = true;
-    }
-
-    if (!shouldStart) { return; }
-    if (refreshThread_.joinable()) { refreshThread_.join(); }
-
-    refreshThread_ = std::thread([this] {
-        (void)RefreshView();
-        std::lock_guard<std::mutex> lock{mutex_};
-        refreshInProgress_ = false;
-    });
+    auto viewServer = GetViewServer();
+    if (viewServer == nullptr) { return; }
+    viewServer->MaybeRefreshView(status, [this] { return RefreshView(); });
 }
 
-void AsuClientImpl::JoinBackgroundRefresh()
+void AsuClientImpl::MaybeRefreshView(const Status& status, const TaskResult& result)
 {
-    if (refreshThread_.joinable()) { refreshThread_.join(); }
+    auto viewServer = GetViewServer();
+    if (viewServer == nullptr) { return; }
+    viewServer->MaybeRefreshView(status, result, [this] { return RefreshView(); });
 }
 
 Status AsuClientImpl::ShutdownSnapshotTransports(const std::shared_ptr<ViewSnapshot>& snapshot)
@@ -930,9 +900,9 @@ std::shared_ptr<ViewSnapshot> AsuClientImpl::GetSnapshot() const
     return snapshot_;
 }
 
-void AsuClientImpl::MarkRefreshIfNeeded(const Status& status, bool& needRefresh) const
+std::shared_ptr<ViewServer> AsuClientImpl::GetViewServer() const
 {
-    if (viewServer_ != nullptr && viewServer_->ShouldRefreshView(status)) { needRefresh = true; }
+    return std::atomic_load(&viewServer_);
 }
 
 std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
