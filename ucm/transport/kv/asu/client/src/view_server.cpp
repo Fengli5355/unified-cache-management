@@ -134,6 +134,57 @@ GlobalView BuildConfigGlobalView(const AsuClientConfig& config)
     return view;
 }
 
+ViewServer::~ViewServer() { JoinBackgroundRefresh(); }
+
+void ViewServer::MaybeRefreshView(const Status& status, RefreshCallback refresh)
+{
+    if (!ShouldRefreshView(status)) { return; }
+    RequestBackgroundRefresh(std::move(refresh));
+}
+
+void ViewServer::MaybeRefreshView(const Status& status, const TaskResult& result,
+                                  RefreshCallback refresh)
+{
+    if (!ShouldRefreshView(status) && !ShouldRefreshView(result)) { return; }
+    RequestBackgroundRefresh(std::move(refresh));
+}
+
+void ViewServer::RequestBackgroundRefresh(RefreshCallback refresh)
+{
+    if (!refresh) { return; }
+
+    bool shouldStart = false;
+    {
+        std::lock_guard<std::mutex> lock{refreshMutex_};
+        if (refreshInProgress_) { return; }
+        refreshInProgress_ = true;
+        shouldStart = true;
+    }
+
+    if (!shouldStart) { return; }
+    JoinBackgroundRefresh();
+
+    std::thread refreshThread([this, refresh = std::move(refresh)] {
+        (void)refresh();
+        std::lock_guard<std::mutex> lock{refreshMutex_};
+        refreshInProgress_ = false;
+    });
+    {
+        std::lock_guard<std::mutex> lock{refreshMutex_};
+        refreshThread_ = std::move(refreshThread);
+    }
+}
+
+void ViewServer::JoinBackgroundRefresh()
+{
+    std::thread refreshThread;
+    {
+        std::lock_guard<std::mutex> lock{refreshMutex_};
+        refreshThread = std::move(refreshThread_);
+    }
+    if (refreshThread.joinable()) { refreshThread.join(); }
+}
+
 bool ViewServer::ShouldPublishView(const GlobalView& publishedView,
                                    const GlobalView& fetchedView) const
 {

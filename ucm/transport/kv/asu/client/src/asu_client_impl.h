@@ -26,7 +26,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 #include "asu_client/asu_client.h"
@@ -100,12 +99,11 @@ private:
     Status SubmitAsync(ClientOpType opType, const std::vector<KVBuffer>& entries, TaskId& taskId);
     // Builds and dispatches one entry-based task attempt on the current snapshot.
     Status SubmitAsyncOnce(ClientOpType opType, const std::vector<KVBuffer>& entries,
-                           TaskId& taskId, bool& needRefresh);
+                           TaskId& taskId);
     // Submits one key-based client task through the refresh-retry wrapper.
     Status SubmitAsync(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId);
     // Builds and dispatches one key-based task attempt on the current snapshot.
-    Status SubmitAsyncOnce(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId,
-                           bool& needRefresh);
+    Status SubmitAsyncOnce(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId);
 
     // Routes keys, sends each subtask to its transport, and records transport task ids.
     Status DispatchTask(const ClientTaskContextPtr& ctx, const std::vector<CacheKey>& keys,
@@ -122,12 +120,12 @@ private:
 
     // Performs one query attempt on the current snapshot.
     Status QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
-                     QueryResult& result, bool& needRefresh);
+                     QueryResult& result);
     // Performs one register operation on the current snapshot.
     Status RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
-                               std::vector<RegisterResult>& results, bool& needRefresh);
+                               std::vector<RegisterResult>& results);
     // Performs one unregister operation on the current snapshot.
-    Status UnregisterRegionsOnce(const std::vector<MRHandle>& handles, bool& needRefresh);
+    Status UnregisterRegionsOnce(const std::vector<MRHandle>& handles);
 
     // Builds a complete immutable snapshot for a view.
     Status BuildSnapshot(const GlobalView& view, const std::shared_ptr<ViewSnapshot>& oldSnapshot,
@@ -139,21 +137,21 @@ private:
     Status BindRegisteredResources(AsuId asuId, const std::shared_ptr<AsuTransport>& transport);
     // Returns the current immutable snapshot if initialized.
     std::shared_ptr<ViewSnapshot> GetSnapshot() const;
+    // Returns the current view server without taking the client mutex.
+    std::shared_ptr<ViewServer> GetViewServer() const;
 
     // Refreshes the view and publishes it if it is newer.
     Status RefreshView();
-    // Starts a non-blocking refresh after a status indicates stale routing or transport state.
-    void RequestBackgroundRefresh();
-    // Waits for the background refresh worker to finish.
-    void JoinBackgroundRefresh();
+    // Passes an operation status to the view server for refresh decisions.
+    void MaybeRefreshView(const Status& status);
+    // Passes a task result to the view server for refresh decisions.
+    void MaybeRefreshView(const Status& status, const TaskResult& result);
 
     // Shuts down transports owned by a snapshot.
     Status ShutdownSnapshotTransports(const std::shared_ptr<ViewSnapshot>& snapshot);
     // Waits for tracked client tasks before transport shutdown.
     Status DrainTasksBeforeShutdown(std::uint64_t waitTimeoutMs);
 
-    // Marks whether a status suggests the published snapshot should be refreshed.
-    void MarkRefreshIfNeeded(const Status& status, bool& needRefresh) const;
     // Extracts sorted ASU ids from a view.
     static std::vector<AsuId> GetSortedAsuIds(const GlobalView& view);
     // Parses client config from a file path supplied through the public interface.
@@ -177,8 +175,6 @@ private:
     mutable std::mutex mutex_;
     // Tracks whether Init has published a usable snapshot.
     bool initialized_{false};
-    // Prevents duplicate background refresh workers.
-    bool refreshInProgress_{false};
     // Last accepted initialization config.
     AsuClientConfig config_;
     // Source for dynamic global views; may be backed by viewServiceAddrs.
@@ -191,8 +187,6 @@ private:
     std::shared_ptr<ViewSnapshot> snapshot_;
     // Transports removed from the active snapshot but still needed by old tasks.
     std::vector<std::shared_ptr<AsuTransport>> retiredTransports_;
-    // Worker used for non-blocking refresh requests.
-    std::thread refreshThread_;
 };
 
 }  // namespace UC::ASU
