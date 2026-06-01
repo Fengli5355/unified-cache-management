@@ -364,26 +364,6 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<KVB
     const auto count = entries.size();
     ctx->entryStatus.assign(count, Status::OK());
 
-    auto routes = snapshot->router->RouteKeys(ExtractEntryKeys(entries));
-    for (const auto& route : routes) {
-        if (snapshot->transports.find(route.first) == snapshot->transports.end()) {
-            auto status = Status::Error(StatusCode::NOT_FOUND, "routed asu transport not found");
-            MarkRefreshIfNeeded(status, needRefresh);
-            taskId = kInvalidTaskId;
-            return WithContext(status, "asuId=" + std::to_string(route.first));
-        }
-
-        ClientSubTask subTask;
-        subTask.asuId = route.first;
-        subTask.entries.reserve(route.second.size());
-        subTask.originalIndices.reserve(route.second.size());
-        for (auto index : route.second) {
-            subTask.entries.push_back(entries[index]);
-            subTask.originalIndices.push_back(index);
-        }
-        ctx->subTasks.push_back(std::move(subTask));
-    }
-
     auto status = taskManager_.Submit(std::move(ctx), taskId);
     if (!status.ok()) { return status; }
 
@@ -393,7 +373,7 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<KVB
         return Status::Error(StatusCode::INTERNAL_ERROR, "client task disappeared after submit");
     }
 
-    status = DispatchTask(rawCtx);
+    status = DispatchTask(rawCtx, ExtractEntryKeys(entries), &entries);
     if (!status.ok()) {
         MarkRefreshIfNeeded(status, needRefresh);
         taskManager_.Remove(taskId);
@@ -433,26 +413,6 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<Cac
     ctx->viewSnapshot = snapshot;
     ctx->entryStatus.assign(keys.size(), Status::OK());
 
-    auto routes = snapshot->router->RouteKeys(keys);
-    for (const auto& route : routes) {
-        if (snapshot->transports.find(route.first) == snapshot->transports.end()) {
-            auto status = Status::Error(StatusCode::NOT_FOUND, "routed asu transport not found");
-            MarkRefreshIfNeeded(status, needRefresh);
-            taskId = kInvalidTaskId;
-            return WithContext(status, "asuId=" + std::to_string(route.first));
-        }
-
-        ClientSubTask subTask;
-        subTask.asuId = route.first;
-        subTask.keys.reserve(route.second.size());
-        subTask.originalIndices.reserve(route.second.size());
-        for (auto index : route.second) {
-            subTask.keys.push_back(keys[index]);
-            subTask.originalIndices.push_back(index);
-        }
-        ctx->subTasks.push_back(std::move(subTask));
-    }
-
     auto status = taskManager_.Submit(std::move(ctx), taskId);
     if (!status.ok()) { return status; }
 
@@ -462,7 +422,7 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<Cac
         return Status::Error(StatusCode::INTERNAL_ERROR, "client task disappeared after submit");
     }
 
-    status = DispatchTask(rawCtx);
+    status = DispatchTask(rawCtx, keys);
     if (!status.ok()) {
         MarkRefreshIfNeeded(status, needRefresh);
         taskManager_.Remove(taskId);
@@ -474,7 +434,55 @@ Status AsuClientImpl::SubmitAsyncOnce(ClientOpType opType, const std::vector<Cac
     return Status::OK();
 }
 
-Status AsuClientImpl::DispatchTask(const ClientTaskContextPtr& ctx)
+Status AsuClientImpl::DispatchTask(const ClientTaskContextPtr& ctx,
+                                   const std::vector<CacheKey>& keys,
+                                   const std::vector<KVBuffer>* entries)
+{
+    auto snapshot = ctx == nullptr ? nullptr : ctx->viewSnapshot;
+    if (!snapshot) {
+        return Status::Error(StatusCode::NOT_INITIALIZED, "client view is not ready");
+    }
+    if (ctx->opType == ClientOpType::LOAD || ctx->opType == ClientOpType::STORE) {
+        if (entries == nullptr) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT, "entries dispatch requires entries");
+        }
+        if (entries->size() != keys.size()) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT, "entries and keys size mismatch");
+        }
+    }
+
+    ctx->subTasks.clear();
+    auto routes = snapshot->router->RouteKeys(keys);
+    for (const auto& route : routes) {
+        if (snapshot->transports.find(route.first) == snapshot->transports.end()) {
+            return WithContext(
+                Status::Error(StatusCode::NOT_FOUND, "routed asu transport not found"),
+                "asuId=" + std::to_string(route.first));
+        }
+
+        ClientSubTask subTask;
+        subTask.asuId = route.first;
+        subTask.originalIndices.reserve(route.second.size());
+        if (ctx->opType == ClientOpType::DELETE) {
+            subTask.keys.reserve(route.second.size());
+            for (auto index : route.second) {
+                subTask.keys.push_back(keys[index]);
+                subTask.originalIndices.push_back(index);
+            }
+        } else {
+            subTask.entries.reserve(route.second.size());
+            for (auto index : route.second) {
+                subTask.entries.push_back((*entries)[index]);
+                subTask.originalIndices.push_back(index);
+            }
+        }
+        ctx->subTasks.push_back(std::move(subTask));
+    }
+
+    return DispatchSubTasks(ctx);
+}
+
+Status AsuClientImpl::DispatchSubTasks(const ClientTaskContextPtr& ctx)
 {
     auto snapshot = ctx == nullptr ? nullptr : ctx->viewSnapshot;
     if (!snapshot) {

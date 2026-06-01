@@ -107,8 +107,11 @@ private:
     Status SubmitAsyncOnce(ClientOpType opType, const std::vector<CacheKey>& keys, TaskId& taskId,
                            bool& needRefresh);
 
-    // Sends each subtask to its routed transport and records transport task ids.
-    Status DispatchTask(const ClientTaskContextPtr& ctx);
+    // Routes keys, sends each subtask to its transport, and records transport task ids.
+    Status DispatchTask(const ClientTaskContextPtr& ctx, const std::vector<CacheKey>& keys,
+                        const std::vector<KVBuffer>* entries = nullptr);
+    // Sends each prepared subtask to its routed transport and records transport task ids.
+    Status DispatchSubTasks(const ClientTaskContextPtr& ctx);
     // Polls transport subtasks and copies completed entry statuses back by original index.
     bool PollTask(const ClientTaskContextPtr& ctx);
     // Converts a client task context into the public task result shape.
