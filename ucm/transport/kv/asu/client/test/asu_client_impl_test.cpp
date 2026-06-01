@@ -46,6 +46,8 @@ struct TestState {
     std::vector<AsuId> queryCalls;
     std::unordered_map<AsuId, std::size_t> queryKeyCounts;
     std::unordered_map<AsuId, std::vector<CacheKey>> queryKeys;
+    TaskId nextQueryTaskId{4000};
+    std::unordered_map<TaskId, TaskResult> queryTaskResults;
     std::vector<AsuId> loadCalls;
     std::vector<AsuId> storeCalls;
     std::vector<AsuId> deleteCalls;
@@ -112,9 +114,21 @@ public:
         return Status::OK();
     }
 
-    Status QueryAsync(const std::vector<CacheKey>&, const QueryOptions&, TaskId& taskId) override
+    Status QueryAsync(const std::vector<CacheKey>& keys, const QueryOptions& options,
+                      TaskId& taskId) override
     {
-        taskId = 0;
+        QueryResult queryResult;
+        auto status = Query(keys, options, queryResult);
+        if (!status.ok()) {
+            taskId = kInvalidTaskId;
+            return status;
+        }
+
+        TaskResult taskResult;
+        taskResult.status = Status::OK();
+        taskResult.queryResult = std::move(queryResult);
+        taskId = state_->nextQueryTaskId++;
+        state_->queryTaskResults[taskId] = std::move(taskResult);
         return Status::OK();
     }
 
@@ -175,6 +189,11 @@ public:
     Status Check(TaskId taskId, TaskResult& result) override
     {
         state_->checkCalls.emplace_back(config_.asuId);
+        auto queryIter = state_->queryTaskResults.find(taskId);
+        if (queryIter != state_->queryTaskResults.end()) {
+            result = queryIter->second;
+            return Status::OK();
+        }
         auto statusIter = state_->checkResultStatus.find(config_.asuId);
         result.status =
             statusIter == state_->checkResultStatus.end() ? Status::OK() : statusIter->second;

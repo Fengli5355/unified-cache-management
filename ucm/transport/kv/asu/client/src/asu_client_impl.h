@@ -121,6 +121,20 @@ private:
     // Performs one query attempt on the current snapshot.
     Status QueryOnce(const std::vector<CacheKey>& keys, const QueryOptions& options,
                      QueryResult& result);
+    struct QuerySubTask;
+    // Dispatches routed per-key query subtasks asynchronously.
+    Status DoQueryPerKey(const std::shared_ptr<ViewSnapshot>& snapshot,
+                         const std::vector<CacheKey>& keys, const QueryOptions& options,
+                         std::vector<QuerySubTask>& subTasks);
+    // Dispatches prefix query subtasks to all transports asynchronously.
+    Status DoQueryPrefix(const std::shared_ptr<ViewSnapshot>& snapshot,
+                         const std::vector<CacheKey>& keys, const QueryOptions& options,
+                         std::vector<QuerySubTask>& subTasks);
+    // Waits routed per-key query subtasks and merges results by original index.
+    Status WaitQueryPerKey(std::vector<QuerySubTask>& subTasks, QueryResult& result);
+    // Waits prefix query subtasks and merges broadcast results.
+    Status WaitQueryPrefix(const std::vector<CacheKey>& keys, std::vector<QuerySubTask>& subTasks,
+                           QueryResult& result);
     // Performs one register operation on the current snapshot.
     Status RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
                                std::vector<RegisterResult>& results);
@@ -139,6 +153,8 @@ private:
     std::shared_ptr<ViewSnapshot> GetSnapshot() const;
     // Returns the current view server without taking the client mutex.
     std::shared_ptr<ViewServer> GetViewServer() const;
+    // Returns the timeout used to wait for one transport query.
+    std::uint64_t GetQueryWaitTimeoutMs(AsuId asuId, const QueryOptions& options) const;
 
     // Refreshes the view and publishes it if it is newer.
     Status RefreshView();

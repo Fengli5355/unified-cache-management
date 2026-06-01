@@ -48,6 +48,16 @@ std::vector<UC::KV::CacheKey> ExtractEntryKeys(const std::vector<KVBuffer>& entr
     return keys;
 }
 
+struct AsuClientImpl::QuerySubTask {
+    AsuId asuId{0};
+    std::shared_ptr<AsuTransport> transport;
+    std::vector<CacheKey> keys;
+    std::vector<std::size_t> originalIndices;
+    TaskId taskId{kInvalidTaskId};
+    std::uint64_t waitTimeoutMs{0};
+    Status submitStatus{Status::OK()};
+};
+
 AsuClientImpl::AsuClientImpl(TransportFactory transportFactory, ViewServerFactory viewServerFactory)
     : transportFactory_(std::move(transportFactory)),
       viewServerFactory_(std::move(viewServerFactory))
@@ -148,66 +158,174 @@ Status AsuClientImpl::QueryOnce(const std::vector<CacheKey>& keys, const QueryOp
     auto snapshot = GetSnapshot();
     if (!snapshot) { return NotInitialized(); }
 
+    std::vector<QuerySubTask> subTasks;
     if (options.mode == QueryMode::PREFIX) {
-        Status finalStatus = Status::OK();
-        for (const auto& item : snapshot->transports) {
-            QueryResult childResult;
-            auto status = item.second->Query(keys, options, childResult);
-            if (!status.ok()) {
-                MaybeRefreshView(status);
-                finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
-                                          "asuId=" + std::to_string(item.first));
-                continue;
-            }
-            if (childResult.exists.size() != keys.size()) {
-                return Status::Error(
-                    StatusCode::INTERNAL_ERROR,
-                    "prefix query result size mismatch, asuId=" + std::to_string(item.first) +
-                        " expected=" + std::to_string(keys.size()) +
-                        " actual=" + std::to_string(childResult.exists.size()));
-            }
-            result.prefixHitKeys += childResult.prefixHitKeys;
-            for (std::size_t index = 0;
-                 index < result.exists.size() && index < childResult.exists.size(); ++index) {
-                result.exists[index] = result.exists[index] || childResult.exists[index];
-            }
-        }
-        return finalStatus;
+        auto status = DoQueryPrefix(snapshot, keys, options, subTasks);
+        if (!status.ok()) { return status; }
+        return WaitQueryPrefix(keys, subTasks, result);
     }
 
+    auto status = DoQueryPerKey(snapshot, keys, options, subTasks);
+    if (!status.ok()) { return status; }
+    return WaitQueryPerKey(subTasks, result);
+}
+
+Status AsuClientImpl::DoQueryPerKey(const std::shared_ptr<ViewSnapshot>& snapshot,
+                                    const std::vector<CacheKey>& keys, const QueryOptions& options,
+                                    std::vector<QuerySubTask>& subTasks)
+{
+    Status finalStatus = Status::OK();
     auto routes = snapshot->router->RouteKeys(keys);
     for (const auto& route : routes) {
         auto transportIter = snapshot->transports.find(route.first);
         if (transportIter == snapshot->transports.end()) {
             auto status = Status::Error(StatusCode::NOT_FOUND, "routed asu transport not found");
-            return WithContext(status, "asuId=" + std::to_string(route.first));
+            MaybeRefreshView(status);
+            if (finalStatus.ok()) {
+                finalStatus = WithContext(status, "asuId=" + std::to_string(route.first));
+            }
+            continue;
         }
 
-        std::vector<CacheKey> childKeys;
-        childKeys.reserve(route.second.size());
-        for (auto index : route.second) { childKeys.emplace_back(keys[index]); }
+        QuerySubTask subTask;
+        subTask.asuId = route.first;
+        subTask.transport = transportIter->second;
+        subTask.keys.reserve(route.second.size());
+        subTask.originalIndices.reserve(route.second.size());
+        subTask.waitTimeoutMs = GetQueryWaitTimeoutMs(route.first, options);
+        for (auto index : route.second) {
+            subTask.keys.emplace_back(keys[index]);
+            subTask.originalIndices.emplace_back(index);
+        }
 
-        QueryResult childResult;
-        auto status = transportIter->second->Query(childKeys, options, childResult);
+        auto status = subTask.transport->QueryAsync(subTask.keys, options, subTask.taskId);
         if (!status.ok()) {
-            return WithContext(status, "asuId=" + std::to_string(route.first) +
-                                           " key_count=" + std::to_string(childKeys.size()));
+            MaybeRefreshView(status);
+            subTask.taskId = kInvalidTaskId;
+            subTask.submitStatus =
+                WithContext(status, "asuId=" + std::to_string(route.first) +
+                                        " key_count=" + std::to_string(subTask.keys.size()));
+            subTasks.emplace_back(std::move(subTask));
+            continue;
         }
-        if (childResult.exists.size() != childKeys.size()) {
+        subTasks.emplace_back(std::move(subTask));
+    }
+    return finalStatus;
+}
+
+Status AsuClientImpl::DoQueryPrefix(const std::shared_ptr<ViewSnapshot>& snapshot,
+                                    const std::vector<CacheKey>& keys, const QueryOptions& options,
+                                    std::vector<QuerySubTask>& subTasks)
+{
+    for (const auto& item : snapshot->transports) {
+        QuerySubTask subTask;
+        subTask.asuId = item.first;
+        subTask.transport = item.second;
+        subTask.keys = keys;
+        subTask.waitTimeoutMs = GetQueryWaitTimeoutMs(item.first, options);
+
+        auto status = subTask.transport->QueryAsync(subTask.keys, options, subTask.taskId);
+        if (!status.ok()) {
+            MaybeRefreshView(status);
+            subTask.taskId = kInvalidTaskId;
+            subTask.submitStatus = status;
+            subTasks.emplace_back(std::move(subTask));
+            continue;
+        }
+        subTasks.emplace_back(std::move(subTask));
+    }
+    return Status::OK();
+}
+
+Status AsuClientImpl::WaitQueryPerKey(std::vector<QuerySubTask>& subTasks, QueryResult& result)
+{
+    Status finalStatus = Status::OK();
+    for (auto& subTask : subTasks) {
+        if (subTask.taskId == kInvalidTaskId) {
+            if (finalStatus.ok()) { finalStatus = subTask.submitStatus; }
+            continue;
+        }
+
+        TaskResult taskResult;
+        auto status = subTask.transport->Wait(subTask.taskId, subTask.waitTimeoutMs, taskResult);
+        MaybeRefreshView(status, taskResult);
+        if (!status.ok()) {
+            return WithContext(status, "asuId=" + std::to_string(subTask.asuId) +
+                                           " key_count=" + std::to_string(subTask.keys.size()));
+        }
+        if (!taskResult.status.ok()) {
+            return WithContext(taskResult.status,
+                               "asuId=" + std::to_string(subTask.asuId) +
+                                   " key_count=" + std::to_string(subTask.keys.size()));
+        }
+        if (!taskResult.queryResult.has_value()) {
+            return Status::Error(StatusCode::INTERNAL_ERROR,
+                                 "query result missing, asuId=" + std::to_string(subTask.asuId));
+        }
+
+        const auto& childResult = *taskResult.queryResult;
+        if (childResult.exists.size() != subTask.keys.size()) {
             return Status::Error(
                 StatusCode::INTERNAL_ERROR,
-                "query result size mismatch, asuId=" + std::to_string(route.first) +
-                    " expected=" + std::to_string(childKeys.size()) +
+                "query result size mismatch, asuId=" + std::to_string(subTask.asuId) +
+                    " expected=" + std::to_string(subTask.keys.size()) +
                     " actual=" + std::to_string(childResult.exists.size()));
         }
 
-        for (std::size_t index = 0; index < route.second.size(); ++index) {
-            result.exists[route.second[index]] = childResult.exists[index];
-        }
         result.prefixHitKeys += childResult.prefixHitKeys;
+        for (std::size_t index = 0; index < subTask.originalIndices.size(); ++index) {
+            result.exists[subTask.originalIndices[index]] = childResult.exists[index];
+        }
     }
 
-    return Status::OK();
+    return finalStatus;
+}
+
+Status AsuClientImpl::WaitQueryPrefix(const std::vector<CacheKey>& keys,
+                                      std::vector<QuerySubTask>& subTasks, QueryResult& result)
+{
+    Status finalStatus = Status::OK();
+    for (auto& subTask : subTasks) {
+        if (subTask.taskId == kInvalidTaskId) {
+            finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
+                                      "asuId=" + std::to_string(subTask.asuId));
+            continue;
+        }
+
+        TaskResult taskResult;
+        auto status = subTask.transport->Wait(subTask.taskId, subTask.waitTimeoutMs, taskResult);
+        MaybeRefreshView(status, taskResult);
+        if (!status.ok()) {
+            finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
+                                      "asuId=" + std::to_string(subTask.asuId));
+            continue;
+        }
+        if (!taskResult.status.ok()) {
+            finalStatus = WithContext(PartialFailed("one or more asu prefix queries failed"),
+                                      "asuId=" + std::to_string(subTask.asuId));
+            continue;
+        }
+        if (!taskResult.queryResult.has_value()) {
+            return Status::Error(StatusCode::INTERNAL_ERROR,
+                                 "query result missing, asuId=" + std::to_string(subTask.asuId));
+        }
+
+        const auto& childResult = *taskResult.queryResult;
+        if (childResult.exists.size() != keys.size()) {
+            return Status::Error(
+                StatusCode::INTERNAL_ERROR,
+                "prefix query result size mismatch, asuId=" + std::to_string(subTask.asuId) +
+                    " expected=" + std::to_string(keys.size()) +
+                    " actual=" + std::to_string(childResult.exists.size()));
+        }
+
+        result.prefixHitKeys += childResult.prefixHitKeys;
+        for (std::size_t index = 0; index < result.exists.size(); ++index) {
+            result.exists[index] = result.exists[index] || childResult.exists[index];
+        }
+    }
+
+    return finalStatus;
 }
 
 Status AsuClientImpl::LoadAsync(const std::vector<KVBuffer>& entries, TaskId& taskId)
@@ -903,6 +1021,16 @@ std::shared_ptr<ViewSnapshot> AsuClientImpl::GetSnapshot() const
 std::shared_ptr<ViewServer> AsuClientImpl::GetViewServer() const
 {
     return std::atomic_load(&viewServer_);
+}
+
+std::uint64_t AsuClientImpl::GetQueryWaitTimeoutMs(AsuId asuId, const QueryOptions& options) const
+{
+    if (options.timeoutMs != 0) { return options.timeoutMs; }
+
+    std::lock_guard<std::mutex> lock{mutex_};
+    auto iter = transportConfigs_.find(asuId);
+    if (iter == transportConfigs_.end()) { return 0; }
+    return iter->second.queryTimeoutMs;
 }
 
 std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
