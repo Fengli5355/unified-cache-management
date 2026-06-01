@@ -250,26 +250,40 @@ Status AsuClientImpl::WaitQueryPerKey(std::vector<QuerySubTask>& subTasks, Query
         auto status = subTask.transport->Wait(subTask.taskId, subTask.waitTimeoutMs, taskResult);
         MaybeRefreshView(status, taskResult);
         if (!status.ok()) {
-            return WithContext(status, "asuId=" + std::to_string(subTask.asuId) +
-                                           " key_count=" + std::to_string(subTask.keys.size()));
+            if (finalStatus.ok()) {
+                finalStatus =
+                    WithContext(status, "asuId=" + std::to_string(subTask.asuId) +
+                                            " key_count=" + std::to_string(subTask.keys.size()));
+            }
+            continue;
         }
         if (!taskResult.status.ok()) {
-            return WithContext(taskResult.status,
-                               "asuId=" + std::to_string(subTask.asuId) +
-                                   " key_count=" + std::to_string(subTask.keys.size()));
+            if (finalStatus.ok()) {
+                finalStatus = WithContext(taskResult.status,
+                                          "asuId=" + std::to_string(subTask.asuId) +
+                                              " key_count=" + std::to_string(subTask.keys.size()));
+            }
+            continue;
         }
         if (!taskResult.queryResult.has_value()) {
-            return Status::Error(StatusCode::INTERNAL_ERROR,
-                                 "query result missing, asuId=" + std::to_string(subTask.asuId));
+            if (finalStatus.ok()) {
+                finalStatus =
+                    Status::Error(StatusCode::INTERNAL_ERROR,
+                                  "query result missing, asuId=" + std::to_string(subTask.asuId));
+            }
+            continue;
         }
 
         const auto& childResult = *taskResult.queryResult;
         if (childResult.exists.size() != subTask.keys.size()) {
-            return Status::Error(
-                StatusCode::INTERNAL_ERROR,
-                "query result size mismatch, asuId=" + std::to_string(subTask.asuId) +
-                    " expected=" + std::to_string(subTask.keys.size()) +
-                    " actual=" + std::to_string(childResult.exists.size()));
+            if (finalStatus.ok()) {
+                finalStatus = Status::Error(
+                    StatusCode::INTERNAL_ERROR,
+                    "query result size mismatch, asuId=" + std::to_string(subTask.asuId) +
+                        " expected=" + std::to_string(subTask.keys.size()) +
+                        " actual=" + std::to_string(childResult.exists.size()));
+            }
+            continue;
         }
 
         result.prefixHitKeys += childResult.prefixHitKeys;
@@ -349,7 +363,7 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
     if (ctx != nullptr) {
         PollTask(ctx);
         auto status = BuildResult(ctx, result);
-        if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
+        if (ctx->Done()) { (void)taskManager_.Remove(taskId); }
         MaybeRefreshView(status, result);
         return status;
     }
@@ -362,7 +376,7 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
     auto ctx = taskManager_.Get(taskId);
     if (ctx != nullptr) {
         auto status = WaitTaskContext(ctx, timeoutMs, result);
-        if (IsTaskComplete(result)) { (void)taskManager_.Remove(taskId); }
+        if (ctx->Done()) { (void)taskManager_.Remove(taskId); }
         MaybeRefreshView(status, result);
         return status;
     }
@@ -1049,18 +1063,6 @@ std::vector<AsuId> AsuClientImpl::GetSortedAsuIds(const GlobalView& view)
 Status AsuClientImpl::LoadConfig(const std::string& configPath, AsuClientConfig& config)
 {
     return LoadAsuClientConfig(configPath, config);
-}
-
-bool AsuClientImpl::IsTaskComplete(const TaskResult& result)
-{
-    if (!IsTaskStatusComplete(result.status)) { return false; }
-    return std::all_of(result.entryStatus.begin(), result.entryStatus.end(),
-                       [](const Status& status) { return IsTaskStatusComplete(status); });
-}
-
-bool AsuClientImpl::IsTaskStatusComplete(const Status& status)
-{
-    return status.code != StatusCode::IN_PROGRESS && status.code != StatusCode::TIMEOUT;
 }
 
 Status AsuClientImpl::WithContext(Status status, const std::string& context)
