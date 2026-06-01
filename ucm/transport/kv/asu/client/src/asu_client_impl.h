@@ -172,10 +172,6 @@ private:
     static std::vector<AsuId> GetSortedAsuIds(const GlobalView& view);
     // Parses client config from a file path supplied through the public interface.
     static Status LoadConfig(const std::string& configPath, AsuClientConfig& config);
-    // Returns whether all child statuses are terminal.
-    static bool IsTaskComplete(const TaskResult& result);
-    // Returns whether one task status is terminal.
-    static bool IsTaskStatusComplete(const Status& status);
     // Adds context to a status message.
     static Status WithContext(Status status, const std::string& context);
     // Builds the standard not-initialized status.
