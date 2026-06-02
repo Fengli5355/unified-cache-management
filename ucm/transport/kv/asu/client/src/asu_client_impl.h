@@ -132,9 +132,10 @@ private:
                          std::vector<QuerySubTask>& subTasks);
     // Waits routed per-key query subtasks and merges results by original index.
     Status WaitQueryPerKey(std::vector<QuerySubTask>& subTasks, QueryResult& result);
-    // Waits prefix query subtasks and merges broadcast results.
-    Status WaitQueryPrefix(const std::vector<CacheKey>& keys, std::vector<QuerySubTask>& subTasks,
-                           QueryResult& result);
+    // Waits prefix query subtasks and merges routed results.
+    Status WaitQueryPrefix(std::vector<QuerySubTask>& subTasks, QueryResult& result);
+    // Waits prefix query subtasks with check-based early stop; not used by the current flow.
+    Status WaitQueryPrefixNext(std::vector<QuerySubTask>& subTasks, QueryResult& result);
     // Performs one register operation on the current snapshot.
     Status RegisterRegionsOnce(const std::vector<MemoryRegion>& regions,
                                std::vector<RegisterResult>& results);
