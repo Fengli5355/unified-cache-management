@@ -352,6 +352,25 @@ CacheKey FindKeyForAsu(const std::vector<AsuId>& asuIds, AsuId targetAsuId)
     return {};
 }
 
+std::unordered_map<AsuId, std::size_t> CountRoutesByAsu(const std::vector<AsuId>& asuIds,
+                                                        const std::vector<CacheKey>& keys)
+{
+    std::vector<UC::KV::NodeId> nodeIds(asuIds.begin(), asuIds.end());
+    auto router = UC::KV::CreateRouter(nodeIds, UC::KV::HashFunction{}, UC::KV::HashTableConfig{});
+    std::unordered_map<AsuId, std::size_t> counts;
+    auto routes = router->RouteKeys(keys);
+    for (const auto& route : routes) { counts[route.first] = route.second.size(); }
+    return counts;
+}
+
+std::vector<AsuId> RouteAsuIds(const std::unordered_map<AsuId, std::size_t>& counts)
+{
+    std::vector<AsuId> asuIds;
+    asuIds.reserve(counts.size());
+    for (const auto& item : counts) { asuIds.emplace_back(item.first); }
+    return asuIds;
+}
+
 std::vector<KVBuffer> BuildRoutedEntries(const std::vector<AsuId>& routeOrder)
 {
     std::vector<KVBuffer> entries;
@@ -635,71 +654,79 @@ TEST(AsuClientImplTest, Query_PerKeyResultSizeMismatchReturnsInternalError)
     EXPECT_NE(status.message.find("asuId=10"), std::string::npos);
 }
 
-TEST(AsuClientImplTest, Query_PrefixBroadcastsAndMergesResults)
+TEST(AsuClientImplTest, Query_PrefixRoutesAndCountsContiguousHits)
 {
     auto state = std::make_shared<TestState>();
-    state->prefixQueryResults[10] = QueryResult{
-        {1, 0, 0},
-        2
-    };
-    state->prefixQueryResults[20] = QueryResult{
-        {0, 1, 0},
-        3
-    };
-    state->prefixQueryResults[30] = QueryResult{
-        {0, 0, 1},
-        5
-    };
+    const std::vector<AsuId> asuIds{10, 20, 30};
+    const std::vector<CacheKey> keys{"k15", "k25", "k05"};
+    auto routeCounts = CountRoutesByAsu(asuIds, keys);
     auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+    ASSERT_TRUE(client->Init(MakeConfig(asuIds)).ok());
 
     QueryOptions options;
     options.mode = QueryMode::PREFIX;
     QueryResult result;
-    auto status = client->Query({"prefix-a", "prefix-b", "prefix-c"}, options, result);
+    auto status = client->Query(keys, options, result);
 
     EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 1, 1}));
-    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{10});
-    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
-    EXPECT_EQ(state->queryKeyCounts[10], std::size_t{3});
-    EXPECT_EQ(state->queryKeyCounts[20], std::size_t{3});
-    EXPECT_EQ(state->queryKeyCounts[30], std::size_t{3});
+    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 1, 0}));
+    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{2});
+    ExpectSameAsuSet(state->queryCalls, RouteAsuIds(routeCounts));
+    for (const auto& item : routeCounts) {
+        const auto actualCount = state->queryKeyCounts[item.first];
+        const auto expectedCount = item.second;
+        (void)actualCount;
+        (void)expectedCount;
+        EXPECT_EQ(actualCount, expectedCount);
+    }
 }
 
-TEST(AsuClientImplTest, Query_PrefixPartialFailureIncludesAsuContext)
+TEST(AsuClientImplTest, Query_PrefixFailureIncludesAsuContext)
 {
     auto state = std::make_shared<TestState>();
-    state->prefixQueryResults[10] = QueryResult{
-        {1, 0, 0},
-        2
-    };
+    const std::vector<AsuId> asuIds{10, 20, 30};
+    const std::vector<CacheKey> keys{FindKeyForAsu(asuIds, 20), FindKeyForAsu(asuIds, 10),
+                                     FindKeyForAsu(asuIds, 30)};
+    auto routeCounts = CountRoutesByAsu(asuIds, keys);
     state->queryFailures[20] =
         Status::Error(StatusCode::INVALID_ARGUMENT, "fake prefix query failure");
-    state->prefixQueryResults[30] = QueryResult{
-        {0, 0, 1},
-        5
-    };
     auto client = CreateAsuClient(MakeFactory(state));
-    ASSERT_TRUE(client->Init(MakeConfig({10, 20, 30})).ok());
+    ASSERT_TRUE(client->Init(MakeConfig(asuIds)).ok());
 
     QueryOptions options;
     options.mode = QueryMode::PREFIX;
     QueryResult result;
-    auto status = client->Query({"prefix-a", "prefix-b", "prefix-c"}, options, result);
+    auto status = client->Query(keys, options, result);
 
-    EXPECT_EQ(status.code, StatusCode::PARTIAL_FAILED);
+    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
     EXPECT_NE(status.message.find("asuId=20"), std::string::npos);
-    EXPECT_EQ(result.exists, std::vector<std::uint8_t>({1, 0, 1}));
-    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{7});
-    ExpectSameAsuSet(state->queryCalls, {10, 20, 30});
+    EXPECT_EQ(result.prefixHitKeys, std::uint32_t{0});
+    ExpectSameAsuSet(state->queryCalls, RouteAsuIds(routeCounts));
 }
 
 TEST(AsuClientImplTest, Query_PrefixResultSizeMismatchReturnsInternalError)
 {
+    class ShortQueryTransport final : public FakeTransport {
+    public:
+        explicit ShortQueryTransport(std::shared_ptr<TestState> state)
+            : FakeTransport(std::move(state))
+        {
+        }
+
+        Status Query(const std::vector<CacheKey>&, const QueryOptions&,
+                     QueryResult& result) override
+        {
+            result.exists.clear();
+            result.prefixHitKeys = 0;
+            return Status::OK();
+        }
+    };
+
     auto state = std::make_shared<TestState>();
-    state->prefixQueryResults[10] = QueryResult{{1}, 1};
-    auto client = CreateAsuClient(MakeFactory(state));
+    auto client = CreateAsuClient([state] {
+        ++state->createdTransports;
+        return std::unique_ptr<AsuTransport>(new ShortQueryTransport(state));
+    });
     ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
 
     QueryOptions options;
