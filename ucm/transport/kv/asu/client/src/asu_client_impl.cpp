@@ -552,7 +552,11 @@ Status AsuClientImpl::Check(TaskId taskId, TaskResult& result)
     if (ctx != nullptr) {
         PollTask(ctx);
         auto status = BuildResult(ctx, result);
-        if (ctx->Done()) { (void)taskManager_.Remove(taskId); }
+        if (ctx->Done()) {
+            (void)taskManager_.Remove(taskId);
+            ctx.reset();
+            (void)CleanupRetiredTransports();
+        }
         MaybeRefreshView(status, result);
         return status;
     }
@@ -565,7 +569,11 @@ Status AsuClientImpl::Wait(TaskId taskId, std::uint64_t timeoutMs, TaskResult& r
     auto ctx = taskManager_.Get(taskId);
     if (ctx != nullptr) {
         auto status = WaitTaskContext(ctx, timeoutMs, result);
-        if (ctx->Done()) { (void)taskManager_.Remove(taskId); }
+        if (ctx->Done()) {
+            (void)taskManager_.Remove(taskId);
+            ctx.reset();
+            (void)CleanupRetiredTransports();
+        }
         MaybeRefreshView(status, result);
         return status;
     }
@@ -1223,6 +1231,8 @@ Status AsuClientImpl::RefreshView()
         snapshot_ = std::move(nextSnapshot);
     }
 
+    oldSnapshot.reset();
+    (void)CleanupRetiredTransports();
     return Status::OK();
 }
 
@@ -1246,6 +1256,32 @@ Status AsuClientImpl::ShutdownSnapshotTransports(const std::shared_ptr<ViewSnaps
     Status finalStatus = Status::OK();
     for (auto& item : snapshot->transports) {
         auto status = item.second->Shutdown();
+        if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
+    }
+    return finalStatus;
+}
+
+Status AsuClientImpl::CleanupRetiredTransports()
+{
+    std::vector<std::shared_ptr<AsuTransport>> reclaimTransports;
+    {
+        std::lock_guard<std::mutex> lock{mutex_};
+        auto keepIter = retiredTransports_.begin();
+        for (auto iter = retiredTransports_.begin(); iter != retiredTransports_.end(); ++iter) {
+            if (*iter == nullptr || (*iter).use_count() == 1) {
+                reclaimTransports.emplace_back(std::move(*iter));
+                continue;
+            }
+            if (keepIter != iter) { *keepIter = std::move(*iter); }
+            ++keepIter;
+        }
+        retiredTransports_.erase(keepIter, retiredTransports_.end());
+    }
+
+    Status finalStatus = Status::OK();
+    for (auto& transport : reclaimTransports) {
+        if (transport == nullptr) { continue; }
+        auto status = transport->Shutdown();
         if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
     }
     return finalStatus;
