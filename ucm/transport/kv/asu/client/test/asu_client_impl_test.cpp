@@ -54,6 +54,7 @@ struct TestState {
     std::vector<AsuId> checkCalls;
     std::vector<AsuId> waitCalls;
     std::vector<AsuId> cancelCalls;
+    std::vector<AsuId> shutdownCalls;
     std::unordered_map<AsuId, TaskId> childTaskIds;
 };
 
@@ -77,6 +78,7 @@ public:
 
     Status Shutdown() override
     {
+        state_->shutdownCalls.emplace_back(config_.asuId);
         initialized_ = false;
         return Status::OK();
     }
@@ -1475,6 +1477,7 @@ TEST(AsuClientImplTest,
     status = client->Check(taskId, taskResult);
     EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(state->checkCalls, std::vector<AsuId>({20}));
+    EXPECT_EQ(state->shutdownCalls, std::vector<AsuId>({20}));
 
     status = client->StoreAsync(
         {

@@ -166,6 +166,8 @@ private:
 
     // Shuts down transports owned by a snapshot.
     Status ShutdownSnapshotTransports(const std::shared_ptr<ViewSnapshot>& snapshot);
+    // Shuts down retired transports that are no longer referenced by old snapshots or tasks.
+    Status CleanupRetiredTransports();
     // Waits for tracked client tasks before transport shutdown.
     Status DrainTasksBeforeShutdown(std::uint64_t waitTimeoutMs);
 
