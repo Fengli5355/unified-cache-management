@@ -318,7 +318,7 @@ void AsuTransportImpl::WorkerLoop()
 {
     executeQueue_.ConsumerLoop(stop_, [this](TransportTaskContextPtr ctx) {
         if (!ctx) { return; }
-        CompleteTask(ctx);
+        ProcessTask(ctx);
     });
     UC_DEBUG("AsuTransportImpl::WorkerLoop stopped");
 }
@@ -336,7 +336,7 @@ Status AsuTransportImpl::AssignSubBatchConnections(
 {
     Status finalStatus = Status::OK();
     for (auto& subBatchContext : subBatchContexts) {
-        if (subBatchContext.state == TransportSubBatchState::FAILED) { continue; }
+        if (!subBatchContext.status.ok()) { continue; }
 
         auto* channel = connManager_.SelectConnection();
         if (channel == nullptr) {
@@ -344,7 +344,7 @@ Status AsuTransportImpl::AssignSubBatchConnections(
                 Status::Error(StatusCode::CONNECTION_ERROR, "no available connection channel");
             std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                       status);
-            subBatchContext.state = TransportSubBatchState::FAILED;
+            subBatchContext.state = TransportSubBatchState::COMPLETED;
             subBatchContext.status = status;
             if (finalStatus.ok()) { finalStatus = status; }
             continue;
@@ -355,7 +355,7 @@ Status AsuTransportImpl::AssignSubBatchConnections(
     return finalStatus;
 }
 
-void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
+void AsuTransportImpl::ProcessTask(const TransportTaskContextPtr& ctx)
 {
     TransportTaskState expected = TransportTaskState::PENDING;
     if (!ctx->state.compare_exchange_strong(expected, TransportTaskState::INFLIGHT,
@@ -386,11 +386,7 @@ void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
 
     std::lock_guard<std::mutex> lock(ctx->waitMu);
     if (ctx->state.load(std::memory_order_acquire) == TransportTaskState::CANCELED) {
-        const auto releaseStatus =
-            ReleaseAllSubBatchResources(subBatchContexts, sendBufferManager_, flagBufferManager_);
-        if (!releaseStatus.ok()) {
-            UC_WARN("Failed to release canceled sub-batch resources: {}", releaseStatus.message);
-        }
+        ReleaseAllSubBatchResources(subBatchContexts, sendBufferManager_, flagBufferManager_);
         ctx->cv.notify_all();
         return;
     }
@@ -401,11 +397,10 @@ void AsuTransportImpl::CompleteTask(const TransportTaskContextPtr& ctx)
     TryFinalizeTaskFromSubBatches(*ctx);
 
     for (auto& subBatchContext : ctx->subBatchContexts) {
-        if (subBatchContext.state != TransportSubBatchState::FAILED) { continue; }
-        const auto releaseStatus =
-            ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
-        if (ctx->finalStatus.ok() && !releaseStatus.ok()) { ctx->finalStatus = releaseStatus; }
+        if (subBatchContext.status.ok()) { continue; }
+        ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
     }
+    if (ctx->Done()) { ctx->cv.notify_all(); }
 }
 
 void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
@@ -434,8 +429,8 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
         if (!unpackStatus.ok()) {
             std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                       unpackStatus);
-            CompleteSubBatch(*ctx, subBatchContext, TransportSubBatchState::FAILED, unpackStatus,
-                             sendBufferManager_, flagBufferManager_);
+            CompleteSubBatch(*ctx, subBatchContext, unpackStatus, sendBufferManager_,
+                             flagBufferManager_);
             continue;
         }
 
@@ -443,8 +438,8 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
         FillEntryStatusFromCqeResult(response, subBatchContext);
 
         if (subBatchContext.status.ok()) {
-            CompleteSubBatch(*ctx, subBatchContext, TransportSubBatchState::COMPLETED, Status::OK(),
-                             sendBufferManager_, flagBufferManager_);
+            CompleteSubBatch(*ctx, subBatchContext, Status::OK(), sendBufferManager_,
+                             flagBufferManager_);
             continue;
         }
 
@@ -452,10 +447,11 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
             subBatchContext.status.code == StatusCode::ASU_CQE_IO_TIMEOUT) {
             connManager_.ReportFailure(subBatchContext.channel);
         }
-        CompleteSubBatch(*ctx, subBatchContext, TransportSubBatchState::FAILED,
-                         subBatchContext.status, sendBufferManager_, flagBufferManager_);
+        CompleteSubBatch(*ctx, subBatchContext, subBatchContext.status, sendBufferManager_,
+                         flagBufferManager_);
     }
     TryFinalizeTaskFromSubBatches(*ctx);
+    if (ctx->Done()) { ctx->cv.notify_all(); }
 }
 
 void AsuTransportImpl::BuildResult(const TransportTaskContext& ctx, TaskResult& result)

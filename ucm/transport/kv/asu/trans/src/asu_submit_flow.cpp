@@ -41,7 +41,7 @@ std::uint32_t GetSendCountAttr(const std::unordered_map<std::string, std::string
 void SetSubBatchSendFailed(TransportSubBatchContext& subBatchContext, const Status& status)
 {
     std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(), status);
-    subBatchContext.state = TransportSubBatchState::FAILED;
+    subBatchContext.state = TransportSubBatchState::COMPLETED;
     subBatchContext.status = status;
 }
 
@@ -55,7 +55,7 @@ Status SubmitTaskRequests(const TransportTaskContext& ctx, const IoScheduler& io
 {
     Status finalStatus = Status::OK();
     if (IsEntryBatchOp(ctx.opType)) {
-        const auto subBatches = ioScheduler.SplitForAsu(ctx.entries, GetSqeBatchLimit(ctx.opType));
+        const auto subBatches = ioScheduler.SplitForAsu(ctx.entries, GetSqeMaxIoSize(ctx.opType));
         subBatchContexts.reserve(subBatches.size());
         for (const auto& subBatch : subBatches) {
             TransportSubBatchContext subBatchContext;
@@ -67,7 +67,7 @@ Status SubmitTaskRequests(const TransportTaskContext& ctx, const IoScheduler& io
             subBatchContexts.push_back(std::move(subBatchContext));
         }
     } else if (IsKeyBatchOp(ctx.opType)) {
-        const auto subBatches = ioScheduler.SplitForAsu(ctx.keys, GetSqeBatchLimit(ctx.opType));
+        const auto subBatches = ioScheduler.SplitForAsu(ctx.keys, GetSqeMaxIoSize(ctx.opType));
         subBatchContexts.reserve(subBatches.size());
         for (const auto& subBatch : subBatches) {
             TransportSubBatchContext subBatchContext;
@@ -102,14 +102,12 @@ Status BuildSubBatchSendBuffers(std::vector<TransportSubBatchContext>& subBatchC
 
     for (std::size_t index = 0; index < subBatchContexts.size(); ++index) {
         auto& subBatchContext = subBatchContexts[index];
-        if (subBatchContext.state == TransportSubBatchState::FAILED) {
+        if (!subBatchContext.status.ok()) {
             if (finalStatus.ok()) {
                 finalStatus = Status::Error(StatusCode::PARTIAL_FAILED,
                                             "one or more sub-batches failed before send");
             }
-            const auto releaseStatus =
-                ReleaseSubBatchResources(subBatchContext, sendBufferManager, flagBufferManager);
-            if (finalStatus.ok() && !releaseStatus.ok()) { finalStatus = releaseStatus; }
+            ReleaseSubBatchResources(subBatchContext, sendBufferManager, flagBufferManager);
             continue;
         }
 
@@ -118,9 +116,7 @@ Status BuildSubBatchSendBuffers(std::vector<TransportSubBatchContext>& subBatchC
                 Status::Error(StatusCode::NOT_INITIALIZED, "sub-batch flag buffer is not ready");
             SetSubBatchSendFailed(subBatchContext, status);
             if (finalStatus.ok()) { finalStatus = status; }
-            const auto releaseStatus =
-                ReleaseSubBatchResources(subBatchContext, sendBufferManager, flagBufferManager);
-            if (finalStatus.ok() && !releaseStatus.ok()) { finalStatus = releaseStatus; }
+            ReleaseSubBatchResources(subBatchContext, sendBufferManager, flagBufferManager);
             continue;
         }
 

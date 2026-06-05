@@ -31,16 +31,16 @@ class BufferManager;
 
 void InitializeTerminalSubBatchCount(TransportTaskContext& ctx);
 
-Status ReleaseSubBatchResources(TransportSubBatchContext& subBatchContext,
-                                BufferManager& sendBufferManager, BufferManager& flagBufferManager);
+void ReleaseSubBatchResources(TransportSubBatchContext& subBatchContext,
+                              BufferManager& sendBufferManager, BufferManager& flagBufferManager);
 
-Status ReleaseAllSubBatchResources(std::vector<TransportSubBatchContext>& subBatchContexts,
-                                   BufferManager& sendBufferManager,
-                                   BufferManager& flagBufferManager);
+void ReleaseAllSubBatchResources(std::vector<TransportSubBatchContext>& subBatchContexts,
+                                 BufferManager& sendBufferManager,
+                                 BufferManager& flagBufferManager);
 
 void CompleteSubBatch(TransportTaskContext& ctx, TransportSubBatchContext& subBatchContext,
-                      TransportSubBatchState state, const Status& status,
-                      BufferManager& sendBufferManager, BufferManager& flagBufferManager);
+                      const Status& status, BufferManager& sendBufferManager,
+                      BufferManager& flagBufferManager);
 
 void TryFinalizeTaskFromSubBatches(TransportTaskContext& ctx);
 

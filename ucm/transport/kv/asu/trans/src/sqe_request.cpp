@@ -45,13 +45,6 @@ std::uint32_t ToSqeMrKey(MRHandle handle)
     return static_cast<std::uint32_t>(handle);
 }
 
-std::uint64_t GetResponseBufferAddr(const ScatterGatherEntry& flagBuffer)
-{
-    return flagBuffer.addr;
-}
-
-std::uint32_t GetResponseMrKey(const ScatterGatherEntry& flagBuffer) { return flagBuffer.lkey; }
-
 std::uint16_t NextSqeCid(const SqeCidAllocator& allocateSqeCid) { return allocateSqeCid(); }
 
 std::string ToLower(std::string value)
@@ -95,7 +88,7 @@ Status AllocateSubBatchFlagBuffer(std::size_t batchNum, BufferManager& flagBuffe
 
 Status SetSubBatchBuildFailed(TransportSubBatchContext& subBatchContext, const Status& status)
 {
-    subBatchContext.state = TransportSubBatchState::FAILED;
+    subBatchContext.state = TransportSubBatchState::COMPLETED;
     subBatchContext.status = status;
     std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(), status);
     return status;
@@ -110,8 +103,8 @@ KvBatchStoreRequest BuildBatchStoreRequest(
     request.kv_ns_id = GetTransportConfigAttr<std::uint32_t>(attrs, "kv_ns_id");
     request.dtype = GetTransportConfigAttr<std::uint8_t>(attrs, "dtype");
     request.dspec = GetTransportConfigAttr<std::uint8_t>(attrs, "dspec");
-    request.response_buffer_addr = GetResponseBufferAddr(flagBuffer);
-    request.response_mr_key = GetResponseMrKey(flagBuffer);
+    request.response_buffer_addr = flagBuffer.addr;
+    request.response_mr_key = flagBuffer.lkey;
     request.lr = GetTransportConfigAttr<bool>(attrs, "lr");
     request.rflag = true;
     request.batch_number = static_cast<std::uint16_t>(entries.size);
@@ -135,8 +128,8 @@ KvBatchRetrieveRequest BuildBatchRetrieveRequest(
     KvBatchRetrieveRequest request;
     request.cid = cid;
     request.kv_ns_id = GetTransportConfigAttr<std::uint32_t>(attrs, "kv_ns_id");
-    request.response_buffer_addr = GetResponseBufferAddr(flagBuffer);
-    request.response_mr_key = GetResponseMrKey(flagBuffer);
+    request.response_buffer_addr = flagBuffer.addr;
+    request.response_mr_key = flagBuffer.lkey;
     request.lr = GetTransportConfigAttr<bool>(attrs, "lr");
     request.rflag = true;
     request.batch_number = static_cast<std::uint16_t>(entries.size);
@@ -170,8 +163,8 @@ KvDeleteRequest BuildDeleteRequest(const BatchView<CacheKey>& keys,
     KvDeleteRequest request;
     request.cid = cid;
     request.kv_ns_id = GetTransportConfigAttr<std::uint32_t>(attrs, "kv_ns_id");
-    request.response_buffer_addr = GetResponseBufferAddr(flagBuffer);
-    request.response_mr_key = GetResponseMrKey(flagBuffer);
+    request.response_buffer_addr = flagBuffer.addr;
+    request.response_mr_key = flagBuffer.lkey;
     request.rflag = true;
     request.keys = CopyKeys(keys);
     request.batch_number = static_cast<std::uint16_t>(request.keys.size());
@@ -185,8 +178,8 @@ KvExistRequest BuildExistRequest(const BatchView<CacheKey>& keys,
     KvExistRequest request;
     request.cid = cid;
     request.kv_ns_id = GetTransportConfigAttr<std::uint32_t>(attrs, "kv_ns_id");
-    request.response_buffer_addr = GetResponseBufferAddr(flagBuffer);
-    request.response_mr_key = GetResponseMrKey(flagBuffer);
+    request.response_buffer_addr = flagBuffer.addr;
+    request.response_mr_key = flagBuffer.lkey;
     request.rflag = true;
     request.sc = GetTransportConfigAttr<bool>(attrs, "sc");
     request.keys = CopyKeys(keys);
@@ -198,8 +191,8 @@ KvKeepAliveRequest BuildKeepAliveRequest(std::uint16_t cid, const ScatterGatherE
 {
     KvKeepAliveRequest request;
     request.cid = cid;
-    request.response_buffer_addr = GetResponseBufferAddr(flagBuffer);
-    request.response_mr_key = GetResponseMrKey(flagBuffer);
+    request.response_buffer_addr = flagBuffer.addr;
+    request.response_mr_key = flagBuffer.lkey;
     request.rflag = true;
     return request;
 }

@@ -120,8 +120,8 @@ TEST(AsuSubmitFlowTest, SendSubBatchBuffersReportsSendFailures)
 
     EXPECT_EQ(status.code, StatusCode::CONNECTION_ERROR);
     EXPECT_EQ(channel0->GetState(), ChannelState::DRAINING);
-    EXPECT_EQ(subBatchContexts[0].state, TransportSubBatchState::FAILED);
-    EXPECT_EQ(subBatchContexts[1].state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContexts[0].state, TransportSubBatchState::COMPLETED);
+    EXPECT_EQ(subBatchContexts[1].state, TransportSubBatchState::COMPLETED);
     g_sendStatuses.clear();
 }
 
@@ -134,7 +134,7 @@ TEST(AsuSubmitFlowTest, BuildSubBatchSendBuffersReleasesPreFailedSubBatches)
 
     std::vector<TransportSubBatchContext> subBatchContexts(1);
     auto& subBatchContext = subBatchContexts[0];
-    subBatchContext.state = TransportSubBatchState::FAILED;
+    subBatchContext.state = TransportSubBatchState::COMPLETED;
     subBatchContext.status = Status::Error(StatusCode::INVALID_ARGUMENT, "pre-send failure");
     subBatchContext.entryStatus.assign(1, subBatchContext.status);
     ASSERT_TRUE(sendBufferManager.Allocate(64, subBatchContext.sendSge).ok());
@@ -182,7 +182,7 @@ TEST(AsuSubmitFlowTest, BuildSubBatchSendBuffersMarksMissingFlagBufferFailed)
     EXPECT_EQ(status.code, StatusCode::NOT_INITIALIZED);
     EXPECT_TRUE(ioBatches.empty());
     EXPECT_TRUE(subBatchIndexes.empty());
-    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContext.status.code, StatusCode::NOT_INITIALIZED);
     EXPECT_EQ(subBatchContext.channel, nullptr);
     EXPECT_EQ(channel->GetInflightCount(), std::uint32_t{0});
@@ -220,10 +220,10 @@ TEST(AsuSubmitFlowTest, SendSubBatchBuffersFailsAllSentSubBatchesWhenStatusCount
         SendSubBatchBuffers(subBatchContexts, ioBatches, subBatchIndexes, attrs, connManager);
 
     EXPECT_EQ(status.code, StatusCode::INTERNAL_ERROR);
-    EXPECT_EQ(subBatchContexts[0].state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContexts[0].state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContexts[0].status.code, StatusCode::INTERNAL_ERROR);
     EXPECT_EQ(subBatchContexts[0].entryStatus[0].code, StatusCode::INTERNAL_ERROR);
-    EXPECT_EQ(subBatchContexts[1].state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContexts[1].state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContexts[1].status.code, StatusCode::INTERNAL_ERROR);
     EXPECT_EQ(subBatchContexts[1].entryStatus[0].code, StatusCode::INTERNAL_ERROR);
     g_sendStatuses.clear();

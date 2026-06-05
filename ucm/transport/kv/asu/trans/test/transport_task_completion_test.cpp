@@ -69,7 +69,8 @@ TEST_F(TransportTaskCompletionTest, InitializeCountsAlreadyTerminalSubBatches)
     ctx.subBatchContexts.resize(3);
     ctx.subBatchContexts[0].state = TransportSubBatchState::PENDING;
     ctx.subBatchContexts[1].state = TransportSubBatchState::COMPLETED;
-    ctx.subBatchContexts[2].state = TransportSubBatchState::FAILED;
+    ctx.subBatchContexts[2].state = TransportSubBatchState::COMPLETED;
+    ctx.subBatchContexts[2].status = Status::Error(StatusCode::IO_ERROR, "fake error");
 
     InitializeTerminalSubBatchCount(ctx);
 
@@ -82,13 +83,11 @@ TEST_F(TransportTaskCompletionTest, CompleteSubBatchOnlyCountsPendingSubBatchOnc
     TransportSubBatchContext subBatchContext;
     const auto status = Status::Error(StatusCode::IO_ERROR, "fake error");
 
-    CompleteSubBatch(ctx, subBatchContext, TransportSubBatchState::FAILED, status,
-                     sendBufferManager_, flagBufferManager_);
-    CompleteSubBatch(ctx, subBatchContext, TransportSubBatchState::FAILED, status,
-                     sendBufferManager_, flagBufferManager_);
+    CompleteSubBatch(ctx, subBatchContext, status, sendBufferManager_, flagBufferManager_);
+    CompleteSubBatch(ctx, subBatchContext, status, sendBufferManager_, flagBufferManager_);
 
     EXPECT_EQ(ctx.completedSubBatchCount, std::uint32_t{1});
-    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContext.status.code, StatusCode::IO_ERROR);
 }
 
@@ -98,10 +97,8 @@ TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesClearsAllocatedSlots
     ASSERT_TRUE(sendBufferManager_.Allocate(64, subBatchContext.sendSge).ok());
     ASSERT_TRUE(flagBufferManager_.Allocate(64, subBatchContext.flagBuffer).ok());
 
-    const auto status =
-        ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
+    ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
 
-    EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(subBatchContext.sendSge.slot_index, UINT32_MAX);
     EXPECT_EQ(subBatchContext.flagBuffer.slot_index, UINT32_MAX);
     EXPECT_EQ(subBatchContext.sendSge.addr, std::uint64_t{0});
@@ -111,29 +108,25 @@ TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesClearsAllocatedSlots
 TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesPreservesSubBatchStatus)
 {
     TransportSubBatchContext subBatchContext;
-    subBatchContext.state = TransportSubBatchState::FAILED;
+    subBatchContext.state = TransportSubBatchState::COMPLETED;
     subBatchContext.status = Status::Error(StatusCode::IO_ERROR, "send failed");
     ASSERT_TRUE(sendBufferManager_.Allocate(64, subBatchContext.sendSge).ok());
     ASSERT_TRUE(flagBufferManager_.Allocate(64, subBatchContext.flagBuffer).ok());
 
-    const auto releaseStatus =
-        ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
+    ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
 
-    EXPECT_TRUE(releaseStatus.ok()) << releaseStatus.message;
-    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContext.status.code, StatusCode::IO_ERROR);
 }
 
-TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesReturnsFreeFailure)
+TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesClearsSlotsAfterFreeFailure)
 {
     TransportSubBatchContext subBatchContext;
     subBatchContext.sendSge.slot_index = kTestBufferSlotNum;
     ASSERT_TRUE(flagBufferManager_.Allocate(64, subBatchContext.flagBuffer).ok());
 
-    const auto status =
-        ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
+    ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
 
-    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
     EXPECT_EQ(subBatchContext.sendSge.slot_index, UINT32_MAX);
     EXPECT_EQ(subBatchContext.flagBuffer.slot_index, UINT32_MAX);
 }
@@ -149,10 +142,8 @@ TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesReleasesChannelInfli
     TransportSubBatchContext subBatchContext;
     subBatchContext.channel = channel;
 
-    const auto status =
-        ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
+    ReleaseSubBatchResources(subBatchContext, sendBufferManager_, flagBufferManager_);
 
-    EXPECT_TRUE(status.ok()) << status.message;
     EXPECT_EQ(channel->GetInflightCount(), std::uint32_t{0});
     EXPECT_EQ(subBatchContext.channel, nullptr);
 }
@@ -171,7 +162,7 @@ TEST_F(TransportTaskCompletionTest, TryFinalizeEmptyTaskUsesExistingFinalStatus)
 
     TryFinalizeTaskFromSubBatches(ctx);
 
-    EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::FAILED);
+    EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::COMPLETED);
 }
 
 TEST_F(TransportTaskCompletionTest, TryFinalizeWaitsUntilAllSubBatchesFinish)
@@ -192,13 +183,13 @@ TEST_F(TransportTaskCompletionTest, TryFinalizeAggregatesSuccessAndFailure)
     ctx.subBatchContexts.resize(2);
     ctx.subBatchContexts[0].state = TransportSubBatchState::COMPLETED;
     ctx.subBatchContexts[0].status = Status::OK();
-    ctx.subBatchContexts[1].state = TransportSubBatchState::FAILED;
+    ctx.subBatchContexts[1].state = TransportSubBatchState::COMPLETED;
     ctx.subBatchContexts[1].status = Status::Error(StatusCode::IO_ERROR, "sub-batch failed");
     ctx.completedSubBatchCount = 2;
 
     TryFinalizeTaskFromSubBatches(ctx);
 
-    EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::FAILED);
+    EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::COMPLETED);
     EXPECT_EQ(ctx.finalStatus.code, StatusCode::PARTIAL_FAILED);
 
     TransportTaskContext successCtx;

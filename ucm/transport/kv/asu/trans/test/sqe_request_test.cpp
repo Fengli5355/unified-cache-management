@@ -239,7 +239,7 @@ TEST_F(SqeRequestTest, AllocationFailureMarksWholeSubBatchFailed)
         sendBufferManager_, uninitializedFlagBufferManager, *protocolManager_, subBatchContext);
 
     EXPECT_EQ(status.code, StatusCode::NOT_INITIALIZED);
-    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::FAILED);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContext.status.code, StatusCode::NOT_INITIALIZED);
     EXPECT_EQ(subBatchContext.flagBuffer.addr, std::uint64_t{0});
     EXPECT_EQ(subBatchContext.sendSge.addr, std::uint64_t{0});

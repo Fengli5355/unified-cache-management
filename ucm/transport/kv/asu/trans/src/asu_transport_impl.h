@@ -80,7 +80,7 @@ private:
     Status SubmitAsync(std::unique_ptr<TransportTaskContext> ctx, TaskId& taskId);
     void WorkerLoop();
     void CompletionLoop();
-    void CompleteTask(const TransportTaskContextPtr& ctx);
+    void ProcessTask(const TransportTaskContextPtr& ctx);
     Status AssignSubBatchConnections(std::vector<TransportSubBatchContext>& subBatchContexts);
 
     void PollTaskCompletions(const TransportTaskContextPtr& ctx);
