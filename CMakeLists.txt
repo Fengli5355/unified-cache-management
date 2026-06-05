@@ -31,6 +31,7 @@ if(BUILD_UCM_MINDIE)
 endif()
 
 set(FLAGS_PUBLIC "-Wall -Werror -fPIC -Wl,-z,relro,-z,now")
+
 set(FLAGS_DEBUG "-O0 -g")
 set(FLAGS_RELEASE "-s -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2")
 string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
