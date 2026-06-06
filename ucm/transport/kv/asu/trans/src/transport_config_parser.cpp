@@ -25,7 +25,9 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <limits>
+#include <unordered_map>
 #include <utility>
 #include "asu_transport/asu_transport.h"
 #include "config_parser_common.h"
@@ -35,11 +37,55 @@ namespace UC::ASU {
 
 namespace {
 
+using TransportConfigSetter = std::function<void(TransportConfig&, const std::string&)>;
+
 std::string ToLower(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return value;
+}
+
+void SetTransportEndpoints(TransportConfig& config, const std::string& value)
+{
+    config.endpoints.clear();
+    for (const auto& endpointValue : SplitConfigValue(value, ';')) {
+        config.endpoints.emplace_back(ParseTransportEndpoint(endpointValue));
+    }
+}
+
+// clang-format off
+const std::unordered_map<std::string, TransportConfigSetter> g_transportConfigSetters = {
+    {"asuName",            [](TransportConfig& c, const std::string& v) { c.asuName = v; }},
+    {"asu_name",           [](TransportConfig& c, const std::string& v) { c.asuName = v; }},
+    {"asuId",              [](TransportConfig& c, const std::string& v) { c.asuId = ParseConfigUint64(v); }},
+    {"asu_id",             [](TransportConfig& c, const std::string& v) { c.asuId = ParseConfigUint64(v); }},
+    {"endpoint",           [](TransportConfig& c, const std::string& v) { SetTransportEndpoints(c, v); }},
+    {"endpoints",          [](TransportConfig& c, const std::string& v) { SetTransportEndpoints(c, v); }},
+    {"queryTimeoutMs",     [](TransportConfig& c, const std::string& v) { c.queryTimeoutMs = ParseConfigUint64(v); }},
+    {"query_timeout_ms",   [](TransportConfig& c, const std::string& v) { c.queryTimeoutMs = ParseConfigUint64(v); }},
+    {"loadTimeoutMs",      [](TransportConfig& c, const std::string& v) { c.loadTimeoutMs = ParseConfigUint64(v); }},
+    {"load_timeout_ms",    [](TransportConfig& c, const std::string& v) { c.loadTimeoutMs = ParseConfigUint64(v); }},
+    {"storeTimeoutMs",     [](TransportConfig& c, const std::string& v) { c.storeTimeoutMs = ParseConfigUint64(v); }},
+    {"store_timeout_ms",   [](TransportConfig& c, const std::string& v) { c.storeTimeoutMs = ParseConfigUint64(v); }},
+    {"maxInflightTasks",   [](TransportConfig& c, const std::string& v) { c.maxInflightTasks = static_cast<std::uint32_t>(ParseConfigUint64(v)); }},
+    {"max_inflight_tasks", [](TransportConfig& c, const std::string& v) { c.maxInflightTasks = static_cast<std::uint32_t>(ParseConfigUint64(v)); }},
+    {"maxInflightBytes",   [](TransportConfig& c, const std::string& v) { c.maxInflightBytes = ParseConfigUint64(v); }},
+    {"max_inflight_bytes", [](TransportConfig& c, const std::string& v) { c.maxInflightBytes = ParseConfigUint64(v); }},
+};
+// clang-format on
+
+bool ApplyTransportConfigField(TransportConfig& config, const std::string& key,
+                               const std::string& value)
+{
+    const auto iter = g_transportConfigSetters.find(key);
+    if (iter != g_transportConfigSetters.end()) {
+        iter->second(config, value);
+        return true;
+    }
+    if (ApplyTransportBufferConfigField(config, key, value)) { return true; }
+    if (ApplyTransportIoNumConfigField(config, key, value)) { return true; }
+    return ApplyTransportProviderConfigField(config, key, value);
 }
 
 }  // namespace
@@ -140,30 +186,7 @@ Status LoadTransportConfig(const std::string& configPath, TransportConfig& confi
 
         const auto key = TrimConfigValue(line.substr(0, pos));
         const auto value = TrimConfigValue(line.substr(pos + 1));
-        if (key == "asuName" || key == "asu_name") {
-            config.asuName = value;
-        } else if (key == "asuId" || key == "asu_id") {
-            config.asuId = ParseConfigUint64(value);
-        } else if (key == "endpoint" || key == "endpoints") {
-            config.endpoints.clear();
-            for (const auto& endpointValue : SplitConfigValue(value, ';')) {
-                config.endpoints.emplace_back(ParseTransportEndpoint(endpointValue));
-            }
-        } else if (key == "queryTimeoutMs" || key == "query_timeout_ms") {
-            config.queryTimeoutMs = ParseConfigUint64(value);
-        } else if (key == "loadTimeoutMs" || key == "load_timeout_ms") {
-            config.loadTimeoutMs = ParseConfigUint64(value);
-        } else if (key == "storeTimeoutMs" || key == "store_timeout_ms") {
-            config.storeTimeoutMs = ParseConfigUint64(value);
-        } else if (key == "maxInflightTasks" || key == "max_inflight_tasks") {
-            config.maxInflightTasks = static_cast<std::uint32_t>(ParseConfigUint64(value));
-        } else if (key == "maxInflightBytes" || key == "max_inflight_bytes") {
-            config.maxInflightBytes = ParseConfigUint64(value);
-        } else if (ApplyTransportBufferConfigField(config, key, value)) {
-            continue;
-        } else if (ApplyTransportIoNumConfigField(config, key, value)) {
-            continue;
-        } else if (ApplyTransportProviderConfigField(config, key, value)) {
+        if (ApplyTransportConfigField(config, key, value)) {
             continue;
         } else {
             config.attrs[key] = value;

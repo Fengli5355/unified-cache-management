@@ -24,67 +24,90 @@
 #include "config_parser_common.h"
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
+#include <functional>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 
 namespace UC::ASU {
 namespace {
+
+using EndpointSetter = std::function<void(AsuEndpoint&, const std::string&)>;
+using TransportConfigSetter = std::function<void(TransportConfig&, const std::string&)>;
 
 void SetEndpointAttr(AsuEndpoint& endpoint, const std::string& key, const std::string& value)
 {
     endpoint.attrs[key] = value;
 }
 
-void ApplyTransportEndpointField(AsuEndpoint& endpoint, const std::string& key,
-                                 const std::string& value)
-{
-    if (key == "ip" || key == "local.comm_id" || key == "localCommId") {
-        endpoint.ip = value;
-    } else if (key == "port") {
-        endpoint.port = static_cast<std::uint16_t>(ParseConfigUint64(value));
-    } else if (key == "protocol") {
-        endpoint.protocol = ParseConfigProtocol(value);
-    } else if (key == "numa_node" || key == "numaNode") {
-        endpoint.numaNode = static_cast<std::int32_t>(ParseConfigUint64(value));
-    } else if (key == "device_id" || key == "deviceId" || key == "local.phy_device_id" ||
-               key == "localPhyDeviceId") {
-        endpoint.deviceId = static_cast<std::int32_t>(ParseConfigUint64(value));
-    } else if (key == "hca_name" || key == "hcaName") {
-        endpoint.hcaName = value;
-    } else if (key == "hca_port" || key == "hcaPort") {
-        endpoint.hcaPort = static_cast<std::uint8_t>(ParseConfigUint64(value));
-    } else {
-        endpoint.attrs[key] = value;
-    }
-}
+// clang-format off
+const std::unordered_map<std::string, EndpointSetter> g_transportEndpointSetters = {
+    {"ip",                  [](AsuEndpoint& e, const std::string& v) { e.ip = v; }},
+    {"local.comm_id",       [](AsuEndpoint& e, const std::string& v) { e.ip = v; }},
+    {"localCommId",         [](AsuEndpoint& e, const std::string& v) { e.ip = v; }},
+    {"port",                [](AsuEndpoint& e, const std::string& v) { e.port = static_cast<std::uint16_t>(ParseConfigUint64(v)); }},
+    {"protocol",            [](AsuEndpoint& e, const std::string& v) { e.protocol = ParseConfigProtocol(v); }},
+    {"numa_node",           [](AsuEndpoint& e, const std::string& v) { e.numaNode = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"numaNode",            [](AsuEndpoint& e, const std::string& v) { e.numaNode = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"device_id",           [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"deviceId",            [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"local.phy_device_id", [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"localPhyDeviceId",    [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"hca_name",            [](AsuEndpoint& e, const std::string& v) { e.hcaName = v; }},
+    {"hcaName",             [](AsuEndpoint& e, const std::string& v) { e.hcaName = v; }},
+    {"hca_port",            [](AsuEndpoint& e, const std::string& v) { e.hcaPort = static_cast<std::uint8_t>(ParseConfigUint64(v)); }},
+    {"hcaPort",             [](AsuEndpoint& e, const std::string& v) { e.hcaPort = static_cast<std::uint8_t>(ParseConfigUint64(v)); }},
+};
 
-void ApplyClientViewEndpointField(AsuEndpoint& endpoint, const std::string& key,
-                                  const std::string& value)
+const std::unordered_map<std::string, EndpointSetter> g_clientViewEndpointSetters = {
+    {"protocol",            [](AsuEndpoint& e, const std::string& v) { e.protocol = ParseConfigProtocol(v); SetEndpointAttr(e, "protocol", v); }},
+    {"placement",           [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "placement", v); }},
+    {"port",                [](AsuEndpoint& e, const std::string& v) { e.port = static_cast<std::uint16_t>(ParseConfigUint64(v)); }},
+    {"local.comm_id",       [](AsuEndpoint& e, const std::string& v) { e.ip = v; }},
+    {"localCommId",         [](AsuEndpoint& e, const std::string& v) { e.ip = v; }},
+    {"local.phy_device_id", [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"localPhyDeviceId",    [](AsuEndpoint& e, const std::string& v) { e.deviceId = static_cast<std::int32_t>(ParseConfigUint64(v)); }},
+    {"tc",                  [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "tc", v); }},
+    {"sl",                  [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "sl", v); }},
+    {"send_size",           [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "send_size", v); }},
+    {"sendSize",            [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "send_size", v); }},
+    {"flag_size",           [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "flag_size", v); }},
+    {"flagSize",            [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "flag_size", v); }},
+    {"remote_send_addr",    [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "remote_send_addr", v); }},
+    {"remoteSendAddr",      [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "remote_send_addr", v); }},
+    {"remote_flag_addr",    [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "remote_flag_addr", v); }},
+    {"remoteFlagAddr",      [](AsuEndpoint& e, const std::string& v) { SetEndpointAttr(e, "remote_flag_addr", v); }},
+};
+
+const std::unordered_map<std::string, TransportConfigSetter> g_transportBufferConfigSetters = {
+    {"sendBufferSlotSize",              [](TransportConfig& c, const std::string& v) { c.sendBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"send_buffer_slot_size",           [](TransportConfig& c, const std::string& v) { c.sendBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"ioBuffer.sendBufferSlotSize",     [](TransportConfig& c, const std::string& v) { c.sendBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"io_buffer.send_buffer_slot_size", [](TransportConfig& c, const std::string& v) { c.sendBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"sendBufferSlotNum",               [](TransportConfig& c, const std::string& v) { c.sendBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"send_buffer_slot_num",            [](TransportConfig& c, const std::string& v) { c.sendBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"ioBuffer.sendBufferSlotNum",      [](TransportConfig& c, const std::string& v) { c.sendBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"io_buffer.send_buffer_slot_num",  [](TransportConfig& c, const std::string& v) { c.sendBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"flagBufferSlotSize",              [](TransportConfig& c, const std::string& v) { c.flagBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"flag_buffer_slot_size",           [](TransportConfig& c, const std::string& v) { c.flagBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"ioBuffer.flagBufferSlotSize",     [](TransportConfig& c, const std::string& v) { c.flagBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"io_buffer.flag_buffer_slot_size", [](TransportConfig& c, const std::string& v) { c.flagBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"flagBufferSlotNum",               [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"flag_buffer_slot_num",            [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"ioBuffer.flagBufferSlotNum",      [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"io_buffer.flag_buffer_slot_num",  [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+};
+// clang-format on
+
+bool ApplyEndpointConfigField(const std::unordered_map<std::string, EndpointSetter>& setters,
+                              AsuEndpoint& endpoint, const std::string& key,
+                              const std::string& value)
 {
-    if (key == "protocol") {
-        endpoint.protocol = ParseConfigProtocol(value);
-        SetEndpointAttr(endpoint, "protocol", value);
-    } else if (key == "placement") {
-        SetEndpointAttr(endpoint, "placement", value);
-    } else if (key == "port") {
-        endpoint.port = static_cast<std::uint16_t>(ParseConfigUint64(value));
-    } else if (key == "local.comm_id" || key == "localCommId") {
-        endpoint.ip = value;
-    } else if (key == "local.phy_device_id" || key == "localPhyDeviceId") {
-        endpoint.deviceId = static_cast<std::int32_t>(ParseConfigUint64(value));
-    } else if (key == "tc") {
-        SetEndpointAttr(endpoint, "tc", value);
-    } else if (key == "sl") {
-        SetEndpointAttr(endpoint, "sl", value);
-    } else if (key == "send_size" || key == "sendSize") {
-        SetEndpointAttr(endpoint, "send_size", value);
-    } else if (key == "flag_size" || key == "flagSize") {
-        SetEndpointAttr(endpoint, "flag_size", value);
-    } else if (key == "remote_send_addr" || key == "remoteSendAddr") {
-        SetEndpointAttr(endpoint, "remote_send_addr", value);
-    } else if (key == "remote_flag_addr" || key == "remoteFlagAddr") {
-        SetEndpointAttr(endpoint, "remote_flag_addr", value);
-    }
+    const auto iter = setters.find(key);
+    if (iter == setters.end()) { return false; }
+    iter->second(endpoint, value);
+    return true;
 }
 
 }  // namespace
@@ -134,21 +157,9 @@ TransProviderType ParseConfigTransProviderType(std::string value)
 bool ApplyTransportBufferConfigField(TransportConfig& config, const std::string& key,
                                      const std::string& value)
 {
-    if (key == "sendBufferSlotSize" || key == "send_buffer_slot_size" ||
-        key == "ioBuffer.sendBufferSlotSize" || key == "io_buffer.send_buffer_slot_size") {
-        config.sendBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "sendBufferSlotNum" || key == "send_buffer_slot_num" ||
-               key == "ioBuffer.sendBufferSlotNum" || key == "io_buffer.send_buffer_slot_num") {
-        config.sendBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "flagBufferSlotSize" || key == "flag_buffer_slot_size" ||
-               key == "ioBuffer.flagBufferSlotSize" || key == "io_buffer.flag_buffer_slot_size") {
-        config.flagBufferSlotSize = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "flagBufferSlotNum" || key == "flag_buffer_slot_num" ||
-               key == "ioBuffer.flagBufferSlotNum" || key == "io_buffer.flag_buffer_slot_num") {
-        config.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else {
-        return false;
-    }
+    const auto iter = g_transportBufferConfigSetters.find(key);
+    if (iter == g_transportBufferConfigSetters.end()) { return false; }
+    iter->second(config, value);
     return true;
 }
 
@@ -222,8 +233,11 @@ AsuEndpoint ParseTransportEndpoint(const std::string& value)
     for (const auto& item : SplitConfigValue(value, ',')) {
         const auto pos = item.find('=');
         if (pos == std::string::npos) { continue; }
-        ApplyTransportEndpointField(endpoint, TrimConfigValue(item.substr(0, pos)),
-                                    TrimConfigValue(item.substr(pos + 1)));
+        const auto key = TrimConfigValue(item.substr(0, pos));
+        const auto fieldValue = TrimConfigValue(item.substr(pos + 1));
+        if (!ApplyEndpointConfigField(g_transportEndpointSetters, endpoint, key, fieldValue)) {
+            endpoint.attrs[key] = fieldValue;
+        }
     }
     return endpoint;
 }
@@ -247,8 +261,9 @@ AsuEndpoint ParseClientViewEndpoint(const std::string& value)
     for (const auto& item : SplitConfigValue(value, ',')) {
         const auto pos = item.find('=');
         if (pos == std::string::npos) { continue; }
-        ApplyClientViewEndpointField(endpoint, TrimConfigValue(item.substr(0, pos)),
-                                     TrimConfigValue(item.substr(pos + 1)));
+        (void)ApplyEndpointConfigField(g_clientViewEndpointSetters, endpoint,
+                                       TrimConfigValue(item.substr(0, pos)),
+                                       TrimConfigValue(item.substr(pos + 1)));
     }
     return endpoint;
 }

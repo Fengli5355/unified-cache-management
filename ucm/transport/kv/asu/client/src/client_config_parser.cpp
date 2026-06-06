@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -36,6 +37,13 @@
 namespace UC::ASU {
 namespace {
 
+struct ClientConfigParseContext {
+    AsuClientConfig& config;
+    std::unordered_map<AsuId, AsuInfo>& asuInfos;
+};
+
+using ClientConfigSetter = std::function<void(ClientConfigParseContext&, const std::string&)>;
+
 AsuInfo ParseAsuInfo(const std::string& value)
 {
     AsuInfo info;
@@ -43,6 +51,75 @@ AsuInfo ParseAsuInfo(const std::string& value)
         info.endpoints.emplace_back(ParseClientViewEndpoint(endpointValue));
     }
     return info;
+}
+
+void SetHashTableType(AsuClientConfig& config, std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    if (value == "MAGLEV" || value == "MAGLEV_FULL_SPREAD") {
+        config.attrs["hash_table.type"] = "MAGLEV";
+    } else if (value == "CONTIGUOUS_BLOCK_AFFINITY") {
+        config.attrs["hash_table.type"] = "CONTIGUOUS_BLOCK_AFFINITY";
+    } else if (value == "BATCH_TOPK_AFFINITY") {
+        config.attrs["hash_table.type"] = "BATCH_TOPK_AFFINITY";
+    } else {
+        config.attrs["hash_table.type"] = "RING_HASH";
+    }
+}
+
+void AddTransportConfigs(AsuClientConfig& config, const std::string& value)
+{
+    for (const auto& asuIdText : SplitConfigValue(value, ',')) {
+        TransportConfig transportConfig;
+        transportConfig.asuId = ParseConfigUint64(asuIdText);
+        config.transportConfigs.emplace_back(std::move(transportConfig));
+    }
+}
+
+// clang-format off
+const std::unordered_map<std::string, ClientConfigSetter> g_clientConfigSetters = {
+    {"clientId",                                                   [](ClientConfigParseContext& c, const std::string& v) { c.config.clientId = v; }},
+    {"client_id",                                                  [](ClientConfigParseContext& c, const std::string& v) { c.config.clientId = v; }},
+    {"viewServiceAddrs",                                           [](ClientConfigParseContext& c, const std::string& v) { c.config.viewServiceAddrs = SplitConfigValue(v, ','); }},
+    {"view_service_addrs",                                         [](ClientConfigParseContext& c, const std::string& v) { c.config.viewServiceAddrs = SplitConfigValue(v, ','); }},
+    {"view.config_path",                                           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["view.config_path"] = v; }},
+    {"viewConfigPath",                                             [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["view.config_path"] = v; }},
+    {"view_config_path",                                           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["view.config_path"] = v; }},
+    {"defaultWaitTimeoutMs",                                       [](ClientConfigParseContext& c, const std::string& v) { c.config.defaultWaitTimeoutMs = ParseConfigUint64(v); }},
+    {"default_wait_timeout_ms",                                    [](ClientConfigParseContext& c, const std::string& v) { c.config.defaultWaitTimeoutMs = ParseConfigUint64(v); }},
+    {"router.type",                                                [](ClientConfigParseContext& c, const std::string& v) { SetHashTableType(c.config, v); }},
+    {"routerType",                                                 [](ClientConfigParseContext& c, const std::string& v) { SetHashTableType(c.config, v); }},
+    {"hashTable.type",                                             [](ClientConfigParseContext& c, const std::string& v) { SetHashTableType(c.config, v); }},
+    {"hash_table.type",                                            [](ClientConfigParseContext& c, const std::string& v) { SetHashTableType(c.config, v); }},
+    {"hashTable.ringHash.virtualNodeCount",                        [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["ring_hash.virtual_node_count"] = v; }},
+    {"ring_hash.virtual_node_count",                               [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["ring_hash.virtual_node_count"] = v; }},
+    {"hashTable.maglev.tableSize",                                 [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["maglev.table_size"] = v; }},
+    {"maglev.table_size",                                          [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["maglev.table_size"] = v; }},
+    {"hashTable.contiguousBlockAffinity.blockCount",               [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.block_count"] = v; }},
+    {"contiguous_block_affinity.block_count",                      [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.block_count"] = v; }},
+    {"hashTable.contiguousBlockAffinity.fullSpreadType",           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.full_spread_type"] = v; }},
+    {"contiguous_block_affinity.full_spread_type",                 [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.full_spread_type"] = v; }},
+    {"hashTable.contiguousBlockAffinity.dynamicAdjustEnabled",     [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.dynamic_adjust_enabled"] = v; }},
+    {"contiguous_block_affinity.dynamic_adjust_enabled",           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["contiguous_block_affinity.dynamic_adjust_enabled"] = v; }},
+    {"hashTable.batchTopKAffinity.topK",                           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["batch_topk_affinity.top_k"] = v; }},
+    {"batch_topk_affinity.top_k",                                  [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["batch_topk_affinity.top_k"] = v; }},
+    {"hashTable.batchTopKAffinity.dynamicAdjustEnabled",           [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["batch_topk_affinity.dynamic_adjust_enabled"] = v; }},
+    {"batch_topk_affinity.dynamic_adjust_enabled",                 [](ClientConfigParseContext& c, const std::string& v) { c.config.attrs["batch_topk_affinity.dynamic_adjust_enabled"] = v; }},
+    {"transport.asuIds",                                           [](ClientConfigParseContext& c, const std::string& v) { AddTransportConfigs(c.config, v); }},
+    {"transport.asu_ids",                                          [](ClientConfigParseContext& c, const std::string& v) { AddTransportConfigs(c.config, v); }},
+    {"asuIds",                                                     [](ClientConfigParseContext& c, const std::string& v) { AddTransportConfigs(c.config, v); }},
+    {"asu_ids",                                                    [](ClientConfigParseContext& c, const std::string& v) { AddTransportConfigs(c.config, v); }},
+};
+// clang-format on
+
+bool ApplyClientConfigField(ClientConfigParseContext& context, const std::string& key,
+                            const std::string& value)
+{
+    const auto iter = g_clientConfigSetters.find(key);
+    if (iter == g_clientConfigSetters.end()) { return false; }
+    iter->second(context, value);
+    return true;
 }
 
 }  // namespace
@@ -58,6 +135,7 @@ Status LoadAsuClientConfig(const std::string& configPath, AsuClientConfig& confi
     config = AsuClientConfig{};
     std::unordered_map<AsuId, AsuInfo> asuInfos;
     std::vector<std::pair<std::string, std::string>> transportFields;
+    ClientConfigParseContext context{config, asuInfos};
     std::string line;
     while (std::getline(configFile, line)) {
         line = TrimConfigValue(line);
@@ -68,56 +146,8 @@ Status LoadAsuClientConfig(const std::string& configPath, AsuClientConfig& confi
 
         const auto key = TrimConfigValue(line.substr(0, pos));
         const auto value = TrimConfigValue(line.substr(pos + 1));
-        if (key == "clientId" || key == "client_id") {
-            config.clientId = value;
-        } else if (key == "viewServiceAddrs" || key == "view_service_addrs") {
-            config.viewServiceAddrs = SplitConfigValue(value, ',');
-        } else if (key == "view.config_path" || key == "viewConfigPath" ||
-                   key == "view_config_path") {
-            config.attrs["view.config_path"] = value;
-        } else if (key == "defaultWaitTimeoutMs" || key == "default_wait_timeout_ms") {
-            config.defaultWaitTimeoutMs = ParseConfigUint64(value);
-        } else if (key == "router.type" || key == "routerType" || key == "hashTable.type" ||
-                   key == "hash_table.type") {
-            auto type = value;
-            std::transform(type.begin(), type.end(), type.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
-            if (type == "MAGLEV" || type == "MAGLEV_FULL_SPREAD") {
-                config.attrs["hash_table.type"] = "MAGLEV";
-            } else if (type == "CONTIGUOUS_BLOCK_AFFINITY") {
-                config.attrs["hash_table.type"] = "CONTIGUOUS_BLOCK_AFFINITY";
-            } else if (type == "BATCH_TOPK_AFFINITY") {
-                config.attrs["hash_table.type"] = "BATCH_TOPK_AFFINITY";
-            } else {
-                config.attrs["hash_table.type"] = "RING_HASH";
-            }
-        } else if (key == "hashTable.ringHash.virtualNodeCount" ||
-                   key == "ring_hash.virtual_node_count") {
-            config.attrs["ring_hash.virtual_node_count"] = value;
-        } else if (key == "hashTable.maglev.tableSize" || key == "maglev.table_size") {
-            config.attrs["maglev.table_size"] = value;
-        } else if (key == "hashTable.contiguousBlockAffinity.blockCount" ||
-                   key == "contiguous_block_affinity.block_count") {
-            config.attrs["contiguous_block_affinity.block_count"] = value;
-        } else if (key == "hashTable.contiguousBlockAffinity.fullSpreadType" ||
-                   key == "contiguous_block_affinity.full_spread_type") {
-            config.attrs["contiguous_block_affinity.full_spread_type"] = value;
-        } else if (key == "hashTable.contiguousBlockAffinity.dynamicAdjustEnabled" ||
-                   key == "contiguous_block_affinity.dynamic_adjust_enabled") {
-            config.attrs["contiguous_block_affinity.dynamic_adjust_enabled"] = value;
-        } else if (key == "hashTable.batchTopKAffinity.topK" ||
-                   key == "batch_topk_affinity.top_k") {
-            config.attrs["batch_topk_affinity.top_k"] = value;
-        } else if (key == "hashTable.batchTopKAffinity.dynamicAdjustEnabled" ||
-                   key == "batch_topk_affinity.dynamic_adjust_enabled") {
-            config.attrs["batch_topk_affinity.dynamic_adjust_enabled"] = value;
-        } else if (key == "transport.asuIds" || key == "transport.asu_ids" || key == "asuIds" ||
-                   key == "asu_ids") {
-            for (const auto& asuIdText : SplitConfigValue(value, ',')) {
-                TransportConfig transportConfig;
-                transportConfig.asuId = ParseConfigUint64(asuIdText);
-                config.transportConfigs.emplace_back(std::move(transportConfig));
-            }
+        if (ApplyClientConfigField(context, key, value)) {
+            continue;
         } else {
             AsuId asuId{0};
             std::string attrKey;
