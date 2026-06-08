@@ -8,6 +8,7 @@
 #include <sstream>
 #include <unordered_map>
 #include "asu_client/asu_client.h"
+#include "kv_test/fake_backend.h"
 #include "kv_test/local_asu_transport.h"
 
 namespace UC::KVTest {
@@ -403,6 +404,8 @@ int KvTestApp::Run(int argc, char** argv)
         PrintFailure(status);
         return ToExitCode(status);
     }
+
+    MaybePrepareFakeBackend(config);
 
     status = hcommConfigAdapter_.ValidateChannelSource(config);
     if (!status.Ok()) {

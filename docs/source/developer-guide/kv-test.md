@@ -150,6 +150,10 @@ default_wait_timeout_ms=5000
 
 asu.client.mode=local
 local_store.path=./kv-test-local-store
+# To exercise AsuClient + AsuTransportImpl with a local mock backend:
+# asu.client.mode=fake_backend
+# fake_backend.path=./kv-test-fake-backend-store
+# fake_backend.latency_ms=1
 
 view.config_path=./ucm/transport/kv/kv-test/asu_view.conf
 hash_table.type=RING_HASH
@@ -205,8 +209,10 @@ These fields are parsed by `kv-test` itself:
 
 | Field | Description |
 | --- | --- |
-| `asu.client.mode` | Set to `local` to use the file-backed local ASU transport. Any other value uses the default ASU client transport factory. |
+| `asu.client.mode` | Set to `local` to use the file-backed local ASU transport. Set to `fake_backend` to use normal `AsuClient` and `AsuTransportImpl` paths with kv-test's mock backend. Any other value uses the default ASU client transport factory. |
 | `local_store.path` | Local transport storage root. Defaults to `./kv-test-local-store` if local mode is enabled and this field is empty. |
+| `fake_backend.path` | fake_backend storage root. If empty, fake_backend reuses `local_store.path`; if both are empty, it uses `./kv-test-fake-backend-store`. |
+| `fake_backend.latency_ms` | Mock backend completion delay in milliseconds. Default is `1`. |
 | `kv.key_prefix` | Prefix for count-based key generation. |
 | `kv.seed` | Seed for deterministic value generation. |
 | `kv.value_size` | Value size for normal commands. |
@@ -230,8 +236,15 @@ These fields are parsed by `kv-test` itself:
 ## Local mode
 
 `asu.client.mode=local` creates a file-backed local ASU transport. It is useful
-for smoke testing without connecting to a real ViewServer, Hcomm, network, or
-ASU hardware.
+for early kv-test self-checks without connecting to a real ViewServer, Hcomm,
+network, or ASU hardware.
+
+Local mode still creates `AsuClient`, but injects kv-test's in-process
+`LocalAsuTransport` factory instead of using the developed `AsuTransportImpl`.
+It is intended for developing and debugging kv-test command parsing, config
+loading, data generation, buffer allocation, consistency checks, report output,
+and basic store/retrieve/delete/exist behavior with a local file-backed
+transport.
 
 Local mode still requires each ASU to have at least one endpoint in `asu_info`.
 The endpoint's `local.comm_id` and `port` are validated so local tests catch
@@ -251,6 +264,67 @@ The local transport stores each key under:
 
 The directory persists across separate `kv-test` commands. Delete removes the
 corresponding file. Exist checks whether the file exists.
+
+Because this mode replaces the ASU transport implementation, it can exercise
+`AsuClient` routing and aggregation at a high level, but it does not validate
+`AsuTransportImpl` request building, send-buffer submission, polling, or
+CQE/result-buffer parsing paths.
+
+## fake_backend mode
+
+`asu.client.mode=fake_backend` is for the current `AsuClient` +
+`AsuTransportImpl` software integration stage. kv-test creates the normal
+`AsuClient` path and uses the developed `AsuTransportImpl`, but replaces the
+missing backend send/completion side with a local mock backend.
+
+Use this mode to validate:
+
+- `AsuClient` routing and per-ASU subtask splitting
+- `AsuClient` task aggregation, `Wait`, and result merging
+- `AsuTransportImpl` async submit paths for store, retrieve, delete, and query
+- SQE packing into send buffers
+- flag buffer/CQE polling
+- CQE status handling and result-buffer parsing
+- current register/bind bookkeeping paths
+
+Mocked or not covered in this mode:
+
+- real device or network `Send`
+- real ASU backend execution
+- real CQE writeback by device
+- real memory registration, `rkey`, and `lkey` semantics
+- real connection failure, drain, and recovery behavior
+
+The fake backend stores each key under:
+
+```text
+<fake_backend.path>/asu-<kv_ns_id>/<fnv64-key-hash>.bin
+```
+
+If `fake_backend.path` is empty, fake backend reuses `local_store.path`. If both
+are empty, it uses:
+
+```text
+./kv-test-fake-backend-store
+```
+
+During this temporary integration stage, fake backend maps each
+`TransportConfig.asuId` into `TransportConfig.attrs["kv_ns_id"]` before
+`Transport::Init`. The packed SQE carries `kv_ns_id`, so the mock backend can
+recover a per-ASU namespace from the send buffer without changing the Transport
+`Send` interface. This is a kv-test-only temporary semantic mapping, not a
+long-term protocol statement that KVNS_ID is ASU ID.
+
+Mode differences:
+
+| Item | local | fake_backend |
+| --- | --- | --- |
+| Main development stage | kv-test self-check | `AsuClient` + `AsuTransportImpl` software integration |
+| Uses normal `AsuClient` routing | Yes | Yes |
+| Uses developed `AsuTransportImpl` submit/poll/CQE code | No | Yes |
+| Backend | kv-test `LocalAsuTransport` | kv-test `MockSend` + local CQE completion |
+| Filesystem store layout | `<root>/asu-<asuId>/<hex-key>.bin` | `<root>/asu-<kv_ns_id>/<fnv64-key-hash>.bin` |
+| Validates real device communication | No | No |
 
 ## Command behavior
 

@@ -167,6 +167,7 @@ Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& con
     config.limits = BatchLimits{};
     config.bench = BenchConfig{};
     config.output = OutputConfig{};
+    config.fakeBackend = FakeBackendConfig{};
     config.asuClientMode.clear();
     config.localStorePath.clear();
     config.keyPrefix.clear();
@@ -181,6 +182,12 @@ Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& con
     try {
         GetStringAny(values, {"asu.client.mode"}, config.asuClientMode);
         GetStringAny(values, {"local_store.path"}, config.localStorePath);
+        GetStringAny(values, {"fake_backend.path", "fakebackend.path"},
+                     config.fakeBackend.storePath);
+        GetUint64Any(values,
+                     {"fake_backend.latency_ms", "fakebackend.latency_ms", "fake_backend.latencyms",
+                      "fakebackend.latencyms"},
+                     config.fakeBackend.latencyMs);
 
         GetStringAny(values, {"kv.key_prefix"}, config.keyPrefix);
 
