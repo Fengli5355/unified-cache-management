@@ -4,3 +4,4 @@ BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build-kv-test}"
 
 export KV_TEST_CONFIG="${SCRIPT_DIR}/asu_kv_test.conf"
 export PATH="${PATH}:${BUILD_DIR}/ucm/transport/kv/kv-test"
+export UC_LOGGER_LEVEL=debug
