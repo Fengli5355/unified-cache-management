@@ -69,26 +69,36 @@ T GetTransportConfigAttr(const std::unordered_map<std::string, std::string>& att
     }
 }
 
-std::size_t GetFlagBufferSize(std::size_t batchNum)
+std::size_t GetFlagBufferSize(KvOpcode opcode, std::size_t batchNum)
 {
-    return kFlagBufferHeaderSize + (batchNum + 1) / 2;
+    switch (opcode) {
+        case KvOpcode::BatchStore:
+        case KvOpcode::BatchRetrieve: return kFlagBufferHeaderSize + (batchNum + 1) / 2;
+        case KvOpcode::Delete:
+        case KvOpcode::Exist: return kFlagBufferHeaderSize + (batchNum + 7) / 8;
+        default: return kFlagBufferHeaderSize + 1;
+    }
 }
 
-Status AllocateSubBatchFlagBuffer(std::size_t batchNum, BufferManager& flagBufferManager,
+Status AllocateSubBatchFlagBuffer(KvOpcode opcode, std::size_t batchNum,
+                                  BufferManager& flagBufferManager,
                                   TransportSubBatchContext& subBatchContext)
 {
-    auto status =
-        flagBufferManager.Allocate(GetFlagBufferSize(batchNum), subBatchContext.flagBuffer);
+    const auto flagBufferSize = GetFlagBufferSize(opcode, batchNum);
+    auto status = flagBufferManager.Allocate(flagBufferSize, subBatchContext.flagBuffer);
     if (!status.ok()) {
-        UC_ERROR("Allocate sub-batch flag buffer failed batch_num={} size={} code={} message={}",
-                 batchNum, GetFlagBufferSize(batchNum), static_cast<int>(status.code),
-                 status.message);
+        UC_ERROR(
+            "Allocate sub-batch flag buffer failed opcode={} batch_num={} size={} code={} "
+            "message={}",
+            static_cast<int>(opcode), batchNum, flagBufferSize, static_cast<int>(status.code),
+            status.message);
         subBatchContext.flagBuffer = {};
         return status;
     }
-    UC_DEBUG("Allocated sub-batch flag buffer batch_num={} size={} addr={} length={} lkey={}",
-             batchNum, GetFlagBufferSize(batchNum), subBatchContext.flagBuffer.addr,
-             subBatchContext.flagBuffer.length, subBatchContext.flagBuffer.lkey);
+    UC_DEBUG(
+        "Allocated sub-batch flag buffer opcode={} batch_num={} size={} addr={} length={} lkey={}",
+        static_cast<int>(opcode), batchNum, flagBufferSize, subBatchContext.flagBuffer.addr,
+        subBatchContext.flagBuffer.length, subBatchContext.flagBuffer.lkey);
     return Status::OK();
 }
 
@@ -124,15 +134,16 @@ void ResetSubBatchContext(std::size_t batchNum, TransportSubBatchContext& subBat
     subBatchContext.status = Status::OK();
 }
 
-Status PrepareSubBatchRequest(TransportOpType opType, std::uint16_t cid, std::size_t batchNum,
-                              BufferManager& flagBufferManager,
+Status PrepareSubBatchRequest(TransportOpType opType, KvOpcode opcode, std::uint16_t cid,
+                              std::size_t batchNum, BufferManager& flagBufferManager,
                               TransportSubBatchContext& subBatchContext)
 {
     subBatchContext.opType = opType;
     subBatchContext.cid = cid;
     UC_DEBUG("Prepare sub-batch request op_type={} cid={} batch_num={}", static_cast<int>(opType),
              cid, batchNum);
-    auto status = AllocateSubBatchFlagBuffer(batchNum, flagBufferManager, subBatchContext);
+    auto status =
+        AllocateSubBatchFlagBuffer(opcode, batchNum, flagBufferManager, subBatchContext);
     if (!status.ok()) { return SetSubBatchBuildFailed(subBatchContext, status); }
     return Status::OK();
 }
@@ -428,7 +439,7 @@ Status AsuTransportImpl::SubmitEntrySubBatchRequest(TransportOpType opType,
     UC_DEBUG("Submit entry sub-batch request op_type={} opcode={} batch_size={}",
              static_cast<int>(opType), static_cast<int>(opcode), subBatch.entries.size);
 
-    status = PrepareSubBatchRequest(opType, AllocateRequestCid(), subBatch.entries.size,
+    status = PrepareSubBatchRequest(opType, opcode, AllocateRequestCid(), subBatch.entries.size,
                                     flagBufferManager_, subBatchContext);
     if (!status.ok()) { return status; }
 
@@ -453,7 +464,7 @@ Status AsuTransportImpl::SubmitKeySubBatchRequest(TransportOpType opType,
     UC_DEBUG("Submit key sub-batch request op_type={} opcode={} batch_size={}",
              static_cast<int>(opType), static_cast<int>(opcode), subBatch.keys.size);
 
-    status = PrepareSubBatchRequest(opType, AllocateRequestCid(), subBatch.keys.size,
+    status = PrepareSubBatchRequest(opType, opcode, AllocateRequestCid(), subBatch.keys.size,
                                     flagBufferManager_, subBatchContext);
     if (!status.ok()) { return status; }
 
@@ -475,7 +486,7 @@ Status AsuTransportImpl::SubmitKeepAliveRequest(TransportSubBatchContext& subBat
     if (!status.ok() || !shouldSubmit) { return status; }
     UC_DEBUG("Submit keep-alive request opcode={}", static_cast<int>(opcode));
 
-    status = PrepareSubBatchRequest(opType, AllocateRequestCid(), 1, flagBufferManager_,
+    status = PrepareSubBatchRequest(opType, opcode, AllocateRequestCid(), 1, flagBufferManager_,
                                     subBatchContext);
     if (!status.ok()) { return status; }
 
