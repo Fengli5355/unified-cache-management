@@ -135,6 +135,7 @@ private:
     std::thread worker_;
     std::thread completionWorker_;
     std::atomic_bool stop_{false};
+    bool traceEnabled_{false};
     std::atomic<std::uint16_t> nextRequestCid_{1};
 
     std::mutex registeredRegionsMu_;
