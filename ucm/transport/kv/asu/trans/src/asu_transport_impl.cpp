@@ -24,6 +24,8 @@
 #include "asu_transport_impl.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -33,6 +35,7 @@
 #include "connection_internal.h"
 #include "connection_manager.h"
 #include "logger.h"
+#include "sub_batch_trace.h"
 #include "transport_config_parser.h"
 
 namespace UC::ASU {
@@ -114,6 +117,11 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
     auto queueDepth = std::max<std::size_t>(2, static_cast<std::size_t>(config_.maxInflightTasks));
     executeQueue_.Setup(queueDepth + 1);
     stop_.store(false, std::memory_order_release);
+
+    const auto* traceEnv = std::getenv("ASU_TRACE");
+    traceEnabled_ = (traceEnv != nullptr && std::string(traceEnv) == "1");
+    if (traceEnabled_) { UC_INFO("AsuTransportImpl::Init sub-batch trace enabled (ASU_TRACE=1)"); }
+
     worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
     completionWorker_ = std::thread(&AsuTransportImpl::CompletionLoop, this);
     UC_DEBUG("AsuTransportImpl::Init OK: queueDepth={}", queueDepth);
@@ -434,6 +442,19 @@ void AsuTransportImpl::ProcessTask(const TransportTaskContextPtr& ctx)
     }
     if (!subBatchContexts.empty()) { ctx->subBatchContexts = std::move(subBatchContexts); }
     ctx->finalStatus = finalStatus;
+
+    if (traceEnabled_) {
+        const std::size_t totalItems = IsEntryBatchOp(ctx->opType) ? ctx->entries.size
+                                       : IsKeyBatchOp(ctx->opType) ? ctx->keys.size
+                                                                   : static_cast<std::size_t>(0);
+        std::cout << "\n";
+        trace::PrintTraceTable(
+            std::cout,
+            trace::CaptureTraceSnapshot(ctx->taskId, ctx->opType, TransportTaskState::INFLIGHT,
+                                        ctx->finalStatus, totalItems, ctx->subBatchContexts));
+        std::cout << std::flush;
+    }
+
     ctx->InitializeTerminalSubBatchCount();
     ctx->TryFinalizeFromSubBatches();
     UC_DEBUG(
@@ -508,7 +529,21 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
         CompleteSubBatch(*ctx, subBatchContext, subBatchContext.status);
     }
     ctx->TryFinalizeFromSubBatches();
-    if (ctx->Done()) { ctx->cv.notify_all(); }
+    if (ctx->Done()) {
+        if (traceEnabled_) {
+            const std::size_t totalItems = IsEntryBatchOp(ctx->opType) ? ctx->entries.size
+                                           : IsKeyBatchOp(ctx->opType)
+                                               ? ctx->keys.size
+                                               : static_cast<std::size_t>(0);
+            std::cout << "\n";
+            trace::PrintTraceTable(
+                std::cout, trace::CaptureTraceSnapshot(
+                               ctx->taskId, ctx->opType, ctx->state.load(std::memory_order_acquire),
+                               ctx->finalStatus, totalItems, ctx->subBatchContexts));
+            std::cout << std::flush;
+        }
+        ctx->cv.notify_all();
+    }
 }
 void AsuTransportImpl::BuildResult(const TransportTaskContext& ctx, TaskResult& result)
 {
