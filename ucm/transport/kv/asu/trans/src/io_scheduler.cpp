@@ -23,6 +23,7 @@
  * */
 #include "io_scheduler.h"
 #include <algorithm>
+#include "logger.h"
 
 namespace UC::ASU {
 
@@ -39,16 +40,23 @@ std::vector<ScheduledBatch> SplitBatchView(const BatchView<Value>& view, std::si
                                            SetView setView)
 {
     std::vector<ScheduledBatch> result;
-    if (view.empty() || ioNum == 0) { return result; }
+    if (view.empty() || ioNum == 0) {
+        UC_DEBUG("SplitBatchView skip total={} io_num={}", view.size, ioNum);
+        return result;
+    }
 
     const std::size_t subBatchCount = GetSubBatchCount(view.size, ioNum);
     result.reserve(subBatchCount);
+    UC_DEBUG("SplitBatchView start total={} io_num={} sub_batch_count={}", view.size, ioNum,
+             subBatchCount);
 
     for (std::size_t offset = 0; offset < view.size; offset += ioNum) {
         const std::size_t end = std::min(offset + ioNum, view.size);
 
         auto& batch = result.emplace_back();
         setView(batch, BatchView<Value>{view.data + offset, end - offset});
+        UC_DEBUG("SplitBatchView sub_batch index={} offset={} size={}", result.size() - 1, offset,
+                 end - offset);
     }
 
     return result;
@@ -62,11 +70,17 @@ IoScheduler::IoScheduler(const TransportConfig& config)
       deleteIoNum_(config.asuDeleteIoNum),
       queryIoNum_(config.asuQueryIoNum)
 {
+    UC_DEBUG(
+        "IoScheduler initialized batch_load_io_num={} batch_store_io_num={} delete_io_num={} "
+        "query_io_num={}",
+        batchLoadIoNum_, batchStoreIoNum_, deleteIoNum_, queryIoNum_);
 }
 
 std::vector<IoScheduler::ScheduledIoBatch> IoScheduler::SplitForAsu(
     const BatchView<KVBuffer>& entries, TransportOpType opType) const
 {
+    UC_DEBUG("IoScheduler::SplitForAsu entries op_type={} total={} io_num={}",
+             static_cast<int>(opType), entries.size, GetSqeIoNum(opType));
     return SplitBatchView<KVBuffer, ScheduledIoBatch>(
         entries, GetSqeIoNum(opType),
         [](ScheduledIoBatch& batch, BatchView<KVBuffer> view) { batch.entries = view; });
@@ -75,6 +89,8 @@ std::vector<IoScheduler::ScheduledIoBatch> IoScheduler::SplitForAsu(
 std::vector<IoScheduler::ScheduledKeyBatch> IoScheduler::SplitForAsu(
     const BatchView<CacheKey>& keys, TransportOpType opType) const
 {
+    UC_DEBUG("IoScheduler::SplitForAsu keys op_type={} total={} io_num={}",
+             static_cast<int>(opType), keys.size, GetSqeIoNum(opType));
     return SplitBatchView<CacheKey, ScheduledKeyBatch>(
         keys, GetSqeIoNum(opType),
         [](ScheduledKeyBatch& batch, BatchView<CacheKey> view) { batch.keys = view; });

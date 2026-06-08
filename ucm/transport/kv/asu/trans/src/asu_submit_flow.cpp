@@ -51,9 +51,12 @@ Status AsuTransportImpl::SubmitTaskRequests(const TransportTaskContext& ctx,
                                             std::vector<TransportSubBatchContext>& subBatchContexts)
 {
     Status finalStatus = Status::OK();
+    UC_DEBUG("AsuTransportImpl::SubmitTaskRequests start op_type={} entries={} keys={}",
+             static_cast<int>(ctx.opType), ctx.entries.size, ctx.keys.size);
 
     if (IsEntryBatchOp(ctx.opType)) {
         const auto subBatches = ioScheduler_.SplitForAsu(ctx.entries, ctx.opType);
+        UC_DEBUG("AsuTransportImpl::SubmitTaskRequests entry sub_batches={}", subBatches.size());
         subBatchContexts.reserve(subBatches.size());
         for (std::size_t index = 0; index < subBatches.size(); ++index) {
             const auto& subBatch = subBatches[index];
@@ -69,6 +72,7 @@ Status AsuTransportImpl::SubmitTaskRequests(const TransportTaskContext& ctx,
         }
     } else if (IsKeyBatchOp(ctx.opType)) {
         const auto subBatches = ioScheduler_.SplitForAsu(ctx.keys, ctx.opType);
+        UC_DEBUG("AsuTransportImpl::SubmitTaskRequests key sub_batches={}", subBatches.size());
         subBatchContexts.reserve(subBatches.size());
         for (std::size_t index = 0; index < subBatches.size(); ++index) {
             const auto& subBatch = subBatches[index];
@@ -94,6 +98,8 @@ Status AsuTransportImpl::SubmitTaskRequests(const TransportTaskContext& ctx,
         finalStatus = Status::Error(StatusCode::UNSUPPORTED, "transport operation is unsupported");
         UC_ERROR("Unsupported transport operation op_type={}", static_cast<int>(ctx.opType));
     }
+    UC_DEBUG("AsuTransportImpl::SubmitTaskRequests done sub_batches={} final_code={} message={}",
+             subBatchContexts.size(), static_cast<int>(finalStatus.code), finalStatus.message);
     return finalStatus;
 }
 
@@ -140,6 +146,8 @@ Status AsuTransportImpl::BuildSubBatchSendBuffers(
         subBatchIndexes.emplace_back(index);
     }
 
+    UC_DEBUG("AsuTransportImpl::BuildSubBatchSendBuffers ready io_batches={} total_sub_batches={}",
+             ioBatches.size(), subBatchContexts.size());
     return finalStatus;
 }
 
@@ -149,10 +157,17 @@ Status AsuTransportImpl::SendSubBatchBuffers(
     const std::vector<std::size_t>& subBatchIndexes)
 {
     Status finalStatus = Status::OK();
-    if (ioBatches.empty()) { return finalStatus; }
+    if (ioBatches.empty()) {
+        UC_DEBUG("AsuTransportImpl::SendSubBatchBuffers skip empty io batch");
+        return finalStatus;
+    }
 
     const auto kernelCount = GetSendCountAttr(config_.attrs, "kernel_count");
     const auto quietCount = GetSendCountAttr(config_.attrs, "quiet_count");
+    UC_DEBUG(
+        "AsuTransportImpl::SendSubBatchBuffers start io_batches={} kernel_count={} "
+        "quiet_count={}",
+        ioBatches.size(), kernelCount, quietCount);
 
     const auto sendStatuses = transProvider_->Send(ioBatches, kernelCount, quietCount);
     if (sendStatuses.size() != ioBatches.size()) {
@@ -179,6 +194,8 @@ Status AsuTransportImpl::SendSubBatchBuffers(
         connManager_->ReportFailure(subBatchContext.channel);
         if (finalStatus.ok()) { finalStatus = status; }
     }
+    UC_DEBUG("AsuTransportImpl::SendSubBatchBuffers done final_code={} message={}",
+             static_cast<int>(finalStatus.code), finalStatus.message);
     return finalStatus;
 }
 
