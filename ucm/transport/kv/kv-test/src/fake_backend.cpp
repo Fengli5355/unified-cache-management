@@ -1,7 +1,9 @@
 #include "kv_test/fake_backend.h"
+#include <acl/acl.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,8 +26,11 @@ constexpr std::uint8_t kDeleteEntryOk = 0x0;
 constexpr std::uint8_t kDeleteEntryFailed = 0x1;
 constexpr std::uint8_t kExistEntryNotExist = 0x0;
 constexpr std::uint8_t kExistEntryExist = 0x1;
+constexpr int kExitInvalidArgument = 1;
+constexpr int kFakeBackendAclDeviceId = 0;
 
 std::mutex g_fakeBackendMu;
+std::mutex g_traceMu;
 FakeBackendConfig g_fakeBackendConfig;
 bool g_fakeBackendEnabled = false;
 
@@ -58,6 +63,35 @@ UC::ASU::AsuId RequestAsuId(const std::uint32_t* request)
 UC::ASU::KvOpcode RequestOpcode(const std::uint32_t* request)
 {
     return static_cast<UC::ASU::KvOpcode>(request[0] & 0xFF);
+}
+
+const char* OpcodeName(UC::ASU::KvOpcode opcode)
+{
+    switch (opcode) {
+        case UC::ASU::KvOpcode::BatchStore: return "BatchStore";
+        case UC::ASU::KvOpcode::BatchRetrieve: return "BatchRetrieve";
+        case UC::ASU::KvOpcode::Delete: return "Delete";
+        case UC::ASU::KvOpcode::Exist: return "Exist";
+        case UC::ASU::KvOpcode::KeepAlive: return "KeepAlive";
+        default: return "Unknown";
+    }
+}
+
+void TraceCompletion(UC::ASU::KvOpcode opcode, UC::ASU::AsuId asuId, std::uint16_t cid,
+                     std::uint16_t status, bool resultBuffer, std::uint16_t batchNumber,
+                     std::uint16_t existingKeyNumber = 0)
+{
+    const auto* tracePath = std::getenv("KV_TEST_FAKE_BACKEND_TRACE");
+    if (tracePath == nullptr || tracePath[0] == '\0') { return; }
+
+    std::lock_guard<std::mutex> lock(g_traceMu);
+    std::ofstream trace(tracePath, std::ios::app);
+    if (!trace) { return; }
+
+    trace << "opcode=" << OpcodeName(opcode) << " asu_id=" << asuId << " cid=" << cid
+          << " status=0x" << std::hex << std::setw(3) << std::setfill('0') << status << std::dec
+          << " result_buffer=" << (resultBuffer ? 1 : 0) << " batch_number=" << batchNumber
+          << " existing_key_number=" << existingKeyNumber << '\n';
 }
 
 std::string ReadKey(const std::uint32_t* data)
@@ -209,8 +243,10 @@ UC::ASU::Status CompleteBatchStore(const FakeBackendConfig& config, UC::ASU::Asu
 
     const auto allOk = std::all_of(results.begin(), results.end(),
                                    [](std::uint8_t result) { return result == kBatchEntryOk; });
-    PackCqeHeader(flagBuffer, cid, allOk ? kCqeSuccess : kCqeCheckResultBuffer);
+    const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
+    PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer4Bit(flagBuffer + UC::ASU::kCqeDwordCount, results); }
+    TraceCompletion(UC::ASU::KvOpcode::BatchStore, asuId, cid, cqeStatus, !allOk, batchNumber);
     return UC::ASU::Status::OK();
 }
 
@@ -233,8 +269,10 @@ UC::ASU::Status CompleteBatchRetrieve(const FakeBackendConfig& config, UC::ASU::
 
     const auto allOk = std::all_of(results.begin(), results.end(),
                                    [](std::uint8_t result) { return result == kBatchEntryOk; });
-    PackCqeHeader(flagBuffer, cid, allOk ? kCqeSuccess : kCqeCheckResultBuffer);
+    const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
+    PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer4Bit(flagBuffer + UC::ASU::kCqeDwordCount, results); }
+    TraceCompletion(UC::ASU::KvOpcode::BatchRetrieve, asuId, cid, cqeStatus, !allOk, batchNumber);
     return UC::ASU::Status::OK();
 }
 
@@ -254,8 +292,10 @@ UC::ASU::Status CompleteDelete(const FakeBackendConfig& config, UC::ASU::AsuId a
 
     const auto allOk = std::all_of(results.begin(), results.end(),
                                    [](std::uint8_t result) { return result == kDeleteEntryOk; });
-    PackCqeHeader(flagBuffer, cid, allOk ? kCqeSuccess : kCqeCheckResultBuffer);
+    const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
+    PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer1Bit(flagBuffer + UC::ASU::kCqeDwordCount, results); }
+    TraceCompletion(UC::ASU::KvOpcode::Delete, asuId, cid, cqeStatus, !allOk, batchNumber);
     return UC::ASU::Status::OK();
 }
 
@@ -279,9 +319,12 @@ UC::ASU::Status CompleteExist(const FakeBackendConfig& config, UC::ASU::AsuId as
     const auto allExist = std::all_of(results.begin(), results.end(), [](std::uint8_t result) {
         return result == kExistEntryExist;
     });
-    PackCqeHeader(flagBuffer, cid, allExist ? kCqeSuccess : kCqeCheckResultBuffer);
+    const auto cqeStatus = allExist ? kCqeSuccess : kCqeCheckResultBuffer;
+    PackCqeHeader(flagBuffer, cid, cqeStatus);
     flagBuffer[0] = existingKeyNumber;
     if (!allExist) { PackResultBuffer1Bit(flagBuffer + UC::ASU::kCqeDwordCount, results); }
+    TraceCompletion(UC::ASU::KvOpcode::Exist, asuId, cid, cqeStatus, !allExist, batchNumber,
+                    existingKeyNumber);
     return UC::ASU::Status::OK();
 }
 
@@ -302,6 +345,8 @@ UC::ASU::Status CompleteFakeBackendRequest(FakeBackendConfig config,
         case UC::ASU::KvOpcode::KeepAlive: {
             auto* flagBuffer = reinterpret_cast<std::uint32_t*>(ReadU64(request[3], request[4]));
             PackCqeHeader(flagBuffer, static_cast<std::uint16_t>(RequestCid(request)), kCqeSuccess);
+            TraceCompletion(UC::ASU::KvOpcode::KeepAlive, asuId,
+                            static_cast<std::uint16_t>(RequestCid(request)), kCqeSuccess, false, 0);
             return UC::ASU::Status::OK();
         }
         default:
@@ -352,6 +397,44 @@ void PatchTransportConfig(UC::ASU::TransportConfig& config)
 }
 
 }  // namespace
+
+FakeBackendAclRuntime::~FakeBackendAclRuntime() { TearDown(); }
+
+Status FakeBackendAclRuntime::MaybeSetUp(const KvTestConfig& config)
+{
+    if (!IsFakeBackendMode(config)) { return Status::Success(); }
+
+    auto ret = aclInit(nullptr);
+    if (ret != ACL_SUCCESS) {
+        return Status::Error(kExitInvalidArgument,
+                             "fake_backend aclInit failed: " + std::to_string(ret));
+    }
+    initialized_ = true;
+
+    // kv-test fake_backend is a temporary standalone test path. Use device 0 until the
+    // ASU client/transport runtime contract is formalized.
+    ret = aclrtSetDevice(kFakeBackendAclDeviceId);
+    if (ret != ACL_SUCCESS) {
+        return Status::Error(kExitInvalidArgument,
+                             "fake_backend aclrtSetDevice failed: device_id=" +
+                                 std::to_string(kFakeBackendAclDeviceId) +
+                                 " ret=" + std::to_string(ret));
+    }
+    deviceSet_ = true;
+    return Status::Success();
+}
+
+void FakeBackendAclRuntime::TearDown()
+{
+    if (deviceSet_) {
+        (void)aclrtResetDevice(kFakeBackendAclDeviceId);
+        deviceSet_ = false;
+    }
+    if (initialized_) {
+        (void)aclFinalize();
+        initialized_ = false;
+    }
+}
 
 bool IsFakeBackendMode(const KvTestConfig& config)
 {

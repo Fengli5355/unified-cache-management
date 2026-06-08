@@ -17,7 +17,6 @@ namespace {
 
 constexpr int kExitSuccess = 0;
 constexpr int kExitInvalidArgument = 1;
-
 int ToExitCode(const Status& status) { return status.Ok() ? kExitSuccess : status.code; }
 
 std::filesystem::path PowerCycleMetadataPath(const KvTestConfig& config)
@@ -421,6 +420,13 @@ int KvTestApp::Run(int argc, char** argv)
                   << " timeout_ms=" << config.asuClientConfig.defaultWaitTimeoutMs
                   << " output=" << config.output.path << '\n';
         return kExitSuccess;
+    }
+
+    FakeBackendAclRuntime fakeBackendAclRuntime;
+    status = fakeBackendAclRuntime.MaybeSetUp(config);
+    if (!status.Ok()) {
+        PrintFailure(status);
+        return ToExitCode(status);
     }
 
     status = resultWriter_.Open(config.output);
