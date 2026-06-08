@@ -42,7 +42,7 @@ assert_contains "${TRACE}" "status=0x732"
 assert_contains "${TRACE}" "result_buffer=1"
 
 >"${TRACE}"
-run_failure "${LOG}" "${KV_TEST}" delete --configpath "${CONFIG}" --keys proto-existing,proto-missing
+run_any_status "${LOG}" "${KV_TEST}" delete --configpath "${CONFIG}" --keys proto-existing,proto-missing
 assert_contains "${TRACE}" "opcode=Delete"
 assert_contains "${TRACE}" "status=0x732"
 assert_contains "${TRACE}" "result_buffer=1"

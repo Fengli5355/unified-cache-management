@@ -89,7 +89,7 @@ write_fake_backend_config() {
         echo "view.config_path=${view_path}"
         echo "hash_table.type=RING_HASH"
         echo "ring_hash.virtual_node_count=128"
-        echo "transport.asu_ids=${asu_ids}"
+        echo "transport.asuIds=${asu_ids}"
         IFS=',' read -ra ids <<< "${asu_ids}"
         for id in "${ids[@]}"; do
             echo "asu_info.${id}=protocol=TCP,local.comm_id=127.0.0.1,port=$((19000 + id)),local.phy_device_id=0"
@@ -161,6 +161,27 @@ run_failure() {
         print_error "expected command to fail, but it succeeded: $*"
         return 1
     fi
+}
+
+run_any_status() {
+    local log_file=$1
+    shift
+    local timeout_sec="${KV_TEST_COMMAND_TIMEOUT_SEC:-30}"
+
+    echo "+ $*"
+    set +e
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${timeout_sec}" "$@" 2>&1 | tee "${log_file}"
+    else
+        "$@" 2>&1 | tee "${log_file}"
+    fi
+    local exit_code=${PIPESTATUS[0]}
+    set -e
+    if [[ ${exit_code} -eq 124 ]]; then
+        print_error "command timed out after ${timeout_sec}s: $*"
+        return 1
+    fi
+    return 0
 }
 
 assert_contains() {

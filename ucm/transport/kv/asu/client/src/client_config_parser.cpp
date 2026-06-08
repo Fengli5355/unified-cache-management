@@ -91,7 +91,8 @@ Status LoadAsuClientConfig(const std::string& configPath, AsuClientConfig& confi
             config.attrs["ring_hash.virtual_node_count"] = value;
         } else if (key == "hashTable.maglev.tableSize" || key == "maglev.table_size") {
             config.attrs["maglev.table_size"] = value;
-        } else if (key == "transport.asuIds" || key == "asuIds" || key == "asu_ids") {
+        } else if (key == "transport.asuIds" || key == "transport.asu_ids" || key == "asuIds" ||
+                   key == "asu_ids") {
             for (const auto& asuIdText : SplitConfigValue(value, ',')) {
                 TransportConfig transportConfig;
                 transportConfig.asuId = ParseConfigUint64(asuIdText);
