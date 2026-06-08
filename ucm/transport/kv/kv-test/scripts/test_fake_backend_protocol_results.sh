@@ -47,4 +47,4 @@ assert_contains "${TRACE}" "opcode=Delete"
 assert_contains "${TRACE}" "status=0x732"
 assert_contains "${TRACE}" "result_buffer=1"
 
-echo "fake_backend protocol result handling passed"
+print_success "fake_backend protocol result handling passed"

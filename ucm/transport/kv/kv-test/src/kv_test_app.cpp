@@ -17,6 +17,9 @@ namespace {
 
 constexpr int kExitSuccess = 0;
 constexpr int kExitInvalidArgument = 1;
+constexpr const char* kAnsiGreen = "\033[32m";
+constexpr const char* kAnsiRed = "\033[31m";
+constexpr const char* kAnsiReset = "\033[0m";
 int ToExitCode(const Status& status) { return status.Ok() ? kExitSuccess : status.code; }
 
 std::filesystem::path PowerCycleMetadataPath(const KvTestConfig& config)
@@ -272,7 +275,7 @@ void PrintVersion() { std::cout << "kv-test version " << LoadVersion() << '\n'; 
 
 void PrintFailure(const Status& status)
 {
-    std::cerr << "kv-test: failed";
+    std::cerr << kAnsiRed << "kv-test: failed" << kAnsiReset;
     if (!status.message.empty()) { std::cerr << ": " << status.message; }
     std::cerr << " (exit_code=" << ToExitCode(status) << ")\n";
 }
@@ -337,7 +340,7 @@ void PrintBenchSummary(const CommandOptions& options, const CommandResult& resul
 
 void PrintSuccess(const CommandOptions& options, const CommandResult& result)
 {
-    std::cout << "kv-test: succeeded"
+    std::cout << kAnsiGreen << "kv-test: succeeded" << kAnsiReset
               << "\ncommand=" << CommandTypeName(options.command)
               << "\nconfig=" << options.configPath << '\n';
     PrintExistSummary(options, result);
@@ -413,8 +416,8 @@ int KvTestApp::Run(int argc, char** argv)
     }
 
     if (options.command == CommandType::CONFIG_CHECK) {
-        std::cout << "kv-test: succeeded command=config check config=" << options.configPath
-                  << '\n';
+        std::cout << kAnsiGreen << "kv-test: succeeded" << kAnsiReset
+                  << " command=config check config=" << options.configPath << '\n';
         std::cout << "config: key_prefix=" << config.keyPrefix << " count=" << config.count
                   << " value_size=" << config.valueSize
                   << " timeout_ms=" << config.asuClientConfig.defaultWaitTimeoutMs

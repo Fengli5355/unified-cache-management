@@ -4,6 +4,17 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 KV_TEST_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 PROJECT_ROOT=$(cd "${KV_TEST_DIR}/../../../.." && pwd)
+ANSI_GREEN=$'\033[32m'
+ANSI_RED=$'\033[31m'
+ANSI_RESET=$'\033[0m'
+
+print_success() {
+    echo "${ANSI_GREEN}$*${ANSI_RESET}"
+}
+
+print_error() {
+    echo "${ANSI_RED}$*${ANSI_RESET}" >&2
+}
 
 find_kv_test_bin() {
     if [[ -n "${KV_TEST_BIN:-}" ]]; then
@@ -123,7 +134,7 @@ run_success() {
     local exit_code=${PIPESTATUS[0]}
     set -e
     if [[ ${exit_code} -ne 0 ]]; then
-        echo "command failed with exit code ${exit_code}: $*" >&2
+        print_error "command failed with exit code ${exit_code}: $*"
         return "${exit_code}"
     fi
 }
@@ -143,11 +154,11 @@ run_failure() {
     local exit_code=${PIPESTATUS[0]}
     set -e
     if [[ ${exit_code} -eq 124 ]]; then
-        echo "command timed out after ${timeout_sec}s: $*" >&2
+        print_error "command timed out after ${timeout_sec}s: $*"
         return 1
     fi
     if [[ ${exit_code} -eq 0 ]]; then
-        echo "expected command to fail, but it succeeded: $*" >&2
+        print_error "expected command to fail, but it succeeded: $*"
         return 1
     fi
 }
@@ -157,7 +168,7 @@ assert_contains() {
     local pattern=$2
 
     if ! grep -Fq "${pattern}" "${file}"; then
-        echo "missing expected pattern '${pattern}' in ${file}" >&2
+        print_error "missing expected pattern '${pattern}' in ${file}"
         return 1
     fi
 }
@@ -166,12 +177,12 @@ assert_dir_has_bins() {
     local dir=$1
 
     if [[ ! -d "${dir}" ]]; then
-        echo "missing directory: ${dir}" >&2
+        print_error "missing directory: ${dir}"
         return 1
     fi
 
     if ! find "${dir}" -maxdepth 1 -type f -name '*.bin' | grep -q .; then
-        echo "directory has no .bin files: ${dir}" >&2
+        print_error "directory has no .bin files: ${dir}"
         return 1
     fi
 }

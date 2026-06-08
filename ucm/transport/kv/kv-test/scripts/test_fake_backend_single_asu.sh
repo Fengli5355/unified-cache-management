@@ -25,4 +25,4 @@ run_success "${LOG}" "${KV_TEST}" delete --configpath "${CONFIG}" --key fb-singl
 run_success "${LOG}" "${KV_TEST}" exist --configpath "${CONFIG}" --key fb-single
 assert_contains "${LOG}" "result=missing"
 
-echo "fake_backend single ASU flow passed"
+print_success "fake_backend single ASU flow passed"

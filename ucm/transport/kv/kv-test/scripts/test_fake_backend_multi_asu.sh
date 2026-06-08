@@ -24,4 +24,4 @@ assert_contains "${LOG}" "missing=0"
 assert_dir_has_bins "${STORE}/asu-1"
 assert_dir_has_bins "${STORE}/asu-2"
 
-echo "fake_backend multi ASU store namespace passed"
+print_success "fake_backend multi ASU store namespace passed"
