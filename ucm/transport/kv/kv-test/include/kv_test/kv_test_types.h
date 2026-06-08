@@ -147,6 +147,11 @@ struct OutputConfig {
     std::uint64_t realtimeFileMaxBytes{0};
 };
 
+struct FakeBackendConfig {
+    std::string storePath;
+    std::uint64_t latencyMs{1};
+};
+
 struct ToolBehaviorConfig {
     ConfigFormat configFormat{ConfigFormat::ASU_CLIENT_KEY_VALUE};
     HcommApiBoundary hcommApiBoundary{HcommApiBoundary::C_API};
@@ -173,6 +178,7 @@ struct KvTestConfig {
     BatchLimits limits;
     BenchConfig bench;
     OutputConfig output;
+    FakeBackendConfig fakeBackend;
     std::string asuClientMode;
     std::string localStorePath;
     std::string keyPrefix;

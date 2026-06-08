@@ -4,6 +4,7 @@ add_executable(kv-test
     src/bench_runner.cpp
     src/buffer_allocator.cpp
     src/consistency_checker.cpp
+    src/fake_backend.cpp
     src/hcomm_config_adapter.cpp
     src/key_value_generator.cpp
     src/kv_test_app.cpp
@@ -18,6 +19,7 @@ target_include_directories(kv-test
         include
         ../asu/client/include
         ../asu/trans/include
+        ../asu/trans/src
 )
 
 target_link_libraries(kv-test
