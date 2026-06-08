@@ -494,11 +494,10 @@ std::vector<Status> MockSend(const std::vector<SendIoBatch>& ioBatches, std::uin
             continue;
         }
 
-        const auto sendSge = *ioBatch.sendSge;
-        std::thread([config, sendSge] {
-            (void)UC::KVTest::CompleteFakeBackendRequest(config, sendSge);
-        }).detach();
-        statuses.emplace_back(Status::OK());
+        // kv-test fake backend temporarily completes the CQE before Send returns. The production
+        // path still observes completion through Transport polling, while the mock avoids detached
+        // threads racing with sub-batch buffer lifetime in multi sub-batch tests.
+        statuses.emplace_back(UC::KVTest::CompleteFakeBackendRequest(config, *ioBatch.sendSge));
     }
     return statuses;
 }
