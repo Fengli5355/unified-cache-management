@@ -245,18 +245,6 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
     if (options.readRatio != 0) { config.bench.readRatio = options.readRatio; }
     if (options.writeRatio != 0) { config.bench.writeRatio = options.writeRatio; }
 
-    if (config.bench.batchSize > config.limits.batchStoreMax &&
-        (options.command == CommandType::BATCH_STORE ||
-         (options.command == CommandType::BENCH && config.bench.op == BenchOpType::BATCH_STORE))) {
-        return Status::Error(kExitInvalidArgument, "batch_size exceeds limits.batch_store_max");
-    }
-    if (config.bench.batchSize > config.limits.batchRetrieveMax &&
-        (options.command == CommandType::BATCH_RETRIEVE ||
-         (options.command == CommandType::BENCH &&
-          config.bench.op == BenchOpType::BATCH_RETRIEVE))) {
-        return Status::Error(kExitInvalidArgument, "batch_size exceeds limits.batch_retrieve_max");
-    }
-
     const bool hasExplicitKeys = !options.keys.empty() || !options.keysFile.empty() ||
                                  options.keyStartSet || options.keyEndSet;
     if (config.count != 0 && config.keyPrefix.empty() && !hasExplicitKeys) {
