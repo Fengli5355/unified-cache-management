@@ -503,9 +503,7 @@ Status KvTestApp::RunStoreLikeCommand(const CommandOptions& options, const KvTes
         return unregisterStatus;
     }
 
-    const SubmitMode submitMode = options.command == CommandType::STORE
-                                      ? SubmitMode::SINGLE_ENTRY_PER_CALL
-                                      : SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
+    const SubmitMode submitMode = SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
     status = clientRunner.Store(buffers, submitMode, options.timeoutMs, result);
 
     auto unregisterStatus = clientRunner.UnregisterBuffers(buffers);
@@ -560,9 +558,7 @@ Status KvTestApp::RunRetrieveLikeCommand(const CommandOptions& options, const Kv
         return unregisterStatus;
     }
 
-    const SubmitMode submitMode = options.command == CommandType::RETRIEVE
-                                      ? SubmitMode::SINGLE_ENTRY_PER_CALL
-                                      : SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
+    const SubmitMode submitMode = SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
     status = clientRunner.Retrieve(buffers, submitMode, options.timeoutMs, result);
     const bool checkResult = options.check || options.command == CommandType::POWER_CYCLE_VERIFY;
     if (status.Ok() && checkResult) {
