@@ -163,27 +163,6 @@ run_failure() {
     fi
 }
 
-run_any_status() {
-    local log_file=$1
-    shift
-    local timeout_sec="${KV_TEST_COMMAND_TIMEOUT_SEC:-30}"
-
-    echo "+ $*"
-    set +e
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_sec}" "$@" 2>&1 | tee "${log_file}"
-    else
-        "$@" 2>&1 | tee "${log_file}"
-    fi
-    local exit_code=${PIPESTATUS[0]}
-    set -e
-    if [[ ${exit_code} -eq 124 ]]; then
-        print_error "command timed out after ${timeout_sec}s: $*"
-        return 1
-    fi
-    return 0
-}
-
 assert_contains() {
     local file=$1
     local pattern=$2

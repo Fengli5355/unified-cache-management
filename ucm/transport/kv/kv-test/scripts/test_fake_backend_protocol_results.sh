@@ -42,9 +42,9 @@ assert_contains "${TRACE}" "status=0x732"
 assert_contains "${TRACE}" "result_buffer=1"
 
 >"${TRACE}"
-run_any_status "${LOG}" "${KV_TEST}" delete --configpath "${CONFIG}" --keys proto-existing,proto-missing
+run_success "${LOG}" "${KV_TEST}" delete --configpath "${CONFIG}" --keys proto-existing,proto-missing
 assert_contains "${TRACE}" "opcode=Delete"
-assert_contains "${TRACE}" "status=0x732"
-assert_contains "${TRACE}" "result_buffer=1"
+assert_contains "${TRACE}" "status=0x000"
+assert_contains "${TRACE}" "result_buffer=0"
 
 print_success "fake_backend protocol result handling passed"

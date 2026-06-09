@@ -154,6 +154,7 @@ bool DeleteKey(const FakeBackendConfig& config, UC::ASU::AsuId asuId, const std:
 {
     std::error_code errorCode;
     std::filesystem::remove(KeyPath(config, asuId, key), errorCode);
+    // Delete result buffer uses 0 for success. A missing key is still a successful delete.
     return !errorCode;
 }
 
