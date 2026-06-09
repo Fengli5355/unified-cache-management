@@ -3,8 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <future>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include "kv_test/buffer_allocator.h"
 
 namespace UC::KVTest {
@@ -80,6 +83,29 @@ BenchLatencyStats BuildLatencyStats(const std::vector<double>& latenciesUs)
     stats.p99_99Us = PercentileUs(sortedLatenciesUs, 99.99);
     stats.p99_999Us = PercentileUs(sortedLatenciesUs, 99.999);
     return stats;
+}
+
+std::string FormatMiBPerSec(double bytesPerSec)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(2) << (bytesPerSec / (1024.0 * 1024.0));
+    return stream.str();
+}
+
+std::string FormatUs(double latencyUs)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(1) << latencyUs;
+    return stream.str();
+}
+
+void PrintProgressSample(const BenchRealtimeSample& sample, std::uint64_t operationsPerSec)
+{
+    std::cout << '[' << sample.timestampSec << "s] ops=" << operationsPerSec
+              << " entries/s=" << static_cast<std::uint64_t>(sample.iops)
+              << " bw=" << FormatMiBPerSec(sample.bandwidthBytesPerSec)
+              << "MiB/s avg=" << FormatUs(sample.avgLatencyUs) << "us"
+              << " err=" << sample.errorCount << '\n';
 }
 
 Status CheckBenchMemoryLimit(std::uint64_t keyCount, std::uint64_t ioSize,
@@ -188,7 +214,7 @@ using EntrySubmitMethod = UC::ASU::Status (UC::ASU::AsuClient::*)(
 
 }  // namespace
 
-Status BenchRunner::Run(const CommandOptions&, const KvTestConfig& config,
+Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& config,
                         AsuClientRunner& clientRunner, CommandResult& result) const
 {
     const auto& bench = config.bench;
@@ -253,6 +279,20 @@ Status BenchRunner::Run(const CommandOptions&, const KvTestConfig& config,
         double windowLatencyUs = 0.0;
         std::uint64_t currentSecond = 1;
 
+        auto emitProgressSample = [&](std::uint64_t operationsPerSec) {
+            BenchRealtimeSample sample;
+            sample.timestampSec = currentSecond;
+            sample.op = bench.op;
+            sample.bandwidthBytesPerSec = static_cast<double>(windowBytes);
+            sample.iops = static_cast<double>(windowEntryCount);
+            sample.avgLatencyUs = windowOperationCount == 0
+                                      ? 0.0
+                                      : windowLatencyUs / static_cast<double>(windowOperationCount);
+            sample.errorCount = windowErrors;
+            result.benchMetrics.realtimeSamples.emplace_back(sample);
+            if (options.progress) { PrintProgressSample(sample, operationsPerSec); }
+        };
+
         while (Clock::now() < phaseEnd) {
             std::vector<std::future<OperationOutcome>> futures;
             futures.reserve(bench.concurrency);
@@ -312,17 +352,7 @@ Status BenchRunner::Run(const CommandOptions&, const KvTestConfig& config,
                         .count() +
                     1;
                 if (static_cast<std::uint64_t>(elapsedSec) != currentSecond) {
-                    BenchRealtimeSample sample;
-                    sample.timestampSec = currentSecond;
-                    sample.op = bench.op;
-                    sample.bandwidthBytesPerSec = static_cast<double>(windowBytes);
-                    sample.iops = static_cast<double>(windowEntryCount);
-                    sample.avgLatencyUs =
-                        windowOperationCount == 0
-                            ? 0.0
-                            : windowLatencyUs / static_cast<double>(windowOperationCount);
-                    sample.errorCount = windowErrors;
-                    result.benchMetrics.realtimeSamples.emplace_back(sample);
+                    emitProgressSample(windowOperationCount);
 
                     currentSecond = static_cast<std::uint64_t>(elapsedSec);
                     windowOperationCount = 0;
@@ -335,16 +365,7 @@ Status BenchRunner::Run(const CommandOptions&, const KvTestConfig& config,
         }
 
         if (collectStats && (windowOperationCount != 0 || windowErrors != 0)) {
-            BenchRealtimeSample sample;
-            sample.timestampSec = currentSecond;
-            sample.op = bench.op;
-            sample.bandwidthBytesPerSec = static_cast<double>(windowBytes);
-            sample.iops = static_cast<double>(windowEntryCount);
-            sample.avgLatencyUs = windowOperationCount == 0
-                                      ? 0.0
-                                      : windowLatencyUs / static_cast<double>(windowOperationCount);
-            sample.errorCount = windowErrors;
-            result.benchMetrics.realtimeSamples.emplace_back(sample);
+            emitProgressSample(windowOperationCount);
         }
 
         return Status::Success();

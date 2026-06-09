@@ -186,7 +186,8 @@ void PrintGeneralHelp()
         << "\n"
         << "Bench options:\n"
         << "  --op <op>, --bench-op <op>, --io-size <bytes>, --concurrency <n>,\n"
-        << "  --duration <sec>, --warmup <sec>, --read-ratio <n>, --write-ratio <n>\n\n"
+        << "  --duration <sec>, --warmup <sec>, --read-ratio <n>, --write-ratio <n>,\n"
+        << "  --progress               Print one benchmark progress line per second.\n\n"
         << "Examples:\n"
         << "  export KV_TEST_CONFIG=/abs/path/to/asu_kv_test.conf\n"
         << "  kv-test connect\n"
@@ -253,7 +254,7 @@ void PrintCommandHelp(CommandType command)
             std::cout << "Usage: kv-test bench [store|retrieve|batch-store|batch-retrieve|mix] "
                          "[--io-size <bytes>] [--concurrency <n>] [--duration <sec>]\n"
                       << "       kv-test bench --op <op> [--batch-size <n>] [--warmup <sec>] "
-                         "[--read-ratio <n>] [--write-ratio <n>]\n";
+                         "[--read-ratio <n>] [--write-ratio <n>] [--progress]\n";
             break;
         case CommandType::UNKNOWN:
         default: PrintGeneralHelp(); break;
