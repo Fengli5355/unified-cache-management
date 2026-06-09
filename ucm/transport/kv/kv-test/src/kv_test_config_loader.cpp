@@ -14,6 +14,7 @@ namespace {
 
 constexpr int kExitInvalidArgument = 1;
 constexpr const char* kConfigPathEnvVar = "KV_TEST_CONFIG";
+constexpr std::uint64_t kMaxBenchIoSizeBytes = 0xFFFFFF;
 
 std::string Trim(const std::string& value)
 {
@@ -258,6 +259,10 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
     }
     if (options.command == CommandType::BENCH && config.bench.ioSize == 0) {
         config.bench.ioSize = config.valueSize;
+    }
+    if (options.command == CommandType::BENCH && config.bench.ioSize > kMaxBenchIoSizeBytes) {
+        return Status::Error(kExitInvalidArgument,
+                             "bench.io_size exceeds protocol 24-bit length limit");
     }
 
     return Status::Success();
