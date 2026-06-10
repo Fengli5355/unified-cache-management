@@ -23,6 +23,7 @@
  * */
 #include "asu_store.h"
 #include <algorithm>
+#include <any>
 #include <cstddef>
 #include <functional>
 #include <iomanip>
@@ -33,6 +34,7 @@
 #include <utility>
 #include "asu_client/asu_client.h"
 #include "asu_transport/asu_transport.h"
+#include "asu_transport/fake_backend.h"
 #include "logger/logger.h"
 #include "ucmstore_v1.h"
 
@@ -49,6 +51,15 @@ std::string ToHex(const Detail::BlockId& block)
     for (auto b : block) {
         os << std::setw(2) << static_cast<unsigned>(std::to_integer<unsigned char>(b));
     }
+    return os.str();
+}
+
+std::string MakeAsuKey(const Detail::BlockId& block, std::size_t shardIndex,
+                       std::size_t tensorIndex)
+{
+    std::ostringstream os;
+    os << std::hex << std::setfill('0') << std::setw(4) << (shardIndex & 0xFFFF) << std::setw(4)
+       << (tensorIndex & 0xFFFF) << ToHex(block).substr(0, 8);
     return os.str();
 }
 
@@ -86,6 +97,39 @@ UC::ASU::MemoryType ParseMemoryType(const std::string& memoryType)
     return UC::ASU::MemoryType::ASCEND_DEVICE;
 }
 
+bool TryGetStringLike(const Detail::Dictionary& inConfig, const std::string& key,
+                      std::string& value)
+{
+    if (!inConfig.Contains(key)) { return false; }
+    try {
+        inConfig.Get(key, value);
+        return true;
+    } catch (const std::bad_any_cast&) {
+    }
+    try {
+        bool boolValue = false;
+        inConfig.Get(key, boolValue);
+        value = boolValue ? "true" : "false";
+        return true;
+    } catch (const std::bad_any_cast&) {
+    }
+    try {
+        ssize_t numberValue = 0;
+        inConfig.GetNumber(key, numberValue);
+        value = std::to_string(numberValue);
+        return true;
+    } catch (const std::bad_any_cast&) {
+    }
+    return false;
+}
+
+void ReadClientAttr(const Detail::Dictionary& inConfig, const std::string& yamlKey,
+                    const std::string& attrKey, Config& config)
+{
+    std::string value;
+    if (TryGetStringLike(inConfig, yamlKey, value)) { config.clientAttrs[attrKey] = value; }
+}
+
 }  // namespace
 
 UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t index)
@@ -105,6 +149,7 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
         endpoint.deviceId = config.deviceId;
         transportConfig.endpoints.emplace_back(std::move(endpoint));
     }
+    if (config.fakeBackendEnable) { UC::ASU::PatchFakeBackendTransportConfig(transportConfig); }
     return transportConfig;
 }
 
@@ -117,6 +162,7 @@ public:
         asuConfig.clientId = config.clientId;
         asuConfig.viewServiceAddrs = config.viewServiceAddrs;
         asuConfig.defaultWaitTimeoutMs = config.defaultWaitTimeoutMs;
+        asuConfig.attrs = config.clientAttrs;
         asuConfig.transportConfigs.reserve(config.asuIds.size());
         for (std::size_t i = 0; i < config.asuIds.size(); ++i) {
             asuConfig.transportConfigs.emplace_back(BuildTransportConfig(config, i));
@@ -244,10 +290,11 @@ public:
 
     ~AsuStore() override
     {
-        if (!backend_) { return; }
-
-        auto status = backend_->Shutdown();
-        if (!status.ok()) { UC_ERROR("Failed to shutdown ASU backend: {}.", status.message); }
+        if (backend_) {
+            auto status = backend_->Shutdown();
+            if (!status.ok()) { UC_ERROR("Failed to shutdown ASU backend: {}.", status.message); }
+        }
+        if (config_.fakeBackendEnable) { UC::ASU::DisableFakeBackend(); }
     }
 
     Status Setup(const Detail::Dictionary& inConfig) override
@@ -257,6 +304,13 @@ public:
         if (status.Failure()) { return status; }
 
         config_ = std::move(config);
+        if (config_.fakeBackendEnable) {
+            UC::ASU::FakeBackendConfig fakeConfig;
+            fakeConfig.storePath = config_.fakeBackendPath;
+            fakeConfig.latencyMs = config_.fakeBackendLatencyMs;
+            auto fakeStatus = UC::ASU::EnableFakeBackend(std::move(fakeConfig));
+            if (!fakeStatus.ok()) { return ConvertStatus(fakeStatus); }
+        }
         backend_ = CreateBackend(config_);
 
         auto asuStatus = config_.configPath.empty() ? backend_->Init(config_)
@@ -264,6 +318,7 @@ public:
         if (!asuStatus.ok()) {
             UC_ERROR("Failed to init ASU backend: {}.", asuStatus.message);
             backend_.reset();
+            if (config_.fakeBackendEnable) { UC::ASU::DisableFakeBackend(); }
             return ConvertStatus(asuStatus);
         }
 
@@ -374,6 +429,23 @@ private:
         inConfig.GetNumber("block_size", config.blockSize);
         inConfig.GetNumber("device_id", config.deviceId);
         inConfig.Get("asu_memory_type", config.memoryType);
+        inConfig.Get("asu_fake_backend_enable", config.fakeBackendEnable);
+        inConfig.Get("asu_fake_backend_path", config.fakeBackendPath);
+        inConfig.GetNumber("asu_fake_backend_latency_ms", config.fakeBackendLatencyMs);
+        ReadClientAttr(inConfig, "asu_hash_table_type", "hash_table.type", config);
+        ReadClientAttr(inConfig, "asu_ring_hash_virtual_node_count", "ring_hash.virtual_node_count",
+                       config);
+        ReadClientAttr(inConfig, "asu_maglev_table_size", "maglev.table_size", config);
+        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_block_count",
+                       "contiguous_block_affinity.block_count", config);
+        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_full_spread_type",
+                       "contiguous_block_affinity.full_spread_type", config);
+        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_dynamic_adjust_enabled",
+                       "contiguous_block_affinity.dynamic_adjust_enabled", config);
+        ReadClientAttr(inConfig, "asu_batch_topk_affinity_top_k", "batch_topk_affinity.top_k",
+                       config);
+        ReadClientAttr(inConfig, "asu_batch_topk_affinity_dynamic_adjust_enabled",
+                       "batch_topk_affinity.dynamic_adjust_enabled", config);
 
         std::size_t tensorSize = 0;
         inConfig.GetNumber("tensor_size", tensorSize);
@@ -406,6 +478,9 @@ private:
         if (!config.asuIps.empty() && config.asuIps.size() != config.asuIds.size()) {
             return Status::InvalidParam("asu_ips size must match asu_ids size");
         }
+        if (config.fakeBackendEnable && !config.configPath.empty()) {
+            return Status::InvalidParam("asu_fake_backend_enable does not support asu_config_path");
+        }
         if (config.tensorSizes.empty()) { return Status::InvalidParam("invalid tensor size"); }
         if (config.shardSize == 0) { return Status::InvalidParam("invalid shard size"); }
         if (config.blockSize == 0) { return Status::InvalidParam("invalid block size"); }
@@ -416,12 +491,6 @@ private:
         }
         if (config.blockSize % config.shardSize != 0) {
             return Status::InvalidParam("invalid block size({})", config.blockSize);
-        }
-        if (config.blockSize != config.shardSize) {
-            return Status::InvalidParam("asu store requires one shard per block");
-        }
-        if (config.tensorSizes.size() != 1) {
-            return Status::InvalidParam("asu store requires one tensor buffer per block");
         }
         return Status::OK();
     }
@@ -464,7 +533,7 @@ private:
         std::vector<UC::ASU::CacheKey> keys;
         keys.reserve(num);
         for (std::size_t blockIndex = 0; blockIndex < num; ++blockIndex) {
-            keys.emplace_back(ToHex(blocks[blockIndex]));
+            keys.emplace_back(MakeAsuKey(blocks[blockIndex], 0, 0));
         }
         return keys;
     }
@@ -501,7 +570,7 @@ private:
             }
             for (std::size_t tensorIndex = 0; tensorIndex < shard.addrs.size(); ++tensorIndex) {
                 UC::ASU::KVBuffer entry;
-                entry.key = ToHex(shard.owner);
+                entry.key = MakeAsuKey(shard.owner, shard.index, tensorIndex);
                 entry.buffer.region.memoryType = memoryType;
                 entry.buffer.region.addr =
                     reinterpret_cast<std::uint64_t>(shard.addrs[tensorIndex]);
@@ -526,6 +595,8 @@ private:
         UC_INFO("Set AsuStore::BlockSize to {}.", config.blockSize);
         UC_INFO("Set AsuStore::TensorSizes to {}.", config.tensorSizes);
         UC_INFO("Set AsuStore::DeviceId to {}.", config.deviceId);
+        UC_INFO("Set AsuStore::FakeBackendEnable to {}.", config.fakeBackendEnable);
+        UC_INFO("Set AsuStore::FakeBackendPath to {}.", config.fakeBackendPath);
     }
 
     Config config_;
