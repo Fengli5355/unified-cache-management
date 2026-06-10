@@ -82,6 +82,12 @@ target_include_directories(asu_client
 target_link_libraries(asu_client PUBLIC asu_transport kv_common pthread)
 target_compile_definitions(asu_client PRIVATE SPDLOG_FMT_EXTERNAL)
 
+file(RELATIVE_PATH INSTALL_REL_PATH ${UCM_ROOT_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(asu_client PROPERTIES INSTALL_RPATH "$ORIGIN")
+set_target_properties(asu_transport PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(TARGETS asu_client asu_transport LIBRARY DESTINATION ${INSTALL_REL_PATH} COMPONENT ucm)
+install(TARGETS asu_client asu_transport LIBRARY DESTINATION ucm/store/asu COMPONENT ucm)
+
 if(BUILD_UNIT_TESTS)
     target_compile_definitions(asu_transport PRIVATE ASU_BUILD_TESTS)
     include(GoogleTest)
