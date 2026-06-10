@@ -379,22 +379,22 @@ FakeBackendConfig GetFakeBackendConfig(bool& enabled)
 
 void SetFakeBackendConfig(FakeBackendConfig config)
 {
+    UC::ASU::SetAICPUTransProviderSendHook(&UC::ASU::MockSend);
     {
         std::lock_guard<std::mutex> lock(g_fakeBackendMu);
         g_fakeBackendConfig = std::move(config);
         g_fakeBackendEnabled = true;
     }
-    UC::ASU::SetAICPUTransProviderSendHook(&UC::ASU::MockSend);
 }
 
 void DisableFakeBackend()
 {
-    UC::ASU::SetAICPUTransProviderSendHook(nullptr);
     {
         std::lock_guard<std::mutex> lock(g_fakeBackendMu);
         g_fakeBackendConfig = FakeBackendConfig{};
         g_fakeBackendEnabled = false;
     }
+    UC::ASU::SetAICPUTransProviderSendHook(nullptr);
 }
 
 void PatchTransportConfig(UC::ASU::TransportConfig& config)

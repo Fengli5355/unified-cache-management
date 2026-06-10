@@ -60,7 +60,10 @@ Status SubmitAndWaitEntries(UC::ASU::AsuClient& client,
 
     status = client.Wait(taskId, timeoutMs, result.taskResult);
     if (!status.ok()) {
-        if (result.taskResult.status.ok()) { result.taskResult.status = status; }
+        result.taskResult.status = status;
+        if (result.taskResult.entryStatus.empty()) {
+            result.taskResult.entryStatus.assign(entries.size(), status);
+        }
         result.status = ToKvTestStatus(status, operation);
         return result.status;
     }
@@ -80,7 +83,10 @@ Status SubmitAndWaitKeys(UC::ASU::AsuClient& client, const std::vector<UC::ASU::
 
     status = client.Wait(taskId, timeoutMs, result.taskResult);
     if (!status.ok()) {
-        if (result.taskResult.status.ok()) { result.taskResult.status = status; }
+        result.taskResult.status = status;
+        if (result.taskResult.entryStatus.empty()) {
+            result.taskResult.entryStatus.assign(keys.size(), status);
+        }
         result.status = ToKvTestStatus(status, "delete");
         return result.status;
     }
@@ -108,12 +114,7 @@ Status SubmitEntriesOneByOne(UC::ASU::AsuClient& client,
             result.taskResult.entryStatus.push_back(singleResult.taskResult.entryStatus.front());
         }
 
-        if (!status.Ok() && firstFailure.ok()) {
-            firstFailure =
-                singleResult.taskResult.status.ok()
-                    ? UC::ASU::Status::Error(UC::ASU::StatusCode::INTERNAL_ERROR, status.message)
-                    : singleResult.taskResult.status;
-        }
+        if (!status.Ok() && firstFailure.ok()) { firstFailure = singleResult.taskResult.status; }
     }
 
     if (!firstFailure.ok()) {
