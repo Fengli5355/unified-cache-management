@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include "asu_transport/fake_backend.h"
+#include <acl/acl.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -32,8 +33,10 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
 #include "aicpu_trans_provider.h"
 #include "kv_protocol.h"
+#include "logger.h"
 #include "trans_provider.h"
 
 namespace UC::ASU {
@@ -51,6 +54,24 @@ constexpr std::uint8_t kExistEntryExist = 0x1;
 std::mutex g_fakeBackendMu;
 FakeBackendConfig g_fakeBackendConfig;
 bool g_fakeBackendEnabled = false;
+
+Status SetUpAclRuntime(const FakeBackendConfig& config)
+{
+    auto ret = aclInit(nullptr);
+    if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE) {
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "ASU fake backend aclInit failed: " + std::to_string(ret));
+    }
+
+    const auto deviceId = config.deviceId < 0 ? 0 : config.deviceId;
+    ret = aclrtSetDevice(deviceId);
+    if (ret != ACL_SUCCESS) {
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "ASU fake backend aclrtSetDevice failed: device_id=" +
+                                 std::to_string(deviceId) + " ret=" + std::to_string(ret));
+    }
+    return Status::OK();
+}
 
 std::filesystem::path StoreRoot(const FakeBackendConfig& config)
 {
@@ -106,10 +127,25 @@ std::filesystem::path KeyPath(const FakeBackendConfig& config, AsuId asuId, cons
 bool StoreBytes(const FakeBackendConfig& config, AsuId asuId, const std::string& key,
                 std::uint64_t addr, std::uint32_t length)
 {
+    std::vector<char> buffer(length);
+    auto ret = aclrtMemcpy(buffer.data(), buffer.size(), reinterpret_cast<const void*>(addr),
+                           length, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (ret != ACL_SUCCESS) {
+        UC_ERROR(
+            "ASU fake backend device-to-host copy failed asuId={} key={} addr={} length={} "
+            "ret={}.",
+            asuId, key, addr, length, ret);
+        return false;
+    }
+
     std::filesystem::create_directories(AsuRoot(config, asuId));
     std::ofstream output(KeyPath(config, asuId, key), std::ios::binary | std::ios::trunc);
-    if (!output) { return false; }
-    output.write(reinterpret_cast<const char*>(addr), length);
+    if (!output) {
+        UC_ERROR("ASU fake backend failed to open store file asuId={} key={} path={}.", asuId, key,
+                 KeyPath(config, asuId, key).string());
+        return false;
+    }
+    output.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     return output.good();
 }
 
@@ -117,12 +153,25 @@ bool LoadBytes(const FakeBackendConfig& config, AsuId asuId, const std::string& 
                std::uint64_t addr, std::uint32_t length)
 {
     std::ifstream input(KeyPath(config, asuId, key), std::ios::binary);
-    if (!input) { return false; }
-    input.read(reinterpret_cast<char*>(addr), length);
+    if (!input) {
+        UC_ERROR("ASU fake backend failed to open load file asuId={} key={} path={}.", asuId, key,
+                 KeyPath(config, asuId, key).string());
+        return false;
+    }
+    std::vector<char> buffer(length, 0);
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     const auto readCount = input.gcount();
     if (readCount < static_cast<std::streamsize>(length)) {
-        std::memset(reinterpret_cast<char*>(addr) + readCount, 0,
-                    length - static_cast<std::uint32_t>(readCount));
+        std::fill(buffer.begin() + readCount, buffer.end(), 0);
+    }
+    auto ret = aclrtMemcpy(reinterpret_cast<void*>(addr), length, buffer.data(), buffer.size(),
+                           ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        UC_ERROR(
+            "ASU fake backend host-to-device copy failed asuId={} key={} addr={} length={} "
+            "ret={}.",
+            asuId, key, addr, length, ret);
+        return false;
     }
     return true;
 }
@@ -253,7 +302,7 @@ Status CompleteDelete(const FakeBackendConfig& config, AsuId asuId, const std::u
 {
     const auto cid = static_cast<std::uint16_t>(RequestCid(request));
     const auto responseBufferAddr = ReadU64(request[3], request[4]);
-    const auto batchNumber = static_cast<std::uint16_t>(request[5] & 0xFFFF);
+    const auto batchNumber = static_cast<std::uint16_t>(request[10] & 0xFFFF);
     auto* flagBuffer = reinterpret_cast<std::uint32_t*>(responseBufferAddr);
     std::vector<std::uint8_t> results(batchNumber, kDeleteEntryOk);
 
@@ -274,7 +323,7 @@ Status CompleteExist(const FakeBackendConfig& config, AsuId asuId, const std::ui
 {
     const auto cid = static_cast<std::uint16_t>(RequestCid(request));
     const auto responseBufferAddr = ReadU64(request[3], request[4]);
-    const auto batchNumber = static_cast<std::uint16_t>(request[5] & 0xFFFF);
+    const auto batchNumber = static_cast<std::uint16_t>(request[10] & 0xFFFF);
     auto* flagBuffer = reinterpret_cast<std::uint32_t*>(responseBufferAddr);
     std::vector<std::uint8_t> results(batchNumber, kExistEntryNotExist);
     std::uint16_t existingKeyNumber = 0;
@@ -290,6 +339,7 @@ Status CompleteExist(const FakeBackendConfig& config, AsuId asuId, const std::ui
     const auto allExist = existingKeyNumber == batchNumber;
     const auto cqeStatus = allExist ? kCqeSuccess : kCqeCheckResultBuffer;
     PackCqeHeader(flagBuffer, cid, cqeStatus);
+    flagBuffer[0] = existingKeyNumber;
     if (!allExist) { PackResultBuffer1Bit(flagBuffer + kCqeDwordCount, results); }
     return Status::OK();
 }
@@ -357,6 +407,8 @@ std::vector<Status> FakeBackendSend(const std::vector<TransProvider::SendIoBatch
 Status EnableFakeBackend(FakeBackendConfig config)
 {
     if (config.storePath.empty()) { config.storePath = "./asu-fake-backend-store"; }
+    auto status = SetUpAclRuntime(config);
+    if (!status.ok()) { return status; }
     {
         std::lock_guard<std::mutex> lock(g_fakeBackendMu);
         g_fakeBackendConfig = std::move(config);
