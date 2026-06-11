@@ -33,8 +33,10 @@
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
 #include "aicpu_trans_provider.h"
 #include "kv_protocol.h"
+#include "logger.h"
 #include "trans_provider.h"
 
 namespace UC::ASU {
@@ -125,10 +127,25 @@ std::filesystem::path KeyPath(const FakeBackendConfig& config, AsuId asuId, cons
 bool StoreBytes(const FakeBackendConfig& config, AsuId asuId, const std::string& key,
                 std::uint64_t addr, std::uint32_t length)
 {
+    std::vector<char> buffer(length);
+    auto ret = aclrtMemcpy(buffer.data(), buffer.size(), reinterpret_cast<const void*>(addr),
+                           length, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (ret != ACL_SUCCESS) {
+        UC_ERROR(
+            "ASU fake backend device-to-host copy failed asuId={} key={} addr={} length={} "
+            "ret={}.",
+            asuId, key, addr, length, ret);
+        return false;
+    }
+
     std::filesystem::create_directories(AsuRoot(config, asuId));
     std::ofstream output(KeyPath(config, asuId, key), std::ios::binary | std::ios::trunc);
-    if (!output) { return false; }
-    output.write(reinterpret_cast<const char*>(addr), length);
+    if (!output) {
+        UC_ERROR("ASU fake backend failed to open store file asuId={} key={} path={}.", asuId, key,
+                 KeyPath(config, asuId, key).string());
+        return false;
+    }
+    output.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     return output.good();
 }
 
@@ -136,12 +153,25 @@ bool LoadBytes(const FakeBackendConfig& config, AsuId asuId, const std::string& 
                std::uint64_t addr, std::uint32_t length)
 {
     std::ifstream input(KeyPath(config, asuId, key), std::ios::binary);
-    if (!input) { return false; }
-    input.read(reinterpret_cast<char*>(addr), length);
+    if (!input) {
+        UC_ERROR("ASU fake backend failed to open load file asuId={} key={} path={}.", asuId, key,
+                 KeyPath(config, asuId, key).string());
+        return false;
+    }
+    std::vector<char> buffer(length, 0);
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
     const auto readCount = input.gcount();
     if (readCount < static_cast<std::streamsize>(length)) {
-        std::memset(reinterpret_cast<char*>(addr) + readCount, 0,
-                    length - static_cast<std::uint32_t>(readCount));
+        std::fill(buffer.begin() + readCount, buffer.end(), 0);
+    }
+    auto ret = aclrtMemcpy(reinterpret_cast<void*>(addr), length, buffer.data(), buffer.size(),
+                           ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        UC_ERROR(
+            "ASU fake backend host-to-device copy failed asuId={} key={} addr={} length={} "
+            "ret={}.",
+            asuId, key, addr, length, ret);
+        return false;
     }
     return true;
 }
