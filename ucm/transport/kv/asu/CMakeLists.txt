@@ -3,7 +3,13 @@ if(NOT RUNTIME_ENVIRONMENT STREQUAL "ascend")
 endif()
 
 if(NOT DEFINED ASCEND_ROOT)
-    set(ASCEND_ROOT "/usr/local/Ascend/ascend-toolkit/latest" CACHE PATH "Path to Ascend root directory")
+    if(DEFINED ENV{ASCEND_HOME_PATH})
+        set(ASCEND_ROOT "$ENV{ASCEND_HOME_PATH}" CACHE PATH "Path to Ascend root directory")
+    elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME})
+        set(ASCEND_ROOT "$ENV{ASCEND_TOOLKIT_HOME}" CACHE PATH "Path to Ascend root directory")
+    else()
+        set(ASCEND_ROOT "/usr/local/Ascend/ascend-toolkit/latest" CACHE PATH "Path to Ascend root directory")
+    endif()
 endif()
 
 find_path(ASU_ASCEND_INCLUDE_DIR
@@ -23,6 +29,9 @@ find_library(ASU_ASCENDCL_LIB
     HINTS
         ${ASCEND_ROOT}/lib64
         ${ASCEND_ROOT}/aarch64-linux/lib64
+        ${ASCEND_ROOT}/aarch64-linux/devlib
+        ${ASCEND_ROOT}/arm64-linux/lib64
+        ${ASCEND_ROOT}/arm64-linux/devlib
     NO_DEFAULT_PATH
 )
 if(NOT ASU_ASCENDCL_LIB)
@@ -61,7 +70,7 @@ target_include_directories(asu_transport
 target_compile_definitions(asu_transport PRIVATE SPDLOG_FMT_EXTERNAL)
 target_link_libraries(asu_transport
     PUBLIC
-        pthread fmt spdlog z
+        pthread fmt spdlog zlibstatic
     PRIVATE
         asu_ascend_deps
 )
@@ -82,6 +91,12 @@ target_include_directories(asu_client
 target_link_libraries(asu_client PUBLIC asu_transport kv_common pthread)
 target_compile_definitions(asu_client PRIVATE SPDLOG_FMT_EXTERNAL)
 
+file(RELATIVE_PATH INSTALL_REL_PATH ${UCM_ROOT_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(asu_client PROPERTIES INSTALL_RPATH "$ORIGIN")
+set_target_properties(asu_transport PROPERTIES INSTALL_RPATH "$ORIGIN")
+install(TARGETS asu_client asu_transport LIBRARY DESTINATION ${INSTALL_REL_PATH} COMPONENT ucm)
+install(TARGETS asu_client asu_transport LIBRARY DESTINATION ucm/store/asu COMPONENT ucm)
+
 if(BUILD_UNIT_TESTS)
     target_compile_definitions(asu_transport PRIVATE ASU_BUILD_TESTS)
     include(GoogleTest)
@@ -100,6 +115,7 @@ if(BUILD_UNIT_TESTS)
     )
     target_link_libraries(asu.test PRIVATE
         asu_client
+        asu_ascend_deps
         gtest_main gtest
     )
     gtest_discover_tests(asu.test)
