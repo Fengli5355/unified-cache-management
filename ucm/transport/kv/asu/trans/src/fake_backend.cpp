@@ -272,7 +272,7 @@ Status CompleteDelete(const FakeBackendConfig& config, AsuId asuId, const std::u
 {
     const auto cid = static_cast<std::uint16_t>(RequestCid(request));
     const auto responseBufferAddr = ReadU64(request[3], request[4]);
-    const auto batchNumber = static_cast<std::uint16_t>(request[5] & 0xFFFF);
+    const auto batchNumber = static_cast<std::uint16_t>(request[10] & 0xFFFF);
     auto* flagBuffer = reinterpret_cast<std::uint32_t*>(responseBufferAddr);
     std::vector<std::uint8_t> results(batchNumber, kDeleteEntryOk);
 
@@ -293,7 +293,7 @@ Status CompleteExist(const FakeBackendConfig& config, AsuId asuId, const std::ui
 {
     const auto cid = static_cast<std::uint16_t>(RequestCid(request));
     const auto responseBufferAddr = ReadU64(request[3], request[4]);
-    const auto batchNumber = static_cast<std::uint16_t>(request[5] & 0xFFFF);
+    const auto batchNumber = static_cast<std::uint16_t>(request[10] & 0xFFFF);
     auto* flagBuffer = reinterpret_cast<std::uint32_t*>(responseBufferAddr);
     std::vector<std::uint8_t> results(batchNumber, kExistEntryNotExist);
     std::uint16_t existingKeyNumber = 0;
