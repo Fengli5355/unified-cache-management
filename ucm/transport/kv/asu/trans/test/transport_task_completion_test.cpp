@@ -58,15 +58,10 @@ public:
     {
         return {};
     }
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& descs,
+    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
                           std::vector<MemHandle>& handles) override
     {
-        handles.clear();
-        handles.reserve(descs.size());
-        for (std::size_t index = 0; index < descs.size(); ++index) {
-            handles.push_back(reinterpret_cast<MemHandle>(static_cast<std::uintptr_t>(index) +
-                                                          static_cast<std::uintptr_t>(1)));
-        }
+        handles.push_back(reinterpret_cast<MemHandle>(static_cast<uintptr_t>(1)));
         return Status::OK();
     }
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>&) override
@@ -203,7 +198,7 @@ TEST_F(TransportTaskCompletionTest, ReleaseSubBatchResourcesReleasesChannelInfli
     EXPECT_EQ(subBatchContext.channel.get(), nullptr);
 }
 
-TEST_F(TransportTaskCompletionTest, TryFinalizeEmptyTaskUsesExistingFinalStatus)
+TEST_F(TransportTaskCompletionTest, TryFinalizeEmptyTaskMarksPartialFailed)
 {
     TransportTaskContext ctx;
     ctx.finalStatus = Status::OK();
@@ -211,6 +206,7 @@ TEST_F(TransportTaskCompletionTest, TryFinalizeEmptyTaskUsesExistingFinalStatus)
     ctx.TryFinalizeFromSubBatches();
 
     EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::COMPLETED);
+    EXPECT_EQ(ctx.finalStatus.code, StatusCode::PARTIAL_FAILED);
 
     ctx.state.store(TransportTaskState::PENDING, std::memory_order_release);
     ctx.finalStatus = Status::Error(StatusCode::UNSUPPORTED, "unsupported");
@@ -218,6 +214,7 @@ TEST_F(TransportTaskCompletionTest, TryFinalizeEmptyTaskUsesExistingFinalStatus)
     ctx.TryFinalizeFromSubBatches();
 
     EXPECT_EQ(ctx.state.load(std::memory_order_acquire), TransportTaskState::COMPLETED);
+    EXPECT_EQ(ctx.finalStatus.code, StatusCode::PARTIAL_FAILED);
 }
 
 TEST_F(TransportTaskCompletionTest, TryFinalizeWaitsUntilAllSubBatchesFinish)

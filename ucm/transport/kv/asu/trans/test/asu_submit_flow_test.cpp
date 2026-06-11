@@ -64,15 +64,10 @@ public:
         return std::vector<Status>(ioBatches.size(), Status::OK());
     }
 
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& descs,
+    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
                           std::vector<MemHandle>& handles) override
     {
-        handles.clear();
-        handles.reserve(descs.size());
-        for (std::size_t index = 0; index < descs.size(); ++index) {
-            handles.push_back(reinterpret_cast<MemHandle>(static_cast<std::uintptr_t>(index) +
-                                                          static_cast<std::uintptr_t>(1)));
-        }
+        handles.push_back(reinterpret_cast<MemHandle>(static_cast<uintptr_t>(1)));
         return Status::OK();
     }
 
