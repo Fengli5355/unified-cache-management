@@ -308,6 +308,7 @@ public:
             UC::ASU::FakeBackendConfig fakeConfig;
             fakeConfig.storePath = config_.fakeBackendPath;
             fakeConfig.latencyMs = config_.fakeBackendLatencyMs;
+            fakeConfig.deviceId = config_.deviceId >= 0 ? config_.deviceId : 0;
             auto fakeStatus = UC::ASU::EnableFakeBackend(std::move(fakeConfig));
             if (!fakeStatus.ok()) { return ConvertStatus(fakeStatus); }
         }

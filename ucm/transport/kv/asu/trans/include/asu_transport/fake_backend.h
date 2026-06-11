@@ -32,6 +32,7 @@ namespace UC::ASU {
 struct FakeBackendConfig {
     std::string storePath;
     std::uint64_t latencyMs{1};
+    std::int32_t deviceId{0};
 };
 
 Status EnableFakeBackend(FakeBackendConfig config);

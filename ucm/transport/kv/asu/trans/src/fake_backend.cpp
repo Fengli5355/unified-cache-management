@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include "asu_transport/fake_backend.h"
+#include <acl/acl.h>
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -51,6 +52,24 @@ constexpr std::uint8_t kExistEntryExist = 0x1;
 std::mutex g_fakeBackendMu;
 FakeBackendConfig g_fakeBackendConfig;
 bool g_fakeBackendEnabled = false;
+
+Status SetUpAclRuntime(const FakeBackendConfig& config)
+{
+    auto ret = aclInit(nullptr);
+    if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE) {
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "ASU fake backend aclInit failed: " + std::to_string(ret));
+    }
+
+    const auto deviceId = config.deviceId < 0 ? 0 : config.deviceId;
+    ret = aclrtSetDevice(deviceId);
+    if (ret != ACL_SUCCESS) {
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "ASU fake backend aclrtSetDevice failed: device_id=" +
+                                 std::to_string(deviceId) + " ret=" + std::to_string(ret));
+    }
+    return Status::OK();
+}
 
 std::filesystem::path StoreRoot(const FakeBackendConfig& config)
 {
@@ -357,6 +376,8 @@ std::vector<Status> FakeBackendSend(const std::vector<TransProvider::SendIoBatch
 Status EnableFakeBackend(FakeBackendConfig config)
 {
     if (config.storePath.empty()) { config.storePath = "./asu-fake-backend-store"; }
+    auto status = SetUpAclRuntime(config);
+    if (!status.ok()) { return status; }
     {
         std::lock_guard<std::mutex> lock(g_fakeBackendMu);
         g_fakeBackendConfig = std::move(config);
