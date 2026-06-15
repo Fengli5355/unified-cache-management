@@ -287,8 +287,9 @@ CQE/result-buffer parsing paths.
 
 `asu.client.mode=fake_backend` is for the current `AsuClient` +
 `AsuTransportImpl` software integration stage. kv-test creates the normal
-`AsuClient` path and uses the developed `AsuTransportImpl`, but replaces the
-missing backend send/completion side with a local mock backend.
+`AsuClient` path and uses the developed `AsuTransportImpl`, but configures the
+transport provider as `FAKE` so ASU transport sends are completed by
+`FakeTransProvider`.
 
 Use this mode to validate:
 
@@ -298,20 +299,29 @@ Use this mode to validate:
 - SQE packing into send buffers
 - flag buffer/CQE polling
 - CQE status handling and result-buffer parsing
-- current register/bind bookkeeping paths
+- current register/bind bookkeeping paths, including placeholder memory handles
+  and token ids returned through the provider interface
 
 Mocked or not covered in this mode:
 
 - real device or network `Send`
 - real ASU backend execution
 - real CQE writeback by device
-- real memory registration, `rkey`, and `lkey` semantics
+- real RDMA memory registration, `rkey`, and `lkey` semantics
 - real connection failure, drain, and recovery behavior
 
-The mock send path is installed through a temporary `AICPUTransProvider` send
-hook while fake_backend mode is enabled. `AICPUTransProvider::CreateConnection`
-also returns placeholder connection handles so `ConnectionManager` can create
-channels during this software-only integration phase.
+In fake_backend mode kv-test patches each `TransportConfig` before
+`Transport::Init`: it sets `providerType=FAKE`, fills required SQE/send attrs,
+and passes `fake_backend.path`, `fake_backend.latency_ms`, and
+`fake_backend.device_id` through `TransportConfig.attrs`.
+`FakeTransProvider::CreateConnection` returns placeholder connection handles so
+`ConnectionManager` can create channels during this software-only integration
+phase.
+
+Payload buffers are allocated as Ascend device memory in this mode. kv-test
+copies generated store data from host to device before submit and copies
+retrieved data back to host before consistency checks. The fake provider copies
+between device buffers and its filesystem store when completing SQEs.
 
 The fake backend stores each key under:
 
@@ -346,7 +356,7 @@ Mode differences:
 | Main development stage | kv-test self-check | `AsuClient` + `AsuTransportImpl` software integration |
 | Uses normal `AsuClient` routing | Yes | Yes |
 | Uses developed `AsuTransportImpl` submit/poll/CQE code | No | Yes |
-| Backend | kv-test `LocalAsuTransport` | kv-test `MockSend` + local CQE completion |
+| Backend | kv-test `LocalAsuTransport` | ASU `FakeTransProvider` + local CQE completion |
 | Filesystem store layout | `<root>/asu-<asuId>/<hex-key>.bin` | `<root>/asu-<kv_ns_id>/<fnv64-key-hash>.bin` |
 | Validates real device communication | No | No |
 

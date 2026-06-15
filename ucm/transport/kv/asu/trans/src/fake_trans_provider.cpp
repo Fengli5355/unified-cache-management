@@ -25,10 +25,12 @@
 #include <acl/acl.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -47,6 +49,39 @@ constexpr std::uint8_t kDeleteEntryOk = 0x0;
 constexpr std::uint8_t kDeleteEntryFailed = 0x1;
 constexpr std::uint8_t kExistEntryNotExist = 0x0;
 constexpr std::uint8_t kExistEntryExist = 0x1;
+
+std::mutex g_traceMu;
+
+const char* OpcodeName(KvOpcode opcode)
+{
+    switch (opcode) {
+        case KvOpcode::BatchStore: return "BatchStore";
+        case KvOpcode::BatchRetrieve: return "BatchRetrieve";
+        case KvOpcode::Delete: return "Delete";
+        case KvOpcode::Exist: return "Exist";
+        case KvOpcode::KeepAlive: return "KeepAlive";
+        default: return "Unknown";
+    }
+}
+
+void TraceCompletion(KvOpcode opcode, AsuId asuId, std::uint16_t cid, std::uint16_t status,
+                     bool hasResultBuffer, std::uint16_t batchNumber,
+                     std::uint16_t existingKeyNumber = 0)
+{
+    const char* tracePath = std::getenv("KV_TEST_FAKE_BACKEND_TRACE");
+    if (tracePath == nullptr || tracePath[0] == '\0') { return; }
+
+    std::lock_guard<std::mutex> lock(g_traceMu);
+    std::ofstream traceFile(tracePath, std::ios::app);
+    if (!traceFile.is_open()) { return; }
+
+    traceFile << "opcode=" << OpcodeName(opcode) << " asu_id=" << asuId << " cid=" << cid
+              << " status=0x" << std::hex << std::setw(3) << std::setfill('0') << status << std::dec
+              << std::setfill(' ') << " result_buffer=" << (hasResultBuffer ? 1 : 0)
+              << " batch=" << batchNumber;
+    if (opcode == KvOpcode::Exist) { traceFile << " existing=" << existingKeyNumber; }
+    traceFile << '\n';
+}
 
 std::uint64_t ReadU64(std::uint32_t low, std::uint32_t high)
 {
@@ -240,6 +275,7 @@ Status CompleteBatchStore(const FakeTransProviderConfig& config, AsuId asuId,
     const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
     PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer4Bit(flagBuffer + kCqeDwordCount, results); }
+    TraceCompletion(KvOpcode::BatchStore, asuId, cid, cqeStatus, !allOk, batchNumber);
     return Status::OK();
 }
 
@@ -265,6 +301,7 @@ Status CompleteBatchRetrieve(const FakeTransProviderConfig& config, AsuId asuId,
     const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
     PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer4Bit(flagBuffer + kCqeDwordCount, results); }
+    TraceCompletion(KvOpcode::BatchRetrieve, asuId, cid, cqeStatus, !allOk, batchNumber);
     return Status::OK();
 }
 
@@ -287,6 +324,7 @@ Status CompleteDelete(const FakeTransProviderConfig& config, AsuId asuId,
     const auto cqeStatus = allOk ? kCqeSuccess : kCqeCheckResultBuffer;
     PackCqeHeader(flagBuffer, cid, cqeStatus);
     if (!allOk) { PackResultBuffer1Bit(flagBuffer + kCqeDwordCount, results); }
+    TraceCompletion(KvOpcode::Delete, asuId, cid, cqeStatus, !allOk, batchNumber);
     return Status::OK();
 }
 
@@ -313,6 +351,8 @@ Status CompleteExist(const FakeTransProviderConfig& config, AsuId asuId,
     PackCqeHeader(flagBuffer, cid, cqeStatus);
     flagBuffer[0] = existingKeyNumber;
     if (!allExist) { PackResultBuffer1Bit(flagBuffer + kCqeDwordCount, results); }
+    TraceCompletion(KvOpcode::Exist, asuId, cid, cqeStatus, !allExist, batchNumber,
+                    existingKeyNumber);
     return Status::OK();
 }
 
@@ -337,6 +377,8 @@ Status CompleteFakeBackendRequest(const FakeTransProviderConfig& config, const v
         case KvOpcode::KeepAlive: {
             auto* flagBuffer = reinterpret_cast<std::uint32_t*>(ReadU64(request[3], request[4]));
             PackCqeHeader(flagBuffer, static_cast<std::uint16_t>(RequestCid(request)), kCqeSuccess);
+            TraceCompletion(KvOpcode::KeepAlive, asuId,
+                            static_cast<std::uint16_t>(RequestCid(request)), kCqeSuccess, false, 0);
             return Status::OK();
         }
         default:
@@ -370,21 +412,23 @@ FakeTransProvider::FakeTransProvider(FakeTransProviderConfig config) : config_(s
 
 Status FakeTransProvider::SetUpAclRuntime()
 {
-    if (aclReady_) { return Status::OK(); }
+    const auto deviceId = config_.deviceId < 0 ? 0 : config_.deviceId;
+    thread_local std::int32_t readyDeviceId = -1;
+    if (readyDeviceId == deviceId) { return Status::OK(); }
+
     auto ret = aclInit(nullptr);
     if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE) {
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              "ASU fake backend aclInit failed: " + std::to_string(ret));
     }
 
-    const auto deviceId = config_.deviceId < 0 ? 0 : config_.deviceId;
     ret = aclrtSetDevice(deviceId);
     if (ret != ACL_SUCCESS) {
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              "ASU fake backend aclrtSetDevice failed: device_id=" +
                                  std::to_string(deviceId) + " ret=" + std::to_string(ret));
     }
-    aclReady_ = true;
+    readyDeviceId = deviceId;
     return Status::OK();
 }
 
@@ -414,6 +458,9 @@ std::vector<Status> FakeTransProvider::Send(const std::vector<SendIoBatch>& ioBa
 {
     (void)kernelCount;
     (void)quietCount;
+    auto runtimeStatus = SetUpAclRuntime();
+    if (!runtimeStatus.ok()) { return std::vector<Status>(ioBatches.size(), runtimeStatus); }
+
     std::vector<Status> statuses;
     statuses.reserve(ioBatches.size());
     for (const auto& ioBatch : ioBatches) {
