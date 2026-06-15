@@ -1377,6 +1377,9 @@ class UCMDirectConnector(KVConnectorBase_V1):
                 )
                 logger.warning(f"Falling back to manual block_size estimate: {bs}")
             config["block_size"] = bs
+            if config.get("store_pipeline") == "ASU":
+                config["shard_size"] = config["block_size"]
+                config["tensor_size"] = config["block_size"]
         config["posix_gc_enable"] = self._gc_owner
         logger.info(f"create {name} with config: {config}")
         return UcmConnectorFactoryV1.create_connector(name, config, module_path)
