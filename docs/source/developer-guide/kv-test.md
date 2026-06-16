@@ -4,21 +4,37 @@
 current implementation supports local smoke testing, basic request validation,
 consistency checks, and simple benchmark metrics.
 
-The tool reads one key-value config file. It first loads the file through the
-ASU client config parser, then reads kv-test-specific options from the same
-file.
+The tool reads one key-value config file. It loads the ASU client runtime
+library through a small proxy, calls the ASU client config parser exported from
+that library, then reads kv-test-specific options from the same file.
 
 ## Build and environment
 
-`kv-test` is built from `ucm/transport/kv/kv-test/CMakeLists.txt` and links
-against `asu_client` and the ASU Ascend dependency interface used by the ASU
-module.
+`kv-test` is built from `ucm/transport/kv/kv-test/CMakeLists.txt`. The
+`asu_client` and `asu_transport` shared libraries are built as separate
+artifacts and loaded by `kv-test` at runtime with `dlopen`.
 
 `kv-test` is included only when ASU support is enabled:
 
 ```bash
-cmake -S . -B build-kv-test -DBUILD_UCM_ASU=ON -DBUILD_UCM_STORE=OFF -DBUILD_UNIT_TESTS=OFF -DRUNTIME_ENVIRONMENT=ascend
+cmake -S . -B build-kv-test -DBUILD_UCM_ASU=ON -DBUILD_UCM_STORE=OFF -DBUILD_UNIT_TESTS=OFF -DRUNTIME_ENVIRONMENT=ascend -DBUILD_UCM_ASU_PROVIDER_FAKE=ON
+cmake --build build-kv-test --target asu_transport asu_client
 cmake --build build-kv-test --target kv-test
+```
+
+Provider implementations are selected at build time:
+
+| CMake option | Default | Extra dependency |
+| --- | --- | --- |
+| `BUILD_UCM_ASU_PROVIDER_AICPU` | `OFF` | Reserved for the AICPU provider library. |
+| `BUILD_UCM_ASU_PROVIDER_FAKE` | `ON` | None. |
+| `BUILD_UCM_ASU_PROVIDER_AIV` | `OFF` | `libumc.a`, found through `ASU_AIV_PROVIDER_ROOT`. |
+
+The configured `transport.provider_type` must be built into `asu_transport`.
+For example, real AIV testing needs:
+
+```bash
+cmake -S . -B build-kv-test -DBUILD_UCM_ASU=ON -DBUILD_UCM_STORE=OFF -DBUILD_UNIT_TESTS=OFF -DRUNTIME_ENVIRONMENT=ascend -DBUILD_UCM_ASU_PROVIDER_FAKE=ON -DBUILD_UCM_ASU_PROVIDER_AIV=ON -DASU_AIV_PROVIDER_ROOT=/path/to/aiv/provider
 ```
 
 The same build can be started from any working directory with:
@@ -26,6 +42,11 @@ The same build can be started from any working directory with:
 ```bash
 bash ucm/transport/kv/kv-test/build.sh
 ```
+
+If the shared libraries are not discoverable from the dynamic linker search
+path or from the default build-tree sibling directory, set
+`asu.client_library_path` and `asu.transport_library_path` in the config file,
+or export `KV_TEST_ASU_CLIENT_LIB` and `KV_TEST_ASU_TRANSPORT_LIB`.
 
 The example environment script is:
 
@@ -155,6 +176,9 @@ Example:
 ```ini
 client_id=kv-test-client-0
 default_wait_timeout_ms=5000
+# Optional when libasu_client.so/libasu_transport.so are not discoverable.
+# asu.client_library_path=/path/to/libasu_client.so
+# asu.transport_library_path=/path/to/libasu_transport.so
 
 asu.client.mode=fake_backend
 local_store.path=./kv-test-local-store
@@ -201,7 +225,7 @@ These fields are parsed by the ASU client config parser:
 | `view.config_path` | File used by the default `ConfigFileViewServer`. |
 | `default_wait_timeout_ms` | Default wait timeout in milliseconds. |
 | `transport.asu_ids` | ASU ids. |
-| `transport.provider_type` | Transport provider used by `AsuTransportImpl`. Supported values are `AICPU`, `FAKE`, and `AIV`. The aliases `transport.provider_backend`, `transport.trans_provider_type`, and `transport.trans_provider_backend` are also accepted. |
+| `transport.provider_type` | Transport provider used by `AsuTransportImpl`. Supported values are `AICPU`, `FAKE`, and `AIV`. The selected provider must also be enabled in CMake. The aliases `transport.provider_backend`, `transport.trans_provider_type`, and `transport.trans_provider_backend` are also accepted. |
 | `asu_info.<id>` | Endpoint config for one ASU. |
 | `hash_table.type` | Router hash table type. |
 | `ring_hash.virtual_node_count` | Ring hash virtual node count. |
@@ -222,6 +246,8 @@ These fields are parsed by `kv-test` itself:
 
 | Field | Description |
 | --- | --- |
+| `asu.client_library_path` | Optional `libasu_client.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_CLIENT_LIB` is also accepted. |
+| `asu.transport_library_path` | Optional `libasu_transport.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_TRANSPORT_LIB` is also accepted. |
 | `asu.client.mode` | Set to `local` to use the file-backed local ASU transport. Set to `fake_backend` to use normal `AsuClient` and `AsuTransportImpl` paths with kv-test's mock backend. Any other value uses the default ASU client transport factory. |
 | `local_store.path` | Local transport storage root. Defaults to `./kv-test-local-store` if local mode is enabled and this field is empty. |
 | `fake_backend.path` | fake_backend storage root. If empty, fake_backend reuses `local_store.path`; if both are empty, it uses `./kv-test-fake-backend-store`. |
