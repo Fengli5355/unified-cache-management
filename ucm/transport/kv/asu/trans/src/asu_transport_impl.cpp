@@ -302,10 +302,31 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
 
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
     for (const auto& region : regions) {
-        MRHandle handle;
-        uint32_t tokenId;
-        if (transProvider_.RegisterMemory(region, handle) != Status::OK()) {}
-        if (transProvider_.GetMemTokenId(handle, tokenId) != Status::OK()) {}
+        const auto memType = region.memoryType == MemoryType::ASCEND_DEVICE
+                                 ? TransProvider::MemType::MEM_DEVICE
+                                 : TransProvider::MemType::MEM_HOST;
+        std::vector<TransProvider::RegisterMemoryDesc> descs{
+            {memType, static_cast<std::uintptr_t>(region.addr),
+             static_cast<std::size_t>(region.size)}
+        };
+        std::vector<TransProvider::MemHandle> memHandles;
+        auto status = transProvider_->RegisterMemory(nullptr, descs, memHandles);
+        if (!status.ok() || memHandles.empty()) {
+            results.emplace_back(RegisterResult{
+                status.ok() ? Status::Error(StatusCode::INTERNAL_ERROR,
+                                            "transport register memory returned no handle")
+                            : status,
+                kInvalidMRHandle});
+            continue;
+        }
+
+        auto handle = static_cast<MRHandle>(reinterpret_cast<std::uintptr_t>(memHandles[0]));
+        uint32_t tokenId{0};
+        status = transProvider_->GetMemTokenId(memHandles[0], tokenId);
+        if (!status.ok()) {
+            results.emplace_back(RegisterResult{status, kInvalidMRHandle});
+            continue;
+        }
 
         RegisteredMemory regMem;
         regMem.region = region;
