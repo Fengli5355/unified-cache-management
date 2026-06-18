@@ -358,7 +358,7 @@ std::unordered_map<AsuId, std::size_t> CountRoutesByAsu(const std::vector<AsuId>
                                                         const std::vector<CacheKey>& keys)
 {
     std::vector<UC::KV::NodeId> nodeIds(asuIds.begin(), asuIds.end());
-    auto router = UC::KV::CreateRouter(nodeIds, UC::KV::HashFunction{}, UC::KV::HashTableConfig{});
+    auto router = UC::KV::CreateRouter(nodeIds, UC::KV::HashFunction{}, UC::KV::RouterConfig{});
     std::unordered_map<AsuId, std::size_t> counts;
     auto routes = router->RouteKeys(keys);
     for (const auto& route : routes) { counts[route.first] = route.second.size(); }
