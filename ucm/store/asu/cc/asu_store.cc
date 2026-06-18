@@ -34,6 +34,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include "asu_client/asu_client.h"
 #include "asu_transport/asu_transport.h"
@@ -45,6 +46,7 @@ namespace {
 
 using AsuStatus = UC::ASU::Status;
 using AsuStatusCode = UC::ASU::StatusCode;
+using ConfigSetter = std::function<void(const Detail::Dictionary&, Config&)>;
 
 std::uint64_t HashAsuKey(const Detail::BlockId& block)
 {
@@ -154,6 +156,73 @@ void ReadClientAttr(const Detail::Dictionary& inConfig, const std::string& yamlK
 {
     std::string value;
     if (TryGetStringLike(inConfig, yamlKey, value)) { config.clientAttrs[attrKey] = value; }
+}
+
+void ReadAsuPort(const Detail::Dictionary& inConfig, Config& config)
+{
+    ssize_t asuPort = 0;
+    inConfig.GetNumber("asu_port", asuPort);
+    config.asuPort = static_cast<std::uint16_t>(std::max<ssize_t>(0, asuPort));
+}
+
+void ReadTransProviderBackend(const Detail::Dictionary& inConfig, Config& config)
+{
+    std::string providerBackend;
+    if (TryGetStringLike(inConfig, "asu_trans_provider_backend", providerBackend)) {
+        config.transProviderType = ParseTransProviderBackend(providerBackend);
+    }
+}
+
+void ReadTensorSizes(const Detail::Dictionary& inConfig, Config& config)
+{
+    std::size_t tensorSize = 0;
+    inConfig.GetNumber("tensor_size", tensorSize);
+    if (tensorSize != 0) {
+        if (config.shardSize != 0) {
+            config.tensorSizes.assign(config.shardSize / tensorSize, tensorSize);
+        }
+    } else {
+        inConfig.GetNumbers("tensor_size_list", config.tensorSizes);
+    }
+}
+
+// clang-format off
+const std::unordered_map<std::string, ConfigSetter> g_configSetters = {
+    {"asu_mode",                                           [](const Detail::Dictionary& d, Config& c) { d.Get("asu_mode", c.mode); }},
+    {"asu_config_path",                                    [](const Detail::Dictionary& d, Config& c) { d.Get("asu_config_path", c.configPath); }},
+    {"asu_client_id",                                      [](const Detail::Dictionary& d, Config& c) { d.Get("asu_client_id", c.clientId); }},
+    {"asu_view_service_addrs",                             [](const Detail::Dictionary& d, Config& c) { d.Get("asu_view_service_addrs", c.viewServiceAddrs); }},
+    {"asu_ids",                                           [](const Detail::Dictionary& d, Config& c) { d.GetNumbers("asu_ids", c.asuIds); }},
+    {"asu_ips",                                           [](const Detail::Dictionary& d, Config& c) { d.Get("asu_ips", c.asuIps); }},
+    {"asu_name_prefix",                                    [](const Detail::Dictionary& d, Config& c) { d.Get("asu_name_prefix", c.asuNamePrefix); }},
+    {"asu_port",                                          [](const Detail::Dictionary& d, Config& c) { ReadAsuPort(d, c); }},
+    {"asu_default_wait_timeout_ms",                        [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_default_wait_timeout_ms", c.defaultWaitTimeoutMs); }},
+    {"asu_query_timeout_ms",                               [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_query_timeout_ms", c.queryTimeoutMs); }},
+    {"asu_load_timeout_ms",                                [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_load_timeout_ms", c.loadTimeoutMs); }},
+    {"asu_store_timeout_ms",                               [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_store_timeout_ms", c.storeTimeoutMs); }},
+    {"asu_max_inflight_tasks",                             [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_max_inflight_tasks", c.maxInflightTasks); }},
+    {"asu_max_inflight_bytes",                             [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_max_inflight_bytes", c.maxInflightBytes); }},
+    {"shard_size",                                         [](const Detail::Dictionary& d, Config& c) { d.GetNumber("shard_size", c.shardSize); }},
+    {"block_size",                                         [](const Detail::Dictionary& d, Config& c) { d.GetNumber("block_size", c.blockSize); }},
+    {"device_id",                                          [](const Detail::Dictionary& d, Config& c) { d.GetNumber("device_id", c.deviceId); }},
+    {"asu_memory_type",                                    [](const Detail::Dictionary& d, Config& c) { d.Get("asu_memory_type", c.memoryType); }},
+    {"asu_trans_provider_backend",                         [](const Detail::Dictionary& d, Config& c) { ReadTransProviderBackend(d, c); }},
+    {"asu_fake_backend_path",                              [](const Detail::Dictionary& d, Config& c) { d.Get("asu_fake_backend_path", c.fakeBackendPath); }},
+    {"asu_fake_backend_latency_ms",                        [](const Detail::Dictionary& d, Config& c) { d.GetNumber("asu_fake_backend_latency_ms", c.fakeBackendLatencyMs); }},
+    {"asu_router_type",                                    [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_router_type", "hash_table.type", c); }},
+    {"asu_ring_hash_virtual_node_count",                   [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_ring_hash_virtual_node_count", "ring_hash.virtual_node_count", c); }},
+    {"asu_maglev_table_size",                              [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_maglev_table_size", "maglev.table_size", c); }},
+    {"asu_contiguous_block_affinity_block_count",          [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_contiguous_block_affinity_block_count", "contiguous_block_affinity.block_count", c); }},
+    {"asu_contiguous_block_affinity_full_spread_type",     [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_contiguous_block_affinity_full_spread_type", "contiguous_block_affinity.full_spread_type", c); }},
+    {"asu_contiguous_block_affinity_dynamic_adjust_enabled", [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_contiguous_block_affinity_dynamic_adjust_enabled", "contiguous_block_affinity.dynamic_adjust_enabled", c); }},
+    {"asu_batch_topk_affinity_top_k",                      [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_batch_topk_affinity_top_k", "batch_topk_affinity.top_k", c); }},
+    {"asu_batch_topk_affinity_dynamic_adjust_enabled",     [](const Detail::Dictionary& d, Config& c) { ReadClientAttr(d, "asu_batch_topk_affinity_dynamic_adjust_enabled", "batch_topk_affinity.dynamic_adjust_enabled", c); }},
+};
+// clang-format on
+
+void ApplyConfigSetters(const Detail::Dictionary& inConfig, Config& config)
+{
+    for (const auto& setter : g_configSetters) { setter.second(inConfig, config); }
 }
 
 }  // namespace
@@ -453,56 +522,8 @@ private:
     Config ParseConfig(const Detail::Dictionary& inConfig)
     {
         Config config;
-        inConfig.Get("asu_mode", config.mode);
-        inConfig.Get("asu_config_path", config.configPath);
-        inConfig.Get("asu_client_id", config.clientId);
-        inConfig.Get("asu_view_service_addrs", config.viewServiceAddrs);
-        inConfig.GetNumbers("asu_ids", config.asuIds);
-        inConfig.Get("asu_ips", config.asuIps);
-        inConfig.Get("asu_name_prefix", config.asuNamePrefix);
-        ssize_t asuPort = 0;
-        inConfig.GetNumber("asu_port", asuPort);
-        config.asuPort = static_cast<std::uint16_t>(std::max<ssize_t>(0, asuPort));
-        inConfig.GetNumber("asu_default_wait_timeout_ms", config.defaultWaitTimeoutMs);
-        inConfig.GetNumber("asu_query_timeout_ms", config.queryTimeoutMs);
-        inConfig.GetNumber("asu_load_timeout_ms", config.loadTimeoutMs);
-        inConfig.GetNumber("asu_store_timeout_ms", config.storeTimeoutMs);
-        inConfig.GetNumber("asu_max_inflight_tasks", config.maxInflightTasks);
-        inConfig.GetNumber("asu_max_inflight_bytes", config.maxInflightBytes);
-        inConfig.GetNumber("shard_size", config.shardSize);
-        inConfig.GetNumber("block_size", config.blockSize);
-        inConfig.GetNumber("device_id", config.deviceId);
-        inConfig.Get("asu_memory_type", config.memoryType);
-        std::string providerBackend;
-        if (TryGetStringLike(inConfig, "asu_trans_provider_backend", providerBackend)) {
-            config.transProviderType = ParseTransProviderBackend(providerBackend);
-        }
-        inConfig.Get("asu_fake_backend_path", config.fakeBackendPath);
-        inConfig.GetNumber("asu_fake_backend_latency_ms", config.fakeBackendLatencyMs);
-        ReadClientAttr(inConfig, "asu_router_type", "hash_table.type", config);
-        ReadClientAttr(inConfig, "asu_ring_hash_virtual_node_count", "ring_hash.virtual_node_count",
-                       config);
-        ReadClientAttr(inConfig, "asu_maglev_table_size", "maglev.table_size", config);
-        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_block_count",
-                       "contiguous_block_affinity.block_count", config);
-        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_full_spread_type",
-                       "contiguous_block_affinity.full_spread_type", config);
-        ReadClientAttr(inConfig, "asu_contiguous_block_affinity_dynamic_adjust_enabled",
-                       "contiguous_block_affinity.dynamic_adjust_enabled", config);
-        ReadClientAttr(inConfig, "asu_batch_topk_affinity_top_k", "batch_topk_affinity.top_k",
-                       config);
-        ReadClientAttr(inConfig, "asu_batch_topk_affinity_dynamic_adjust_enabled",
-                       "batch_topk_affinity.dynamic_adjust_enabled", config);
-
-        std::size_t tensorSize = 0;
-        inConfig.GetNumber("tensor_size", tensorSize);
-        if (tensorSize != 0) {
-            if (config.shardSize != 0) {
-                config.tensorSizes.assign(config.shardSize / tensorSize, tensorSize);
-            }
-        } else {
-            inConfig.GetNumbers("tensor_size_list", config.tensorSizes);
-        }
+        ApplyConfigSetters(inConfig, config);
+        ReadTensorSizes(inConfig, config);
         return config;
     }
 

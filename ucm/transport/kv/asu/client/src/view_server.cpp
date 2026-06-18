@@ -24,6 +24,8 @@
 #include "view_server.h"
 #include <algorithm>
 #include <fstream>
+#include <functional>
+#include <unordered_map>
 #include <utility>
 #include "asu_client/asu_client.h"
 #include "config_parser_common.h"
@@ -31,6 +33,8 @@
 
 namespace UC::ASU {
 namespace {
+
+using ViewConfigSetter = std::function<void(GlobalView&, const std::string&)>;
 
 AsuInfo ExtractAsuInfo(const TransportConfig& config)
 {
@@ -49,6 +53,37 @@ AsuInfo ParseAsuInfo(const std::string& value)
 }
 
 bool HasKnownViewEpoch(const GlobalView& view) { return view.viewEpoch != 0; }
+
+void SetAsuIds(GlobalView& view, const std::string& value)
+{
+    view.asuMap.clear();
+    for (const auto& asuId : SplitConfigValue(value, ',')) {
+        view.asuMap.emplace(ParseConfigUint64(asuId), AsuInfo{});
+    }
+}
+
+// clang-format off
+const std::unordered_map<std::string, ViewConfigSetter> g_viewConfigSetters = {
+    {"viewEpoch",    [](GlobalView& v, const std::string& value) { v.viewEpoch = ParseConfigUint64(value); }},
+    {"view_epoch",   [](GlobalView& v, const std::string& value) { v.viewEpoch = ParseConfigUint64(value); }},
+    {"viewId",       [](GlobalView& v, const std::string& value) { v.viewId = ParseConfigUint64(value); }},
+    {"view_id",      [](GlobalView& v, const std::string& value) { v.viewId = ParseConfigUint64(value); }},
+    {"createTimeMs", [](GlobalView& v, const std::string& value) { v.createTimeMs = ParseConfigUint64(value); }},
+    {"create_time_ms", [](GlobalView& v, const std::string& value) { v.createTimeMs = ParseConfigUint64(value); }},
+    {"expireTimeMs", [](GlobalView& v, const std::string& value) { v.expireTimeMs = ParseConfigUint64(value); }},
+    {"expire_time_ms", [](GlobalView& v, const std::string& value) { v.expireTimeMs = ParseConfigUint64(value); }},
+    {"asuIds",       [](GlobalView& v, const std::string& value) { SetAsuIds(v, value); }},
+    {"asu_ids",      [](GlobalView& v, const std::string& value) { SetAsuIds(v, value); }},
+};
+// clang-format on
+
+bool ApplyViewConfigField(GlobalView& view, const std::string& key, const std::string& value)
+{
+    const auto iter = g_viewConfigSetters.find(key);
+    if (iter == g_viewConfigSetters.end()) { return false; }
+    iter->second(view, value);
+    return true;
+}
 
 class ConfigFileViewServer final : public ViewServer {
 public:
@@ -73,19 +108,8 @@ public:
 
             const auto key = TrimConfigValue(line.substr(0, pos));
             const auto value = TrimConfigValue(line.substr(pos + 1));
-            if (key == "viewEpoch" || key == "view_epoch") {
-                nextView.viewEpoch = ParseConfigUint64(value);
-            } else if (key == "viewId" || key == "view_id") {
-                nextView.viewId = ParseConfigUint64(value);
-            } else if (key == "createTimeMs" || key == "create_time_ms") {
-                nextView.createTimeMs = ParseConfigUint64(value);
-            } else if (key == "expireTimeMs" || key == "expire_time_ms") {
-                nextView.expireTimeMs = ParseConfigUint64(value);
-            } else if (key == "asuIds" || key == "asu_ids") {
-                nextView.asuMap.clear();
-                for (const auto& asuId : SplitConfigValue(value, ',')) {
-                    nextView.asuMap.emplace(ParseConfigUint64(asuId), AsuInfo{});
-                }
+            if (ApplyViewConfigField(nextView, key, value)) {
+                continue;
             } else {
                 AsuId asuId{0};
                 if (TryParseAsuInfoKey(key, asuId)) {

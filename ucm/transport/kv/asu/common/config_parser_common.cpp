@@ -98,6 +98,24 @@ const std::unordered_map<std::string, TransportConfigSetter> g_transportBufferCo
     {"ioBuffer.flagBufferSlotNum",      [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
     {"io_buffer.flag_buffer_slot_num",  [](TransportConfig& c, const std::string& v) { c.flagBufferSlotNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
 };
+
+const std::unordered_map<std::string, TransportConfigSetter> g_transportIoNumConfigSetters = {
+    {"batchLoadIoNum",    [](TransportConfig& c, const std::string& v) { c.asuBatchLoadIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"batch_load_io_num", [](TransportConfig& c, const std::string& v) { c.asuBatchLoadIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"batchStoreIoNum",   [](TransportConfig& c, const std::string& v) { c.asuBatchStoreIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"batch_store_io_num", [](TransportConfig& c, const std::string& v) { c.asuBatchStoreIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"deleteIoNum",       [](TransportConfig& c, const std::string& v) { c.asuDeleteIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"delete_io_num",     [](TransportConfig& c, const std::string& v) { c.asuDeleteIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"queryIoNum",        [](TransportConfig& c, const std::string& v) { c.asuQueryIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+    {"query_io_num",      [](TransportConfig& c, const std::string& v) { c.asuQueryIoNum = static_cast<std::size_t>(ParseConfigUint64(v)); }},
+};
+
+const std::unordered_map<std::string, TransportConfigSetter> g_transportProviderConfigSetters = {
+    {"providerBackend",       [](TransportConfig& c, const std::string& v) { c.providerType = ParseConfigTransProviderType(v); }},
+    {"provider_backend",      [](TransportConfig& c, const std::string& v) { c.providerType = ParseConfigTransProviderType(v); }},
+    {"transProviderBackend",  [](TransportConfig& c, const std::string& v) { c.providerType = ParseConfigTransProviderType(v); }},
+    {"trans_provider_backend", [](TransportConfig& c, const std::string& v) { c.providerType = ParseConfigTransProviderType(v); }},
+};
 // clang-format on
 
 bool ApplyEndpointConfigField(const std::unordered_map<std::string, EndpointSetter>& setters,
@@ -166,29 +184,18 @@ bool ApplyTransportBufferConfigField(TransportConfig& config, const std::string&
 bool ApplyTransportIoNumConfigField(TransportConfig& config, const std::string& key,
                                     const std::string& value)
 {
-    if (key == "batchLoadIoNum" || key == "batch_load_io_num") {
-        config.asuBatchLoadIoNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "batchStoreIoNum" || key == "batch_store_io_num") {
-        config.asuBatchStoreIoNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "deleteIoNum" || key == "delete_io_num") {
-        config.asuDeleteIoNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else if (key == "queryIoNum" || key == "query_io_num") {
-        config.asuQueryIoNum = static_cast<std::size_t>(ParseConfigUint64(value));
-    } else {
-        return false;
-    }
+    const auto iter = g_transportIoNumConfigSetters.find(key);
+    if (iter == g_transportIoNumConfigSetters.end()) { return false; }
+    iter->second(config, value);
     return true;
 }
 
 bool ApplyTransportProviderConfigField(TransportConfig& config, const std::string& key,
                                        const std::string& value)
 {
-    if (key == "providerBackend" || key == "provider_backend" || key == "transProviderBackend" ||
-        key == "trans_provider_backend") {
-        config.providerType = ParseConfigTransProviderType(value);
-    } else {
-        return false;
-    }
+    const auto iter = g_transportProviderConfigSetters.find(key);
+    if (iter == g_transportProviderConfigSetters.end()) { return false; }
+    iter->second(config, value);
     return true;
 }
 
