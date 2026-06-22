@@ -1317,6 +1317,7 @@ class UCMDirectConnector(KVConnectorBase_V1):
             backends = [path for path in config["storage_backends"].split(":")]
             config["storage_backends"] = backends
         config["unique_id"] = f"{self.unique_id}"
+        config["asu_tensor_layout"] = "mla" if self.is_mla else "gqa"
         if self._role == KVConnectorRole.WORKER:
             config["device_id"] = self.local_rank
             tensor_size_list = kv_cache_layout.tensor_size_list * self.blocks_per_chunk
