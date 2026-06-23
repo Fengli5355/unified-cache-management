@@ -18,6 +18,7 @@ namespace {
 
 constexpr int kExitInvalidArgument = 1;
 constexpr std::size_t kDeviceBufferAlignment = UC::ASU::kAsuAlignmentBytes;
+constexpr std::size_t kDeviceMrRegisterAlignment = 2ULL * 1024ULL * 1024ULL;
 
 struct BenchBufferSlot {
     BufferSet buffers;
@@ -40,6 +41,11 @@ std::size_t AlignUp(std::size_t value, std::size_t alignment)
     const auto remainder = value % alignment;
     if (remainder == 0) { return value; }
     return value + alignment - remainder;
+}
+
+std::uintptr_t AlignUpAddress(std::uintptr_t value, std::size_t alignment)
+{
+    return static_cast<std::uintptr_t>(AlignUp(static_cast<std::size_t>(value), alignment));
 }
 
 UC::ASU::MemoryRegion MakeDeviceRegion(std::uint64_t addr, std::size_t size)
@@ -204,14 +210,22 @@ Status MakeDeviceBuffer(std::size_t size, std::shared_ptr<void>& deviceBuffer)
         return Status::Success();
     }
 
+    if (size > std::numeric_limits<std::size_t>::max() - (kDeviceMrRegisterAlignment - 1)) {
+        return Status::Error(kExitInvalidArgument, "device payload bench allocation size overflow");
+    }
+    const auto allocationSize = size + kDeviceMrRegisterAlignment - 1;
+
     void* ptr = nullptr;
-    auto ret = aclrtMalloc(&ptr, size, ACL_MEM_TYPE_HIGH_BAND_WIDTH);
+    auto ret = aclrtMalloc(&ptr, allocationSize, ACL_MEM_MALLOC_HUGE_ONLY);
     if (ret != ACL_SUCCESS) {
         return Status::Error(kExitInvalidArgument,
                              "device payload bench aclrtMalloc failed: size=" +
-                                 std::to_string(size) + " ret=" + std::to_string(ret));
+                                 std::to_string(allocationSize) + " ret=" + std::to_string(ret));
     }
-    deviceBuffer = std::shared_ptr<void>(ptr, aclrtFree);
+    const auto baseAddr =
+        AlignUpAddress(reinterpret_cast<std::uintptr_t>(ptr), kDeviceMrRegisterAlignment);
+    deviceBuffer = std::shared_ptr<void>(reinterpret_cast<void*>(baseAddr),
+                                         [ptr](void*) { (void)aclrtFree(ptr); });
     return Status::Success();
 }
 
@@ -265,8 +279,13 @@ Status BuildBenchBufferPool(const KvTestConfig& config, bool useDeviceBuffers,
             }
         }
         if (useDeviceBuffers) {
+            const auto registerSize = AlignUp(deviceBufferSize, kDeviceMrRegisterAlignment);
+            if (registerSize < deviceBufferSize) {
+                return Status::Error(kExitInvalidArgument,
+                                     "device payload bench register size overflow");
+            }
             std::shared_ptr<void> deviceBuffer;
-            auto status = MakeDeviceBuffer(deviceBufferSize, deviceBuffer);
+            auto status = MakeDeviceBuffer(registerSize, deviceBuffer);
             if (!status.Ok()) { return status; }
             buffers.deviceBuffers.emplace_back(std::move(deviceBuffer));
         }
@@ -291,16 +310,16 @@ void PrepareBenchBuffers(BenchBufferSlot& slot, std::uint64_t begin, std::size_t
     buffers.regions.clear();
     buffers.entries.clear();
     buffers.entryRegionIndexes.clear();
-    buffers.registerResults.clear();
     buffers.entries.reserve(entryCount);
     if (useDeviceBuffers) {
         const auto baseAddr =
             buffers.deviceBuffers.empty()
                 ? 0
                 : reinterpret_cast<std::uintptr_t>(buffers.deviceBuffers.front().get());
-        const auto regionSize = entryCount == 0 ? 0
-                                                : buffers.deviceBufferOffsets[entryCount - 1] +
-                                                      buffers.ownedBuffers[entryCount - 1].size();
+        const auto dataSize = buffers.ownedBuffers.empty() ? 0
+                                                           : buffers.deviceBufferOffsets.back() +
+                                                                 buffers.ownedBuffers.back().size();
+        const auto regionSize = AlignUp(dataSize, kDeviceMrRegisterAlignment);
         buffers.regions.emplace_back(MakeDeviceRegion(baseAddr, regionSize));
         buffers.entryRegionIndexes.assign(entryCount, 0);
     } else {
@@ -321,6 +340,53 @@ void PrepareBenchBuffers(BenchBufferSlot& slot, std::uint64_t begin, std::size_t
     }
 }
 
+Status BindRegisteredBuffers(BufferSet& buffers)
+{
+    if (buffers.registerResults.size() != buffers.regions.size()) {
+        return Status::Error(kExitInvalidArgument,
+                             "registered buffer result count does not match region count");
+    }
+    for (std::size_t entryIndex = 0; entryIndex < buffers.entries.size(); ++entryIndex) {
+        const auto regionIndex = buffers.entryRegionIndexes.empty()
+                                     ? entryIndex
+                                     : buffers.entryRegionIndexes[entryIndex];
+        if (regionIndex >= buffers.registerResults.size()) {
+            return Status::Error(kExitInvalidArgument,
+                                 "registered buffer region index out of range");
+        }
+        buffers.entries[entryIndex].buffer.handle = buffers.registerResults[regionIndex].handle;
+    }
+    return Status::Success();
+}
+
+Status RegisterBenchDeviceBuffers(AsuClientRunner& clientRunner, BenchBufferPool& pool,
+                                  std::uint64_t entryCountPerOperation,
+                                  const std::string& keyPrefix)
+{
+    for (std::size_t slotIndex = 0; slotIndex < pool.size(); ++slotIndex) {
+        auto& slot = pool[slotIndex];
+        PrepareBenchBuffers(slot, slotIndex * entryCountPerOperation,
+                            static_cast<std::size_t>(entryCountPerOperation), keyPrefix,
+                            /*useDeviceBuffers=*/true);
+        auto status = clientRunner.RegisterBuffers(slot.buffers);
+        if (!status.Ok()) { return status; }
+    }
+    return Status::Success();
+}
+
+Status UnregisterBenchDeviceBuffers(AsuClientRunner& clientRunner, BenchBufferPool& pool)
+{
+    Status finalStatus = Status::Success();
+    for (auto& slot : pool) {
+        auto& buffers = slot.buffers;
+        if (buffers.registerResults.empty()) { continue; }
+        auto status = clientRunner.UnregisterBuffers(buffers);
+        if (finalStatus.Ok() && !status.Ok()) { finalStatus = status; }
+        buffers.registerResults.clear();
+    }
+    return finalStatus;
+}
+
 Status ExecuteBenchOperation(BenchOpType requestedOp, const KvTestConfig& config,
                              AsuClientRunner& clientRunner, BenchBufferSlot& slot,
                              std::uint64_t begin, std::size_t entryCount,
@@ -339,7 +405,8 @@ Status ExecuteBenchOperation(BenchOpType requestedOp, const KvTestConfig& config
         if (!status.Ok()) { return status; }
     }
 
-    auto status = clientRunner.RegisterBuffers(buffers);
+    auto status =
+        useDeviceBuffers ? BindRegisteredBuffers(buffers) : clientRunner.RegisterBuffers(buffers);
     if (!status.Ok()) { return status; }
 
     status =
@@ -347,6 +414,8 @@ Status ExecuteBenchOperation(BenchOpType requestedOp, const KvTestConfig& config
                                        config.asuClientConfig.defaultWaitTimeoutMs, operationResult)
                : clientRunner.Store(buffers, submitMode,
                                     config.asuClientConfig.defaultWaitTimeoutMs, operationResult);
+    if (useDeviceBuffers) { return status; }
+
     auto unregisterStatus = clientRunner.UnregisterBuffers(buffers);
     if (status.Ok() && !unregisterStatus.Ok()) { status = unregisterStatus; }
     return status;
@@ -394,6 +463,14 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     BenchBufferPool bufferPool;
     status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation, bufferPool);
     if (!status.Ok()) { return status; }
+    if (useDeviceBuffers) {
+        status =
+            RegisterBenchDeviceBuffers(clientRunner, bufferPool, entryCountPerOperation, keyPrefix);
+        if (!status.Ok()) {
+            (void)UnregisterBenchDeviceBuffers(clientRunner, bufferPool);
+            return status;
+        }
+    }
 
     using Clock = std::chrono::steady_clock;
     std::vector<double> measuredLatenciesUs;
@@ -511,12 +588,18 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
 
     if (bench.warmupSec != 0) {
         status = runPhase(bench.warmupSec, false);
-        if (!status.Ok()) { return status; }
+        if (!status.Ok()) {
+            if (useDeviceBuffers) { (void)UnregisterBenchDeviceBuffers(clientRunner, bufferPool); }
+            return status;
+        }
     }
 
     const auto measureStart = Clock::now();
     status = runPhase(bench.durationSec, true);
     const auto measureEnd = Clock::now();
+    auto cleanupStatus = useDeviceBuffers ? UnregisterBenchDeviceBuffers(clientRunner, bufferPool)
+                                          : Status::Success();
+    if (status.Ok() && !cleanupStatus.Ok()) { status = cleanupStatus; }
     if (!status.Ok()) { return status; }
 
     result.benchMetrics.elapsedSec =

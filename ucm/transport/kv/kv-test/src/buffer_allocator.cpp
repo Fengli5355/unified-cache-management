@@ -10,6 +10,7 @@ constexpr int kExitInvalidArgument = 1;
 
 constexpr std::uint8_t kRetrieveBufferInitialValue = 0xA5;
 constexpr std::size_t kDeviceBufferAlignment = UC::ASU::kAsuAlignmentBytes;
+constexpr std::size_t kDeviceMrRegisterAlignment = 2ULL * 1024ULL * 1024ULL;
 
 UC::ASU::MemoryRegion MakeHostRegion(std::vector<std::uint8_t>& buffer)
 {
@@ -28,6 +29,11 @@ std::size_t AlignUp(std::size_t value, std::size_t alignment)
     const auto remainder = value % alignment;
     if (remainder == 0) { return value; }
     return value + alignment - remainder;
+}
+
+std::uintptr_t AlignUpAddress(std::uintptr_t value, std::size_t alignment)
+{
+    return static_cast<std::uintptr_t>(AlignUp(static_cast<std::size_t>(value), alignment));
 }
 
 UC::ASU::MemoryRegion MakeDeviceRegion(std::uint64_t addr, std::size_t size)
@@ -89,16 +95,28 @@ Status BuildDeviceBuffers(BufferSet& buffers)
 
     if (totalSize == 0) { return Status::Success(); }
 
+    const auto registerSize = AlignUp(totalSize, kDeviceMrRegisterAlignment);
+    if (registerSize < totalSize) {
+        return Status::Error(kExitInvalidArgument, "device payload register size overflow");
+    }
+
+    if (registerSize > std::numeric_limits<std::size_t>::max() - (kDeviceMrRegisterAlignment - 1)) {
+        return Status::Error(kExitInvalidArgument, "device payload allocation size overflow");
+    }
+    const auto allocationSize = registerSize + kDeviceMrRegisterAlignment - 1;
+
     void* ptr = nullptr;
-    auto ret = aclrtMalloc(&ptr, totalSize, ACL_MEM_TYPE_HIGH_BAND_WIDTH);
+    auto ret = aclrtMalloc(&ptr, allocationSize, ACL_MEM_MALLOC_HUGE_ONLY);
     if (ret != ACL_SUCCESS) {
         return Status::Error(kExitInvalidArgument, "device payload aclrtMalloc failed: size=" +
-                                                       std::to_string(totalSize) +
+                                                       std::to_string(allocationSize) +
                                                        " ret=" + std::to_string(ret));
     }
 
-    auto deviceBuffer = std::shared_ptr<void>(ptr, aclrtFree);
-    const auto baseAddr = reinterpret_cast<std::uintptr_t>(deviceBuffer.get());
+    const auto baseAddr =
+        AlignUpAddress(reinterpret_cast<std::uintptr_t>(ptr), kDeviceMrRegisterAlignment);
+    auto deviceBuffer = std::shared_ptr<void>(reinterpret_cast<void*>(baseAddr),
+                                              [ptr](void*) { (void)aclrtFree(ptr); });
     for (std::size_t index = 0; index < buffers.ownedBuffers.size(); ++index) {
         auto* deviceAddr = reinterpret_cast<void*>(baseAddr + buffers.deviceBufferOffsets[index]);
         auto status = CopyHostToDevice(buffers.ownedBuffers[index], deviceAddr);
@@ -106,7 +124,7 @@ Status BuildDeviceBuffers(BufferSet& buffers)
     }
 
     buffers.deviceBuffers.emplace_back(deviceBuffer);
-    buffers.regions.emplace_back(MakeDeviceRegion(baseAddr, totalSize));
+    buffers.regions.emplace_back(MakeDeviceRegion(baseAddr, registerSize));
     buffers.entryRegionIndexes.assign(buffers.ownedBuffers.size(), 0);
     return Status::Success();
 }
