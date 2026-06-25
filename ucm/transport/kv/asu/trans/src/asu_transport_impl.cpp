@@ -341,6 +341,11 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
     results.reserve(regions.size());
 
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
+    bool hasFailure = false;
+    std::vector<MRHandle> registeredHandles;
+    std::vector<TransProvider::UnregisterMemoryDesc> registeredDescs;
+    registeredHandles.reserve(regions.size());
+    registeredDescs.reserve(regions.size());
     for (const auto& region : regions) {
         const auto memType = region.memoryType == MemoryType::ASCEND_DEVICE
                                  ? TransProvider::MemType::MEM_DEVICE
@@ -357,6 +362,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         const auto connectionHandle =
             connectionChannel == nullptr ? nullptr : connectionChannel->GetConnection();
         if (memType == TransProvider::MemType::MEM_DEVICE && connectionHandle == nullptr) {
+            hasFailure = true;
             results.emplace_back(RegisterResult{
                 Status::Error(StatusCode::CONNECTION_ERROR,
                               "transport register device memory requires an active connection"),
@@ -366,6 +372,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
 
         auto status = transProvider_->RegisterMemory(connectionHandle, descs, memHandles);
         if (!status.ok() || memHandles.empty()) {
+            hasFailure = true;
             results.emplace_back(RegisterResult{
                 status.ok() ? Status::Error(StatusCode::INTERNAL_ERROR,
                                             "transport register memory returned no handle")
@@ -378,6 +385,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         uint32_t tokenId{0};
         status = transProvider_->GetMemTokenId(memHandles[0], tokenId);
         if (!status.ok()) {
+            hasFailure = true;
             (void)transProvider_->UnregisterMemory({
                 TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}
             });
@@ -392,7 +400,19 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         registeredRegions_[handle] = regMem;
         registeredRegionStates_[handle] =
             RegisteredRegionState{connectionHandle, memHandles[0], std::move(connectionChannel)};
+        registeredHandles.emplace_back(handle);
+        registeredDescs.push_back(
+            TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]});
         results.emplace_back(RegisterResult{Status::OK(), handle, 0, 0, tokenId});
+    }
+    if (hasFailure) {
+        if (!registeredDescs.empty()) { (void)transProvider_->UnregisterMemory(registeredDescs); }
+        for (auto handle : registeredHandles) {
+            registeredRegions_.erase(handle);
+            registeredRegionStates_.erase(handle);
+        }
+        return Status::Error(StatusCode::PARTIAL_FAILED,
+                             "one or more memory regions failed to register");
     }
     return Status::OK();
 }
