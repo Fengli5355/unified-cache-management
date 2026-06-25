@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #ifdef UCM_ASU_ENABLE_AICPU_PROVIDER
@@ -154,7 +155,13 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
         }
     }
 
-    connManager_->StartRecoverLoop();
+    try {
+        connManager_->StartRecoverLoop();
+    } catch (const std::system_error& e) {
+        (void)connManager_->Shutdown();
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "failed to start connection recover worker: " + std::string(e.what()));
+    }
 
     auto status = sendBufferManager_.Init("asu send buffer", MemoryType::HOST_PINNED,
                                           config_.sendBufferSlotSize, config_.sendBufferSlotNum,
@@ -170,8 +177,17 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
     auto queueDepth = std::max<std::size_t>(2, static_cast<std::size_t>(config_.maxInflightTasks));
     executeQueue_.Setup(queueDepth + 1);
     stop_.store(false, std::memory_order_release);
-    worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
-    completionWorker_ = std::thread(&AsuTransportImpl::CompletionLoop, this);
+    try {
+        worker_ = std::thread(&AsuTransportImpl::WorkerLoop, this);
+        completionWorker_ = std::thread(&AsuTransportImpl::CompletionLoop, this);
+    } catch (const std::system_error& e) {
+        stop_.store(true, std::memory_order_release);
+        if (worker_.joinable()) { worker_.join(); }
+        if (completionWorker_.joinable()) { completionWorker_.join(); }
+        if (connManager_) { (void)connManager_->Shutdown(); }
+        return Status::Error(StatusCode::INTERNAL_ERROR,
+                             "failed to start transport worker: " + std::string(e.what()));
+    }
     UC_DEBUG("AsuTransportImpl::Init OK: queueDepth={}", queueDepth);
     return Status::OK();
 }
@@ -362,8 +378,9 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         uint32_t tokenId{0};
         status = transProvider_->GetMemTokenId(memHandles[0], tokenId);
         if (!status.ok()) {
-            (void)transProvider_->UnregisterMemory(
-                {TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}});
+            (void)transProvider_->UnregisterMemory({
+                TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}
+            });
             results.emplace_back(RegisterResult{status, kInvalidMRHandle});
             continue;
         }
