@@ -54,6 +54,11 @@ namespace {
 
 constexpr std::size_t kFlagBufferHeaderCopySize = kCqeDwordCount * sizeof(std::uint32_t);
 
+bool ShouldCopyFlagFromDevice(MemoryType memoryType)
+{
+    return memoryType == MemoryType::ASCEND_DEVICE || memoryType == MemoryType::HOST_PINNED;
+}
+
 Status CopyDeviceToHost(const ScatterGatherEntry& sge, void* host, std::size_t size)
 {
     if (size > sge.length) {
@@ -616,7 +621,7 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
         const void* responseData = nullptr;
         std::array<std::uint8_t, kFlagBufferHeaderCopySize> flagHeader{};
         std::vector<std::uint8_t> flagBuffer;
-        if (subBatchContext.flagBuffer.memory_type == MemoryType::ASCEND_DEVICE) {
+        if (ShouldCopyFlagFromDevice(subBatchContext.flagBuffer.memory_type)) {
             auto status =
                 CopyDeviceToHost(subBatchContext.flagBuffer, flagHeader.data(), flagHeader.size());
             if (!status.ok()) {
@@ -637,7 +642,7 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
         }
         if (completedCid == 0 || completedCid != subBatchContext.cid) { continue; }
 
-        if (subBatchContext.flagBuffer.memory_type == MemoryType::ASCEND_DEVICE) {
+        if (ShouldCopyFlagFromDevice(subBatchContext.flagBuffer.memory_type)) {
             // The header matched; copy the full CQE before unpacking entry status.
             flagBuffer.resize(subBatchContext.flagBuffer.length);
             auto status =
