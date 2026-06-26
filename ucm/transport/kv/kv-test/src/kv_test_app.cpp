@@ -401,6 +401,28 @@ PayloadBufferPlacement PayloadPlacementForConfig(const KvTestConfig& config)
                                             : PayloadBufferPlacement::HOST;
 }
 
+bool NeedsPayloadAclRuntime(CommandType command, const KvTestConfig& config)
+{
+    if (!UsesDevicePayloadBuffers(config)) { return false; }
+
+    switch (command) {
+        case CommandType::STORE:
+        case CommandType::RETRIEVE:
+        case CommandType::BATCH_STORE:
+        case CommandType::BATCH_RETRIEVE:
+        case CommandType::POWER_CYCLE_PREPARE:
+        case CommandType::POWER_CYCLE_VERIFY:
+        case CommandType::BENCH: return true;
+        case CommandType::CONNECT:
+        case CommandType::CONFIG_CHECK:
+        case CommandType::DELETE:
+        case CommandType::EXIST:
+        case CommandType::VERSION:
+        case CommandType::UNKNOWN:
+        default: return false;
+    }
+}
+
 }  // namespace
 
 KvTestApp::KvTestApp() = default;
@@ -465,10 +487,12 @@ int KvTestApp::Run(int argc, char** argv)
     }
 
     PayloadBufferAclRuntime payloadBufferAclRuntime;
-    status = payloadBufferAclRuntime.MaybeSetUp(config);
-    if (!status.Ok()) {
-        PrintFailure(status);
-        return ToExitCode(status);
+    if (NeedsPayloadAclRuntime(options.command, config)) {
+        status = payloadBufferAclRuntime.MaybeSetUp(config);
+        if (!status.Ok()) {
+            PrintFailure(status);
+            return ToExitCode(status);
+        }
     }
 
     status = resultWriter_.Open(config.output);

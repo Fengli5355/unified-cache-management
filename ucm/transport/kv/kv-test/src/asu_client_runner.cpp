@@ -148,6 +148,7 @@ Status AsuClientRunner::Shutdown()
     if (client_ == nullptr) { return Status::Success(); }
 
     auto status = client_->Shutdown();
+    client_.reset();
     return ToKvTestStatus(status, "asu client shutdown");
 }
 

@@ -16,6 +16,7 @@ public:
 private:
     bool initialized_{false};
     bool deviceSet_{false};
+    bool tearDownAcl_{false};
     std::int32_t deviceId_{0};
 };
 

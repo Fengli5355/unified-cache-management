@@ -70,6 +70,7 @@ Status PayloadBufferAclRuntime::MaybeSetUp(const KvTestConfig& config)
     if (!UsesDevicePayloadBuffers(config)) { return Status::Success(); }
 
     deviceId_ = ResolvePayloadDeviceId(config);
+    tearDownAcl_ = IsFakeBackendMode(config);
     auto status = SetUpAclThreadDevice(deviceId_, &initialized_);
     if (!status.Ok()) {
         TearDown();
@@ -81,6 +82,8 @@ Status PayloadBufferAclRuntime::MaybeSetUp(const KvTestConfig& config)
 
 void PayloadBufferAclRuntime::TearDown()
 {
+    if (!tearDownAcl_) { return; }
+
     if (deviceSet_) {
         (void)aclrtResetDevice(deviceId_);
         deviceSet_ = false;
@@ -89,6 +92,7 @@ void PayloadBufferAclRuntime::TearDown()
         (void)aclFinalize();
         initialized_ = false;
     }
+    tearDownAcl_ = false;
 }
 
 bool UsesDevicePayloadBuffers(const KvTestConfig& config)
