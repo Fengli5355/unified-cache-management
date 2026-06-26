@@ -296,6 +296,12 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             if (!status.Ok()) { return status; }
             status = ParseUint32(option, value, options.concurrency);
             if (!status.Ok()) { return status; }
+        } else if (option == "--timewait-us") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            options.timewaitUsSet = true;
+            status = ParseUint64(option, value, options.timewaitUs);
+            if (!status.Ok()) { return status; }
         } else if (option == "--duration") {
             auto status = requireValue();
             if (!status.Ok()) { return status; }

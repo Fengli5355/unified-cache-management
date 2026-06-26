@@ -11,6 +11,7 @@
 #include <numeric>
 #include <sstream>
 #include <system_error>
+#include <thread>
 #include "kv_test/payload_buffer_runtime.h"
 
 namespace UC::KVTest {
@@ -503,6 +504,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     result.benchMetrics.valueSize = bench.ioSize;
     result.benchMetrics.batchSize = static_cast<std::uint32_t>(entryCountPerOperation);
     result.benchMetrics.concurrency = bench.concurrency;
+    result.benchMetrics.timewaitUs = bench.timewaitUs;
     result.benchMetrics.warmupSec = bench.warmupSec;
     result.benchMetrics.durationSec = bench.durationSec;
 
@@ -549,6 +551,9 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                     inlineOutcomes.emplace_back(RunBenchOperation(
                         bench.op, config, clientRunner, *bufferSlot, begin, currentEntryCount,
                         currentOperationIndex, keyPrefix, useDeviceBuffers));
+                    if (bench.timewaitUs != 0 && Clock::now() < phaseEnd) {
+                        std::this_thread::sleep_for(std::chrono::microseconds(bench.timewaitUs));
+                    }
                     continue;
                 }
 
@@ -562,6 +567,9 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                                                      currentOperationIndex, keyPrefix,
                                                      useDeviceBuffers);
                         }));
+                    if (bench.timewaitUs != 0 && Clock::now() < phaseEnd) {
+                        std::this_thread::sleep_for(std::chrono::microseconds(bench.timewaitUs));
+                    }
                 } catch (const std::system_error& e) {
                     return Status::Error(
                         kExitInvalidArgument,
