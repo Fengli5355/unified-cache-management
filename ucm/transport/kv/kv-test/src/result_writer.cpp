@@ -269,6 +269,7 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "value_size: " << options.valueSize << '\n'
              << "batch_size: " << options.batchSize << '\n'
              << "concurrency: " << options.concurrency << '\n'
+             << "timewait_us: " << options.timewaitUs << '\n'
              << "duration_sec: " << options.durationSec << '\n'
              << "asu_status_code: " << asuStatusCode << '\n';
     if (!result.status.Ok()) { textFile << "error: " << result.status.message << '\n'; }
@@ -302,6 +303,7 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "    \"value_size\": " << options.valueSize << ",\n"
              << "    \"batch_size\": " << options.batchSize << ",\n"
              << "    \"concurrency\": " << options.concurrency << ",\n"
+             << "    \"timewait_us\": " << options.timewaitUs << ",\n"
              << "    \"duration_sec\": " << options.durationSec << "\n"
              << "  },\n";
     if (options.command == CommandType::BENCH) {
@@ -452,6 +454,7 @@ Status ResultWriter::WriteHtmlReport(const CommandOptions& options, const Comman
              << "<tr><th>Value size</th><td>" << options.valueSize << "</td></tr>"
              << "<tr><th>Batch size</th><td>" << options.batchSize << "</td></tr>"
              << "<tr><th>Concurrency</th><td>" << options.concurrency << "</td></tr>"
+             << "<tr><th>Timewait us</th><td>" << options.timewaitUs << "</td></tr>"
              << "<tr><th>Duration sec</th><td>" << options.durationSec << "</td></tr>"
              << "</tbody></table></section>";
 

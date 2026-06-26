@@ -64,6 +64,7 @@ CommandOptions BuildEffectiveOptions(const CommandOptions& options, const KvTest
     effective.outputPath = config.output.path;
     if (effective.benchOp == BenchOpType::UNKNOWN) { effective.benchOp = config.bench.op; }
     effective.concurrency = config.bench.concurrency;
+    effective.timewaitUs = config.bench.timewaitUs;
     effective.durationSec = config.bench.durationSec;
     effective.warmupSec = config.bench.warmupSec;
     effective.readRatio = config.bench.readRatio;
@@ -202,6 +203,7 @@ void PrintGeneralHelp()
         << "  --seed <n>               Override kv.seed.\n"
         << "  --value-size <bytes>     Override kv.value_size.\n"
         << "  --batch-size <n>         Override bench.batch_size.\n"
+        << "  --timewait-us <us>       Wait between bench operation submissions.\n"
         << "  --timeout <ms>           Override default wait timeout.\n"
         << "  --check                  Run consistency check when supported.\n"
         << "  --output <path>          Override output.path.\n"
@@ -276,7 +278,8 @@ void PrintCommandHelp(CommandType command)
             std::cout << "Usage: kv-test bench [store|retrieve|batch-store|batch-retrieve|mix] "
                          "[--io-size <bytes>] [--concurrency <n>] [--duration <sec>]\n"
                       << "       kv-test bench --op <op> [--batch-size <n>] [--warmup <sec>] "
-                         "[--read-ratio <n>] [--write-ratio <n>] [--progress]\n";
+                         "[--timewait-us <us>] [--read-ratio <n>] [--write-ratio <n>] "
+                         "[--progress]\n";
             break;
         case CommandType::UNKNOWN:
         default: PrintGeneralHelp(); break;

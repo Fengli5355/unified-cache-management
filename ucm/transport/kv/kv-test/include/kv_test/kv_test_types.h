@@ -115,6 +115,7 @@ struct CommandOptions {
     std::uint64_t valueSize{0};
     std::uint32_t batchSize{0};
     std::uint32_t concurrency{0};
+    std::uint64_t timewaitUs{0};
     std::uint64_t durationSec{0};
     std::uint64_t warmupSec{0};
     std::uint32_t readRatio{0};
@@ -126,6 +127,7 @@ struct CommandOptions {
     bool singleKeyRequested{false};
     bool keyStartSet{false};
     bool keyEndSet{false};
+    bool timewaitUsSet{false};
     bool progress{false};
     std::string outputPath;
 };
@@ -134,6 +136,7 @@ struct BenchConfig {
     BenchOpType op{BenchOpType::UNKNOWN};
     std::uint64_t ioSize{0};
     std::uint32_t concurrency{0};
+    std::uint64_t timewaitUs{0};
     std::uint64_t durationSec{0};
     std::uint64_t warmupSec{0};
     std::uint32_t readRatio{0};
@@ -230,6 +233,7 @@ struct BenchMetrics {
     std::uint64_t valueSize{0};
     std::uint32_t batchSize{0};
     std::uint32_t concurrency{0};
+    std::uint64_t timewaitUs{0};
     std::uint64_t warmupSec{0};
     std::uint64_t durationSec{0};
     std::uint64_t completedOperations{0};
