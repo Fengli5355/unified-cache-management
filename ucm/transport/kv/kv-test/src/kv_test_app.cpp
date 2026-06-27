@@ -1,10 +1,14 @@
 ﻿#include "kv_test/kv_test_app.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <malloc.h>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include "kv_test/asu_runtime_proxy.h"
 #include "kv_test/kv_test_config_helpers.h"
@@ -19,6 +23,7 @@ constexpr int kExitInvalidArgument = 1;
 constexpr const char* kAnsiGreen = "\033[32m";
 constexpr const char* kAnsiRed = "\033[31m";
 constexpr const char* kAnsiReset = "\033[0m";
+constexpr const char* kAsuClientMemoryProbeEnv = "KV_TEST_ASU_CLIENT_MEMORY_PROBE";
 int ToExitCode(const Status& status) { return status.Ok() ? kExitSuccess : status.code; }
 
 struct ProcessMemorySnapshot {
@@ -537,12 +542,21 @@ int KvTestApp::Run(int argc, char** argv)
     }
 
     CommandResult result;
+    const bool memoryProbeEnabled = AsuClientMemoryProbeEnabled();
+    ProcessMemorySnapshot beforeCreateMemory;
+    if (memoryProbeEnabled) {
+        beforeCreateMemory = TakeProcessMemorySnapshot();
+        PrintMemorySnapshot("before_create", beforeCreateMemory);
+    }
+
     std::unique_ptr<UC::ASU::AsuClient> client;
     status = CreateClient(client);
     if (!status.Ok()) {
         PrintFailure(status);
         return ToExitCode(status);
     }
+    if (memoryProbeEnabled) { PrintMemorySnapshot("after_create", TakeProcessMemorySnapshot()); }
+
     AsuClientRunner clientRunner(std::move(client));
     status = clientRunner.Init(config);
     if (memoryProbeEnabled && status.Ok()) {
