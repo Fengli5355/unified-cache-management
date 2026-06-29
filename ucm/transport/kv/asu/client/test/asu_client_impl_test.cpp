@@ -369,6 +369,36 @@ TEST(AsuClientImplTest, Lifecycle_OperationsBeforeInitReturnExpectedErrors)
     EXPECT_EQ(status.code, StatusCode::TASK_NOT_FOUND);
 }
 
+TEST(AsuClientImplTest, MemoryUsage_BeforeInitReportsOnlyInspectableClientStorage)
+{
+    auto client = CreateAsuClient(MakeFactory(std::make_shared<TestState>()));
+
+    const auto usage = client->GetMemoryUsage();
+
+    EXPECT_GT(usage.objectBytes, std::size_t{0});
+    EXPECT_EQ(usage.totalEstimatedBytes, usage.objectBytes + usage.configBytes +
+                                             usage.snapshotBytes + usage.registeredResourceBytes +
+                                             usage.taskBytes);
+    EXPECT_EQ(usage.transportCount, std::size_t{0});
+    EXPECT_EQ(usage.routerCount, std::size_t{0});
+    EXPECT_EQ(usage.viewServerCount, std::size_t{0});
+    EXPECT_EQ(usage.liveTaskCount, std::size_t{0});
+}
+
+TEST(AsuClientImplTest, MemoryUsage_AfterInitReportsOpaqueChildCounts)
+{
+    auto client = CreateAsuClient(MakeFactory(std::make_shared<TestState>()));
+    ASSERT_TRUE(client->Init(MakeConfig({10, 20})).ok());
+
+    const auto usage = client->GetMemoryUsage();
+
+    EXPECT_GT(usage.configBytes, std::size_t{0});
+    EXPECT_GT(usage.snapshotBytes, std::size_t{0});
+    EXPECT_EQ(usage.transportCount, std::size_t{2});
+    EXPECT_EQ(usage.routerCount, std::size_t{1});
+    EXPECT_EQ(usage.viewServerCount, std::size_t{1});
+}
+
 TEST(AsuClientImplTest, Lifecycle_InitTwiceReturnsResourceBusy)
 {
     auto state = std::make_shared<TestState>();
@@ -968,6 +998,20 @@ TEST(AsuClientImplTest, MemoryRegister_RegisterRegionsRegistersFirstTransportAnd
     EXPECT_EQ(state->boundRegions[20][1].tokenId, std::uint32_t{901});
     ASSERT_EQ(state->boundRegions[30].size(), std::size_t{2});
     EXPECT_EQ(state->boundRegions[30][0].tokenId, std::uint32_t{900});
+}
+
+TEST(AsuClientImplTest, MemoryUsage_RegisterRegionsReportsRetainedResourceStorage)
+{
+    auto client = CreateAsuClient(MakeFactory(std::make_shared<TestState>()));
+    ASSERT_TRUE(client->Init(MakeConfig({10})).ok());
+    const auto before = client->GetMemoryUsage();
+
+    std::vector<RegisterResult> results;
+    ASSERT_TRUE(client->RegisterRegions({MemoryRegion{}, MemoryRegion{}}, results).ok());
+    const auto after = client->GetMemoryUsage();
+
+    EXPECT_GT(after.registeredResourceBytes, before.registeredResourceBytes);
+    EXPECT_EQ(after.transportCount, std::size_t{1});
 }
 
 TEST(AsuClientImplTest, MemoryRegister_PartialRegisterFailureDoesNotBindFollowers)

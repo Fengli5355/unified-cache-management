@@ -87,6 +87,9 @@ public:
     // Unregisters regions and forgets successful resources.
     Status UnregisterRegions(const std::vector<MRHandle>& handles) override;
 
+    // Estimates memory directly owned by inspectable client state.
+    AsuClientMemoryUsage GetMemoryUsage() const override;
+
 private:
     using ClientTaskContextPtr = std::shared_ptr<ClientTaskContext>;
 
@@ -165,7 +168,7 @@ private:
     static Status NotInitialized();
 
     // Tracks aggregate client tasks returned through public TaskId values.
-    ClientTaskManager taskManager_;
+    mutable ClientTaskManager taskManager_;
     // Creates ASU transports; tests inject fake transports through this hook.
     TransportFactory transportFactory_;
     // Creates the external view server during Init.

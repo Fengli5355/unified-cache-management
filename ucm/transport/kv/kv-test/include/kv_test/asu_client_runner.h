@@ -12,6 +12,7 @@ public:
 
     Status Init(const KvTestConfig& config);
     Status Shutdown();
+    UC::ASU::AsuClientMemoryUsage GetMemoryUsage() const;
 
     Status RegisterBuffers(BufferSet& buffers);
     Status UnregisterBuffers(const BufferSet& buffers);

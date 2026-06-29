@@ -151,6 +151,11 @@ Status AsuClientRunner::Shutdown()
     return ToKvTestStatus(status, "asu client shutdown");
 }
 
+UC::ASU::AsuClientMemoryUsage AsuClientRunner::GetMemoryUsage() const
+{
+    return client_ == nullptr ? UC::ASU::AsuClientMemoryUsage{} : client_->GetMemoryUsage();
+}
+
 Status AsuClientRunner::RegisterBuffers(BufferSet& buffers)
 {
     if (client_ == nullptr) { return Status::Error(kExitInvalidArgument, "asu client is null"); }

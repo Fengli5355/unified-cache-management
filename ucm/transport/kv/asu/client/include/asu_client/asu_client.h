@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -40,6 +41,22 @@ struct AsuClientConfig {
 
     std::uint64_t defaultWaitTimeoutMs{100};
     std::unordered_map<std::string, std::string> attrs;
+};
+
+// AsuClientMemoryUsage estimates storage directly inspectable and owned by AsuClient.
+// Opaque child implementations, allocator overhead, driver memory, and device memory are excluded.
+struct AsuClientMemoryUsage {
+    std::size_t objectBytes{0};
+    std::size_t configBytes{0};
+    std::size_t snapshotBytes{0};
+    std::size_t registeredResourceBytes{0};
+    std::size_t taskBytes{0};
+    std::size_t totalEstimatedBytes{0};
+
+    std::size_t transportCount{0};
+    std::size_t routerCount{0};
+    std::size_t viewServerCount{0};
+    std::size_t liveTaskCount{0};
 };
 
 class AsuClient {
@@ -63,6 +80,8 @@ public:
     virtual Status RegisterRegions(const std::vector<MemoryRegion>& regions,
                                    std::vector<RegisterResult>& results) = 0;
     virtual Status UnregisterRegions(const std::vector<MRHandle>& handles) = 0;
+
+    virtual AsuClientMemoryUsage GetMemoryUsage() const = 0;
 };
 
 using TransportFactory = std::function<std::unique_ptr<AsuTransport>()>;

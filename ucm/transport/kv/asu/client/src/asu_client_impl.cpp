@@ -27,6 +27,7 @@
 #include <functional>
 #include <limits>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include "asu_transport/types.h"
 #include "client_config_parser.h"
@@ -37,6 +38,67 @@
 namespace UC::ASU {
 
 constexpr std::uint32_t kMaxShutdownDrainAttempts = 64;
+
+namespace {
+
+std::size_t StringStorageBytes(const std::string& value) { return value.capacity() + 1; }
+
+std::size_t StringMapStorageBytes(const std::unordered_map<std::string, std::string>& values)
+{
+    std::size_t bytes = values.size() * sizeof(std::pair<const std::string, std::string>);
+    for (const auto& [key, value] : values) {
+        bytes += StringStorageBytes(key) + StringStorageBytes(value);
+    }
+    return bytes;
+}
+
+std::size_t EndpointStorageBytes(const AsuEndpoint& endpoint)
+{
+    return StringStorageBytes(endpoint.ip) + StringStorageBytes(endpoint.hcaName) +
+           StringMapStorageBytes(endpoint.attrs);
+}
+
+std::size_t TransportConfigStorageBytes(const TransportConfig& config)
+{
+    std::size_t bytes = StringStorageBytes(config.asuName) +
+                        config.endpoints.capacity() * sizeof(AsuEndpoint) +
+                        StringMapStorageBytes(config.attrs);
+    for (const auto& endpoint : config.endpoints) { bytes += EndpointStorageBytes(endpoint); }
+    return bytes;
+}
+
+std::size_t ClientConfigStorageBytes(const AsuClientConfig& config)
+{
+    std::size_t bytes = StringStorageBytes(config.clientId) +
+                        config.viewServiceAddrs.capacity() * sizeof(std::string) +
+                        config.transportConfigs.capacity() * sizeof(TransportConfig) +
+                        StringMapStorageBytes(config.attrs);
+    for (const auto& address : config.viewServiceAddrs) { bytes += StringStorageBytes(address); }
+    for (const auto& transport : config.transportConfigs) {
+        bytes += TransportConfigStorageBytes(transport);
+    }
+    return bytes;
+}
+
+std::size_t GlobalViewStorageBytes(const GlobalView& view)
+{
+    std::size_t bytes = view.asuMap.size() * sizeof(decltype(view.asuMap)::value_type);
+    for (const auto& [asuId, info] : view.asuMap) {
+        (void)asuId;
+        bytes += info.endpoints.capacity() * sizeof(AsuEndpoint);
+        for (const auto& endpoint : info.endpoints) { bytes += EndpointStorageBytes(endpoint); }
+    }
+    return bytes;
+}
+
+std::size_t SnapshotStorageBytes(const ViewSnapshot& snapshot)
+{
+    return sizeof(ViewSnapshot) + snapshot.asuIds.capacity() * sizeof(AsuId) +
+           GlobalViewStorageBytes(snapshot.view) +
+           snapshot.transports.size() * sizeof(decltype(snapshot.transports)::value_type);
+}
+
+}  // namespace
 
 Status PartialFailed(const std::string& message)
 {
@@ -95,6 +157,50 @@ AsuClientImpl::AsuClientImpl(TransportFactory transportFactory, ViewServerFactor
 }
 
 AsuClientImpl::~AsuClientImpl() { Shutdown(); }
+
+AsuClientMemoryUsage AsuClientImpl::GetMemoryUsage() const
+{
+    AsuClientMemoryUsage usage;
+    usage.objectBytes = sizeof(AsuClientImpl);
+
+    const auto tasks = taskManager_.GetAll();
+    usage.liveTaskCount = tasks.size();
+    usage.taskBytes =
+        tasks.size() * (sizeof(ClientTaskContext) +
+                        sizeof(std::pair<const TaskId, std::shared_ptr<ClientTaskContext>>));
+
+    std::lock_guard<std::mutex> lock{mutex_};
+    usage.configBytes = ClientConfigStorageBytes(config_);
+    usage.configBytes += transportConfigs_.size() * sizeof(decltype(transportConfigs_)::value_type);
+    for (const auto& [asuId, config] : transportConfigs_) {
+        (void)asuId;
+        usage.configBytes += TransportConfigStorageBytes(config);
+    }
+
+    usage.registeredResourceBytes = registeredResources_.capacity() * sizeof(RegisteredResource);
+    for (const auto& resource : registeredResources_) {
+        usage.registeredResourceBytes += StringStorageBytes(resource.result.status.message);
+    }
+
+    std::unordered_set<const AsuTransport*> transports;
+    if (snapshot_ != nullptr) {
+        usage.snapshotBytes = SnapshotStorageBytes(*snapshot_);
+        usage.routerCount = snapshot_->router == nullptr ? 0 : 1;
+        for (const auto& [asuId, transport] : snapshot_->transports) {
+            (void)asuId;
+            if (transport != nullptr) { transports.insert(transport.get()); }
+        }
+    }
+    usage.snapshotBytes += retiredTransports_.capacity() * sizeof(std::shared_ptr<AsuTransport>);
+    for (const auto& transport : retiredTransports_) {
+        if (transport != nullptr) { transports.insert(transport.get()); }
+    }
+    usage.transportCount = transports.size();
+    usage.viewServerCount = viewServer_ == nullptr ? 0 : 1;
+    usage.totalEstimatedBytes = usage.objectBytes + usage.configBytes + usage.snapshotBytes +
+                                usage.registeredResourceBytes + usage.taskBytes;
+    return usage;
+}
 
 Status AsuClientImpl::Init(const std::string& configPath)
 {

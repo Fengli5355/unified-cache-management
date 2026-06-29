@@ -21,6 +21,80 @@ constexpr const char* kAnsiRed = "\033[31m";
 constexpr const char* kAnsiReset = "\033[0m";
 int ToExitCode(const Status& status) { return status.Ok() ? kExitSuccess : status.code; }
 
+struct ProcessMemorySnapshot {
+    std::uint64_t heapInUseBytes{0};
+    std::uint64_t heapMappedBytes{0};
+    std::uint64_t rssKiB{0};
+    std::uint64_t pssKiB{0};
+    std::uint64_t privateKiB{0};
+};
+
+bool AsuClientMemoryProbeEnabled()
+{
+    const auto* value = std::getenv(kAsuClientMemoryProbeEnv);
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+ProcessMemorySnapshot TakeProcessMemorySnapshot()
+{
+    ProcessMemorySnapshot snapshot;
+    const auto heap = mallinfo2();
+    snapshot.heapInUseBytes = heap.uordblks;
+    snapshot.heapMappedBytes = heap.hblkhd;
+
+    std::ifstream file("/proc/self/smaps_rollup");
+    std::string line;
+    while (std::getline(file, line)) {
+        std::istringstream stream(line);
+        std::string name;
+        std::uint64_t value{0};
+        stream >> name >> value;
+        if (name == "Rss:") {
+            snapshot.rssKiB = value;
+        } else if (name == "Pss:") {
+            snapshot.pssKiB = value;
+        } else if (name == "Private_Clean:" || name == "Private_Dirty:") {
+            snapshot.privateKiB += value;
+        }
+    }
+    return snapshot;
+}
+
+void PrintMemorySnapshot(const char* stage, const ProcessMemorySnapshot& snapshot)
+{
+    std::cout << "asu_client_memory: stage=" << stage
+              << " heap_in_use_bytes=" << snapshot.heapInUseBytes
+              << " heap_mapped_bytes=" << snapshot.heapMappedBytes << " rss_kib=" << snapshot.rssKiB
+              << " pss_kib=" << snapshot.pssKiB << " private_kib=" << snapshot.privateKiB << '\n';
+}
+
+void PrintMemoryDelta(const ProcessMemorySnapshot& before, const ProcessMemorySnapshot& after)
+{
+    auto delta = [](std::uint64_t first, std::uint64_t second) {
+        return static_cast<std::int64_t>(second) - static_cast<std::int64_t>(first);
+    };
+    std::cout << "asu_client_memory: stage=init_delta"
+              << " heap_in_use_bytes=" << delta(before.heapInUseBytes, after.heapInUseBytes)
+              << " heap_mapped_bytes=" << delta(before.heapMappedBytes, after.heapMappedBytes)
+              << " rss_kib=" << delta(before.rssKiB, after.rssKiB)
+              << " pss_kib=" << delta(before.pssKiB, after.pssKiB)
+              << " private_kib=" << delta(before.privateKiB, after.privateKiB) << '\n';
+}
+
+void PrintClientMemoryUsage(const UC::ASU::AsuClientMemoryUsage& usage)
+{
+    std::cout << "asu_client_owned_memory:"
+              << " object_bytes=" << usage.objectBytes << " config_bytes=" << usage.configBytes
+              << " snapshot_bytes=" << usage.snapshotBytes
+              << " registered_resource_bytes=" << usage.registeredResourceBytes
+              << " task_bytes=" << usage.taskBytes
+              << " total_estimated_bytes=" << usage.totalEstimatedBytes
+              << " transport_count=" << usage.transportCount
+              << " router_count=" << usage.routerCount
+              << " view_server_count=" << usage.viewServerCount
+              << " live_task_count=" << usage.liveTaskCount << '\n';
+}
+
 std::filesystem::path PowerCycleMetadataPath(const KvTestConfig& config)
 {
     const auto baseDir = config.output.path.empty() ? std::filesystem::path(".")
@@ -471,6 +545,13 @@ int KvTestApp::Run(int argc, char** argv)
     }
     AsuClientRunner clientRunner(std::move(client));
     status = clientRunner.Init(config);
+    if (memoryProbeEnabled && status.Ok()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const auto afterInitMemory = TakeProcessMemorySnapshot();
+        PrintMemorySnapshot("after_init_stable", afterInitMemory);
+        PrintMemoryDelta(beforeCreateMemory, afterInitMemory);
+        PrintClientMemoryUsage(clientRunner.GetMemoryUsage());
+    }
     if (status.Ok()) { status = RunCommand(effectiveOptions, config, clientRunner, result); }
 
     auto shutdownStatus = clientRunner.Shutdown();
