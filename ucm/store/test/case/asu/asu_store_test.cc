@@ -43,6 +43,8 @@ struct FakeAsuBackendState {
     std::vector<UC::AsuStore::Config> initConfigs;
     std::vector<UC::ASU::KVBuffer> lastLoadEntries;
     std::vector<UC::ASU::KVBuffer> lastStoreEntries;
+    std::vector<UC::ASU::MemoryRegion> registeredRegions;
+    std::vector<UC::ASU::MRHandle> unregisteredHandles;
 };
 
 class FakeAsuBackend final : public UC::AsuStore::AsuBackend {
@@ -135,6 +137,27 @@ public:
         return Check(taskId, result);
     }
 
+    UC::ASU::Status RegisterRegions(const std::vector<UC::ASU::MemoryRegion>& regions,
+                                    std::vector<UC::ASU::RegisterResult>& results) override
+    {
+        results.clear();
+        results.reserve(regions.size());
+        state_->registeredRegions.insert(state_->registeredRegions.end(), regions.begin(),
+                                         regions.end());
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            results.emplace_back(UC::ASU::RegisterResult{UC::ASU::Status::OK(),
+                                                         nextMrHandle_++});
+        }
+        return UC::ASU::Status::OK();
+    }
+
+    UC::ASU::Status UnregisterRegions(const std::vector<UC::ASU::MRHandle>& handles) override
+    {
+        state_->unregisteredHandles.insert(state_->unregisteredHandles.end(), handles.begin(),
+                                           handles.end());
+        return UC::ASU::Status::OK();
+    }
+
 private:
     UC::ASU::Status Submit(const std::vector<UC::ASU::KVBuffer>& entries, UC::ASU::TaskId& taskId)
     {
@@ -164,6 +187,7 @@ private:
     std::shared_ptr<FakeAsuBackendState> state_;
     bool initialized_{false};
     UC::ASU::TaskId nextTaskId_{1};
+    UC::ASU::MRHandle nextMrHandle_{1};
     std::unordered_set<UC::ASU::CacheKey> storedKeys_;
     std::unordered_map<UC::ASU::TaskId, UC::ASU::TaskResult> taskResults_;
 };
@@ -267,6 +291,30 @@ TEST(UCAsuStoreTest, ClientModeSmoke)
     auto block = UC::Test::Detail::TypesHelper::MakeBlockId("b1b2c3d4e5f6789012345678901234ab");
     ExpectLookupMiss(store, block);
     ExpectLoadDumpSmoke(store, block);
+}
+
+TEST(UCAsuStoreTest, RegistersEntryRegionsBeforeSubmitAndUnregistersAfterWait)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeBackend(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    ASSERT_TRUE(store.Setup(config).Success());
+
+    std::array<std::byte, 64> buffer{};
+    auto block = UC::Test::Detail::TypesHelper::MakeBlockId("a2b2c3d4e5f6789012345678901234ab");
+    auto dump = store.Dump(MakeTask(block, buffer.data()));
+    ASSERT_TRUE(dump.HasValue()) << dump.Error().ToString();
+
+    ASSERT_EQ(state->lastStoreEntries.size(), std::size_t{1});
+    ASSERT_EQ(state->registeredRegions.size(), std::size_t{1});
+    EXPECT_NE(state->lastStoreEntries[0].buffer.handle, UC::ASU::kInvalidMRHandle);
+    EXPECT_TRUE(state->unregisteredHandles.empty());
+
+    ASSERT_TRUE(store.Wait(dump.Value()).Success());
+    ASSERT_EQ(state->unregisteredHandles.size(), std::size_t{1});
+    EXPECT_EQ(state->unregisteredHandles[0], state->lastStoreEntries[0].buffer.handle);
 }
 
 TEST(UCAsuStoreTest, LookupOnPrefixUsesPrefixQueryMode)
