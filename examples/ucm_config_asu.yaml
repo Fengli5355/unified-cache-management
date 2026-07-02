@@ -1,4 +1,4 @@
-# UCM ASU fake backend example for vLLM / vLLM-Ascend software integration tests.
+# UCM ASU AIV backend example for vLLM / vLLM-Ascend integration tests.
 #
 # Use with:
 # kv_connector_extra_config={"UCM_CONFIG_FILE": "/workspace/unified-cache-management/examples/ucm_config_asu.yaml"}
@@ -8,18 +8,24 @@ ucm_connectors:
     ucm_connector_config:
       store_pipeline: "ASU"
       asu_mode: "client"
-      asu_client_id: "ucm-vllm-asu-fake"
+      asu_client_id: "ucm-vllm-asu-aiv"
       asu_ids: [1]
-      asu_trans_provider_backend: "fake"
+      asu_trans_provider_backend: "aiv"
+
+      # asu_info.1=protocol=TCP,local.comm_id=127.0.0.1,port=19001,local.phy_device_id=0
+      # The ASU store YAML path maps local.comm_id/port/device into the transport endpoint.
+      asu_ips: ["127.0.0.1"]
+      asu_port: 19001
+      device_id: 0
 
       # ASU client routing. Keep the default close to kv-test's fake_backend config.
       asu_router_type: "RING_HASH"
       asu_ring_hash_virtual_node_count: 128
 
-      # Local software backend. This uses normal AsuClient + AsuTransportImpl submit/CQE paths
-      # and replaces the missing device Send/backend execution with local files.
-      asu_fake_backend_path: "/home/zy/kvcache"
-      asu_fake_backend_latency_ms: 1
+      # FAKE-only local software backend options. Uncomment these when using
+      # asu_trans_provider_backend: "fake".
+      # asu_fake_backend_path: "/home/zy/kvcache"
+      # asu_fake_backend_latency_ms: 1
 
       # ASU wait and operation timeouts.
       asu_default_wait_timeout_ms: 5000
