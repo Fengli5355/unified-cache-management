@@ -34,6 +34,8 @@ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 PLATFORM = os.getenv("PLATFORM")
 ENABLE_SPARSE = os.getenv("ENABLE_SPARSE")
 BUILD_UCM_ASU = os.getenv("BUILD_UCM_ASU", "0") not in ("", "0", "false", "False")
+BUILD_UCM_ASU_PROVIDER_AIV = os.getenv("BUILD_UCM_ASU_PROVIDER_AIV", "0") not in ("","0","false","False")
+ASU_AIV_PROVIDER_ROOT = os.getenv("ASU_AIV_PROVIDER_ROOT")
 ENABLE_MINDIE = os.getenv("UCM_ENABLE_MINDIE", "0") not in ("", "0", "false", "False")
 
 
@@ -167,8 +169,12 @@ class CMakeBuild(build_ext):
 
         if enable_sparse():
             cmake_args += ["-DBUILD_UCM_SPARSE=ON"]
-        if BUILD_UCM_ASU:
+        if BUILD_UCM_ASU or BUILD_UCM_ASU_PROVIDER_AIV:
             cmake_args += ["-DBUILD_UCM_ASU=ON"]
+            if BUILD_UCM_ASU_PROVIDER_AIV:
+                cmake_args += ["-DBUILD_UCM_ASU_PROVIDER_AIV=ON"]
+            if ASU_AIV_PROVIDER_ROOT:
+                cmake_args += [f"-DASU_AIV_PROVIDER_ROOT={ASU_AIV_PROVIDER_ROOT}"]
 
         match PLATFORM:
             case "cuda":
