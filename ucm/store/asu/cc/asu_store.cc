@@ -30,10 +30,12 @@
 #include <functional>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include "asu_client/asu_client.h"
 #include "asu_transport/asu_transport.h"
@@ -266,6 +268,17 @@ public:
         return client_->Wait(taskId, timeoutMs, result);
     }
 
+    AsuStatus RegisterRegions(const std::vector<UC::ASU::MemoryRegion>& regions,
+                              std::vector<UC::ASU::RegisterResult>& results) override
+    {
+        return client_->RegisterRegions(regions, results);
+    }
+
+    AsuStatus UnregisterRegions(const std::vector<UC::ASU::MRHandle>& handles) override
+    {
+        return client_->UnregisterRegions(handles);
+    }
+
 private:
     std::unique_ptr<UC::ASU::AsuClient> client_;
 };
@@ -327,6 +340,17 @@ public:
                    UC::ASU::TaskResult& result) override
     {
         return transport_->Wait(taskId, timeoutMs, result);
+    }
+
+    AsuStatus RegisterRegions(const std::vector<UC::ASU::MemoryRegion>& regions,
+                              std::vector<UC::ASU::RegisterResult>& results) override
+    {
+        return transport_->RegisterRegions(regions, results);
+    }
+
+    AsuStatus UnregisterRegions(const std::vector<UC::ASU::MRHandle>& handles) override
+    {
+        return transport_->UnregisterRegions(handles);
     }
 
 private:
@@ -428,7 +452,8 @@ public:
     Expected<bool> Check(Detail::TaskHandle taskId) override
     {
         UC::ASU::TaskResult result;
-        auto status = backend_->Check(static_cast<UC::ASU::TaskId>(taskId), result);
+        const auto asuTaskId = static_cast<UC::ASU::TaskId>(taskId);
+        auto status = backend_->Check(asuTaskId, result);
         if (!status.ok()) {
             LogAsuStatus("check task", status);
             return ConvertStatus(status);
@@ -436,19 +461,22 @@ public:
         if (!result.status.ok() && result.status.code != AsuStatusCode::IN_PROGRESS) {
             LogAsuStatus("task result check", result.status);
         }
-        return result.status.code != AsuStatusCode::IN_PROGRESS;
+        const bool done = result.status.code != AsuStatusCode::IN_PROGRESS;
+        if (done) { ReleaseTaskRegions(asuTaskId); }
+        return bool{done};
     }
 
     Status Wait(Detail::TaskHandle taskId) override
     {
         UC::ASU::TaskResult result;
-        auto status = backend_->Wait(static_cast<UC::ASU::TaskId>(taskId),
-                                     config_.defaultWaitTimeoutMs, result);
+        const auto asuTaskId = static_cast<UC::ASU::TaskId>(taskId);
+        auto status = backend_->Wait(asuTaskId, config_.defaultWaitTimeoutMs, result);
         if (!status.ok()) {
             LogAsuStatus("wait task", status);
             return ConvertStatus(status);
         }
         LogAsuStatus("task result wait", result.status);
+        ReleaseTaskRegions(asuTaskId);
         return ConvertStatus(result.status);
     }
 
@@ -682,13 +710,78 @@ private:
         auto entries = BuildKvBuffers(task);
         if (!entries) { return entries.Error(); }
 
+        auto registerResult = RegisterEntryRegions(entries.Value());
+        if (!registerResult) { return registerResult.Error(); }
+
         UC::ASU::TaskId taskId = UC::ASU::kInvalidTaskId;
+
         auto status = ((*backend_).*submit)(entries.Value(), taskId);
         if (!status.ok()) {
             LogAsuStatus("submit task", status);
+            UnregisterHandles(registerResult.Value());
             return ConvertStatus(status);
         }
+        TrackTaskRegions(taskId, std::move(registerResult.Value()));
         return static_cast<Detail::TaskHandle>(taskId);
+    }
+
+    Expected<std::vector<UC::ASU::MRHandle>> RegisterEntryRegions(
+        std::vector<UC::ASU::KVBuffer>& entries)
+    {
+        std::vector<UC::ASU::MemoryRegion> regions;
+        regions.reserve(entries.size());
+        for (const auto& entry : entries) { regions.emplace_back(entry.buffer.region); }
+
+        std::vector<UC::ASU::RegisterResult> results;
+        auto status = backend_->RegisterRegions(regions, results);
+        if (!status.ok()) {
+            LogAsuStatus("register regions", status);
+            return ConvertStatus(status);
+        }
+        if (results.size() != entries.size()) {
+            return Status::Error("ASU register result size mismatch");
+        }
+
+        std::vector<UC::ASU::MRHandle> handles;
+        handles.reserve(results.size());
+        for (std::size_t index = 0; index < results.size(); ++index) {
+            const auto& result = results[index];
+            if (!result.status.ok() || result.handle == UC::ASU::kInvalidMRHandle) {
+                UnregisterHandles(handles);
+                return result.status.ok()
+                           ? Status::Error("ASU register returned invalid memory handle")
+                           : ConvertStatus(result.status);
+            }
+            entries[index].buffer.handle = result.handle;
+            handles.emplace_back(result.handle);
+        }
+        return handles;
+    }
+
+    void TrackTaskRegions(UC::ASU::TaskId taskId, std::vector<UC::ASU::MRHandle> handles)
+    {
+        std::lock_guard<std::mutex> lock(taskRegionsMu_);
+        taskRegions_[taskId] = std::move(handles);
+    }
+
+    void ReleaseTaskRegions(UC::ASU::TaskId taskId)
+    {
+        std::vector<UC::ASU::MRHandle> handles;
+        {
+            std::lock_guard<std::mutex> lock(taskRegionsMu_);
+            auto iter = taskRegions_.find(taskId);
+            if (iter == taskRegions_.end()) { return; }
+            handles = std::move(iter->second);
+            taskRegions_.erase(iter);
+        }
+        UnregisterHandles(handles);
+    }
+
+    void UnregisterHandles(const std::vector<UC::ASU::MRHandle>& handles)
+    {
+        if (handles.empty()) { return; }
+        auto status = backend_->UnregisterRegions(handles);
+        if (!status.ok()) { LogAsuStatus("unregister regions", status); }
     }
 
     Expected<std::vector<UC::ASU::KVBuffer>> BuildKvBuffers(const Detail::TaskDesc& task) const
@@ -744,6 +837,8 @@ private:
 
     Config config_;
     std::unique_ptr<AsuBackend> backend_;
+    std::mutex taskRegionsMu_;
+    std::unordered_map<UC::ASU::TaskId, std::vector<UC::ASU::MRHandle>> taskRegions_;
 #ifdef ASU_BUILD_TESTS
     BackendFactory backendFactory_;
 #endif
