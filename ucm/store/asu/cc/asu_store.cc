@@ -176,6 +176,7 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
     transportConfig.maxInflightTasks = static_cast<std::uint32_t>(config.maxInflightTasks);
     transportConfig.maxInflightBytes = config.maxInflightBytes;
     transportConfig.providerType = config.transProviderType;
+    if (!config.asuLocalIp.empty()) { transportConfig.attrs["localIp"] = config.asuLocalIp; }
     if (!config.asuIps.empty()) {
         UC::ASU::AsuEndpoint endpoint;
         endpoint.ip = config.asuIps[index];
@@ -493,6 +494,7 @@ private:
         inConfig.Get("asu_view_service_addrs", config.viewServiceAddrs);
         inConfig.GetNumbers("asu_ids", config.asuIds);
         inConfig.Get("asu_ips", config.asuIps);
+        inConfig.Get("asu_local_ip", config.asuLocalIp);
         inConfig.Get("asu_name_prefix", config.asuNamePrefix);
         ssize_t asuPort = 0;
         inConfig.GetNumber("asu_port", asuPort);
@@ -607,10 +609,6 @@ private:
         const auto shardsPerBlock = config.blockSize / config.shardSize;
         if (shardsPerBlock > 1 && config.tensorLayout == "gqa" && config.tensorSizes.size() != 2) {
             return Status::InvalidParam("invalid layerwise gqa tensor size count({})",
-                                        config.tensorSizes.size());
-        }
-        if (shardsPerBlock > 1 && config.tensorLayout == "mla" && config.tensorSizes.size() != 1) {
-            return Status::InvalidParam("invalid layerwise mla tensor size count({})",
                                         config.tensorSizes.size());
         }
         return Status::OK();

@@ -16,6 +16,7 @@ struct Config {
     std::vector<std::string> viewServiceAddrs;
     std::vector<ssize_t> asuIds;
     std::vector<std::string> asuIps;
+    std::string asuLocalIp;
     std::string asuNamePrefix{"asu"};
     std::uint16_t asuPort{0};
     std::uint64_t defaultWaitTimeoutMs{100};
