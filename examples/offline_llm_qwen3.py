@@ -20,7 +20,6 @@ tokenizer = None
 
 def setup_environment_variables():
     global model, path_to_dataset, tokenizer
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
     model = os.getenv("MODEL_PATH", "/mnt/model/Qwen3-32B")
     if not os.path.isdir(model):
         model = input("Enter path to model, e.g. /mnt/model/Qwen3-32B: ")
