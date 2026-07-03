@@ -462,26 +462,34 @@ TEST(UCAsuStoreTest, UsesLayerwiseMlaTensorOffsets)
     config.Set("asu_ids", std::vector<ssize_t>{1001});
     config.Set("asu_tensor_layout", std::string{"mla"});
     config.SetNumber("tensor_size", std::size_t{0});
-    config.Set("tensor_size_list", std::vector<ssize_t>{128});
-    config.SetNumber("shard_size", std::size_t{128});
-    config.SetNumber("block_size", std::size_t{384});
+    config.Set("tensor_size_list", std::vector<ssize_t>{128, 64});
+    config.SetNumber("shard_size", std::size_t{192});
+    config.SetNumber("block_size", std::size_t{576});
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
 
-    std::array<std::byte, 128> buffer{};
-    auto block = UC::Test::Detail::TypesHelper::MakeBlockId("e1b2c3d4e5f6789012345678901234ab");
+    std::array<std::byte, 128> mainCache{};
+    std::array<std::byte, 64> ropeCache{};
+    auto block =
+        UC::Test::Detail::TypesHelper::MakeBlockId("e1b2c3d4e5f6789012345678901234ab");
     UC::Detail::TaskDesc task;
     task.brief = "asu-store-test";
-    task.push_back(UC::Detail::Shard{block, 2, {buffer.data()}});
+    task.push_back(UC::Detail::Shard{
+        block, 2, {mainCache.data(), ropeCache.data()}
+    });
 
     auto dump = store.Dump(task);
     ASSERT_TRUE(dump.HasValue()) << dump.Error().ToString();
-    ASSERT_EQ(state->lastStoreEntries.size(), 1);
+    ASSERT_EQ(state->lastStoreEntries.size(), 2);
     EXPECT_EQ(state->lastStoreEntries[0].buffer.region.addr,
-              reinterpret_cast<std::uint64_t>(buffer.data()));
+              reinterpret_cast<std::uint64_t>(mainCache.data()));
     EXPECT_EQ(state->lastStoreEntries[0].buffer.region.size, std::size_t{512});
-    EXPECT_EQ(state->lastStoreEntries[0].offset, std::uint32_t{1024});
+    EXPECT_EQ(state->lastStoreEntries[0].offset, std::uint32_t{2048});
+    EXPECT_EQ(state->lastStoreEntries[1].buffer.region.addr,
+              reinterpret_cast<std::uint64_t>(ropeCache.data()));
+    EXPECT_EQ(state->lastStoreEntries[1].buffer.region.size, std::size_t{512});
+    EXPECT_EQ(state->lastStoreEntries[1].offset, std::uint32_t{2560});
 }
 
 TEST(UCAsuStoreTest, AlignsTensorSizeAndDerivesShardBlockSize)
