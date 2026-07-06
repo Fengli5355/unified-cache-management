@@ -367,7 +367,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
                 Status::Error(StatusCode::CONNECTION_ERROR,
                               "transport register device memory requires an active connection"),
                 kInvalidMRHandle});
-            continue;
+            break;
         }
 
         auto status = transProvider_->RegisterMemory(connectionHandle, descs, memHandles);
@@ -378,18 +378,19 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
                                             "transport register memory returned no handle")
                             : status,
                 kInvalidMRHandle});
-            continue;
+            break;
         }
 
         auto handle = static_cast<MRHandle>(reinterpret_cast<std::uintptr_t>(memHandles[0]));
         uint32_t tokenId{0};
         status = transProvider_->GetMemTokenId(memHandles[0], tokenId);
         if (!status.ok()) {
+            hasFailure = true;
             (void)transProvider_->UnregisterMemory({
                 TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}
             });
             results.emplace_back(RegisterResult{status, kInvalidMRHandle});
-            continue;
+            break;
         }
 
         RegisteredMemory regMem;
