@@ -41,6 +41,11 @@
 namespace UC::ASU {
 namespace {
 
+MRHandle MakeTestMrHandle(std::uintptr_t value)
+{
+    return reinterpret_cast<MRHandle>(value);
+}
+
 enum class OperationKind {
     QUERY,
     LOAD,
@@ -456,7 +461,7 @@ public:
     {
         results.clear();
         for (std::size_t index = 0; index < regions.size(); ++index) {
-            results.emplace_back(RegisterResult{Status::OK(), index + 1});
+            results.emplace_back(RegisterResult{Status::OK(), MakeTestMrHandle(index + 1)});
         }
         return Status::OK();
     }

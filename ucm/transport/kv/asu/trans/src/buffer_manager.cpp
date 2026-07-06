@@ -101,9 +101,9 @@ bool IsTransportBufferReady(const ScatterGatherEntry& sge)
 
 BufferManager::~BufferManager()
 {
-    if (provider_ && memHandle_) {
+    if (provider_ && mrHandle_) {
         std::vector<TransProvider::UnregisterMemoryDesc> descs{
-            {nullptr, memHandle_}
+            {nullptr, mrHandle_}
         };
         provider_->UnregisterMemory(descs);
     }
@@ -172,24 +172,24 @@ Status BufferManager::RegisterMemory()
         {region_.providerMemType, reinterpret_cast<uintptr_t>(region_.deviceAddr), total,
          reinterpret_cast<uintptr_t>(region_.localAddr)}
     };
-    std::vector<TransProvider::MemHandle> memHandles;
-    auto regStatus = provider_->RegisterMemory(nullptr, descs, memHandles);
-    if (!regStatus.ok() || memHandles.empty()) {
+    std::vector<MRHandle> mrHandles;
+    auto regStatus = provider_->RegisterMemory(nullptr, descs, mrHandles);
+    if (!regStatus.ok() || mrHandles.empty()) {
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              name_ + ": failed to register memory: " + regStatus.message);
     }
 
-    auto tokenStatus = provider_->GetMemTokenId(memHandles[0], tokenId_);
+    auto tokenStatus = provider_->GetMemTokenId(mrHandles[0], tokenId_);
     if (!tokenStatus.ok()) {
         std::vector<TransProvider::UnregisterMemoryDesc> unregDescs{
-            {nullptr, memHandles[0]}
+            {nullptr, mrHandles[0]}
         };
         provider_->UnregisterMemory(unregDescs);
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              name_ + ": failed to get token id: " + tokenStatus.message);
     }
 
-    memHandle_ = memHandles[0];
+    mrHandle_ = mrHandles[0];
     return Status::OK();
 }
 

@@ -89,7 +89,7 @@ private:
     IndexPool index_pool_;
 
     TransProvider* provider_{nullptr};
-    TransProvider::MemHandle memHandle_{nullptr};
+    MRHandle mrHandle_{kInvalidMRHandle};
     std::uint32_t tokenId_{0};
 };
 

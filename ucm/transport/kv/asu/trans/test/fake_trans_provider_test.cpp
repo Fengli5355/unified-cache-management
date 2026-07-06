@@ -13,12 +13,12 @@ TEST(FakeTransProviderTest, RegisterMemoryReturnsUniqueHandlesAcrossCalls)
         {TransProvider::MemType::MEM_DEVICE, 0x2000, 4096}
     };
 
-    std::vector<TransProvider::MemHandle> firstHandles;
+    std::vector<MRHandle> firstHandles;
     ASSERT_TRUE(provider.RegisterMemory(nullptr, descs, firstHandles).ok());
-    std::vector<TransProvider::MemHandle> secondHandles;
+    std::vector<MRHandle> secondHandles;
     ASSERT_TRUE(provider.RegisterMemory(nullptr, descs, secondHandles).ok());
 
-    std::unordered_set<TransProvider::MemHandle> uniqueHandles;
+    std::unordered_set<MRHandle> uniqueHandles;
     uniqueHandles.insert(firstHandles.begin(), firstHandles.end());
     uniqueHandles.insert(secondHandles.begin(), secondHandles.end());
     EXPECT_EQ(uniqueHandles.size(), firstHandles.size() + secondHandles.size());

@@ -28,6 +28,11 @@
 namespace UC::ASU {
 namespace {
 
+MRHandle MakeTestMrHandle(std::uintptr_t value)
+{
+    return reinterpret_cast<MRHandle>(value);
+}
+
 class StubTransport : public AsuTransport {
 public:
     Status Init(const TransportConfig& config) override
@@ -105,7 +110,7 @@ public:
     {
         results.clear();
         for (std::size_t i = 0; i < regions.size(); ++i) {
-            results.emplace_back(RegisterResult{Status::OK(), static_cast<MRHandle>(i + 1)});
+            results.emplace_back(RegisterResult{Status::OK(), MakeTestMrHandle(i + 1)});
         }
         return Status::OK();
     }

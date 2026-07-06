@@ -51,7 +51,7 @@ public:
                              uint32_t quietCount) override;
 
     Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& memoryDescs,
-                          std::vector<MemHandle>& memoryHandles) override;
+                          std::vector<MRHandle>& mrHandles) override;
 
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>& handles) override;
 
@@ -59,7 +59,7 @@ public:
 
     std::vector<Status> FreeThread(const std::vector<ThreadHandle>& threads) override;
 
-    Status GetMemTokenId(MemHandle, uint32_t& tokenId) override;
+    Status GetMemTokenId(MRHandle, uint32_t& tokenId) override;
 
 private:
     struct RegisteredMemory {
@@ -74,7 +74,7 @@ private:
     FakeTransProviderConfig config_;
     std::atomic<std::uintptr_t> nextMemoryHandle_{1};
     std::mutex registeredMemoryMu_;
-    std::unordered_map<MemHandle, RegisteredMemory> registeredMemories_;
+    std::unordered_map<MRHandle, RegisteredMemory> registeredMemories_;
 };
 
 FakeTransProviderConfig MakeFakeTransProviderConfig(const TransportConfig& config);

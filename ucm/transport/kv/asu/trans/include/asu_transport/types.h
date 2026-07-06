@@ -32,14 +32,14 @@
 namespace UC::ASU {
 
 using TaskId = std::uint64_t;
-using MRHandle = std::uint64_t;
+using MRHandle = void*;
 using CacheKey = std::string;
 using AsuId = std::uint64_t;
 
 enum class TransProviderType { AICPU, FAKE, AIV, UNSUPPORTED };
 
 constexpr TaskId kInvalidTaskId = 0;
-constexpr MRHandle kInvalidMRHandle = 0;
+constexpr MRHandle kInvalidMRHandle = nullptr;
 constexpr std::uint32_t kAsuAlignmentBytes = 512;  // KV protocol requires 512B alignment
 
 enum class StatusCode {
