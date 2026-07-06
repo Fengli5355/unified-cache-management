@@ -123,7 +123,8 @@ private:
 
     struct RegisteredRegionState {
         TransProvider::ConnectionHandle connectionHandle{nullptr};
-        TransProvider::MemHandle memHandle{nullptr};
+        MRHandle mrHandle{kInvalidMRHandle};
+        std::shared_ptr<ConnectionChannel> channel;
     };
 
     TransportConfig config_;
@@ -144,11 +145,8 @@ private:
     std::atomic<std::uint16_t> nextRequestCid_{1};
 
     std::mutex registeredRegionsMu_;
-    std::atomic<MRHandle> nextMrHandle_{1};
     std::unordered_map<MRHandle, RegisteredMemory> registeredRegions_;
     std::unordered_map<MRHandle, RegisteredRegionState> registeredRegionStates_;
-    std::unordered_map<MRHandle, std::shared_ptr<ConnectionChannel>>
-        registeredRegionConnectionLeases_;
 };
 
 }  // namespace UC::ASU

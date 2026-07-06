@@ -71,13 +71,13 @@ public:
     }
 
     Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
-                          std::vector<MemHandle>& handles) override
+                          std::vector<MRHandle>& handles) override
     {
         ++registerCount;
         if (failRegisterAt != 0 && registerCount == failRegisterAt) {
             return Status::Error(StatusCode::INTERNAL_ERROR, "stub register failed");
         }
-        handles.push_back(reinterpret_cast<MemHandle>(static_cast<uintptr_t>(registerCount)));
+        handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(registerCount)));
         return Status::OK();
     }
 
@@ -95,7 +95,7 @@ public:
 
     std::vector<Status> FreeThread(const std::vector<ThreadHandle>&) override { return {}; }
 
-    Status GetMemTokenId(MemHandle, uint32_t& tokenId) override
+    Status GetMemTokenId(MRHandle, uint32_t& tokenId) override
     {
         tokenId = 1;
         return Status::OK();
@@ -179,7 +179,7 @@ TEST(AsuTransportRegisterTest, RegisterRegionsReturnsPartialFailedAndRollsBackSu
     EXPECT_EQ(status.code, StatusCode::PARTIAL_FAILED);
     ASSERT_EQ(results.size(), std::size_t{2});
     EXPECT_TRUE(results[0].status.ok()) << results[0].status.message;
-    EXPECT_EQ(results[0].handle, MRHandle{1});
+    EXPECT_EQ(results[0].handle, reinterpret_cast<MRHandle>(std::uintptr_t{1}));
     EXPECT_EQ(results[1].status.code, StatusCode::INTERNAL_ERROR);
     EXPECT_EQ(results[1].handle, kInvalidMRHandle);
     EXPECT_EQ(providerPtr->unregisterCount, std::uint32_t{1});

@@ -38,6 +38,11 @@
 
 namespace {
 
+UC::ASU::MRHandle MakeTestMrHandle(std::uintptr_t value)
+{
+    return reinterpret_cast<UC::ASU::MRHandle>(value);
+}
+
 struct FakeAsuBackendState {
     std::vector<UC::ASU::QueryMode> queryModes;
     std::vector<UC::AsuStore::Config> initConfigs;
@@ -146,7 +151,7 @@ public:
                                          regions.end());
         for (std::size_t index = 0; index < regions.size(); ++index) {
             results.emplace_back(UC::ASU::RegisterResult{UC::ASU::Status::OK(),
-                                                         nextMrHandle_++});
+                                                         MakeTestMrHandle(nextMrHandle_++)});
         }
         return UC::ASU::Status::OK();
     }
@@ -187,7 +192,7 @@ private:
     std::shared_ptr<FakeAsuBackendState> state_;
     bool initialized_{false};
     UC::ASU::TaskId nextTaskId_{1};
-    UC::ASU::MRHandle nextMrHandle_{1};
+    std::uintptr_t nextMrHandle_{1};
     std::unordered_set<UC::ASU::CacheKey> storedKeys_;
     std::unordered_map<UC::ASU::TaskId, UC::ASU::TaskResult> taskResults_;
 };
