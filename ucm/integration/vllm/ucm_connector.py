@@ -3,6 +3,7 @@ import hashlib
 import math
 import os
 import pickle
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -290,12 +291,105 @@ class UCMDirectConnector(KVConnectorBase_V1):
         self.persist_token_threshold = self.launch_config.get(
             "persist_token_threshold", 0
         )
+        self.debug_kv_dump_dir = os.getenv("UCM_KV_DEBUG_DUMP_DIR", "")
+        self.debug_kv_dump_max_blocks = int(os.getenv("UCM_KV_DEBUG_MAX_BLOCKS", "2"))
+        self.debug_kv_dump_max_layers = int(os.getenv("UCM_KV_DEBUG_MAX_LAYERS", "0"))
+        self._debug_kv_dump_seq = 0
+        if self.debug_kv_dump_dir:
+            os.makedirs(self.debug_kv_dump_dir, exist_ok=True)
+            logger.warning(
+                "UCM KV debug dump enabled: dir=%s, max_blocks=%d, max_layers=%d",
+                self.debug_kv_dump_dir,
+                self.debug_kv_dump_max_blocks,
+                self.debug_kv_dump_max_layers,
+            )
 
         # invalid block ids due to load errors
         self._invalid_block_ids: set[int] = set()
         self.cp_world_size = 1
         self.hash_block_size = self.block_size
         self.block_size *= self.cp_world_size
+
+    def _debug_dump_kv_blocks(
+        self,
+        phase: str,
+        request_id: str,
+        ucm_block_ids: List[bytes],
+        vllm_block_ids: List[int],
+    ) -> None:
+        if not self.debug_kv_dump_dir:
+            return
+        if not ucm_block_ids or not vllm_block_ids:
+            return
+
+        block_pairs = list(zip(ucm_block_ids, vllm_block_ids))
+        if self.debug_kv_dump_max_blocks > 0:
+            block_pairs = block_pairs[: self.debug_kv_dump_max_blocks]
+
+        safe_request_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", request_id)
+        self._debug_kv_dump_seq += 1
+        file_name = (
+            f"{self._debug_kv_dump_seq:06d}_{phase}"
+            f"_rank{self.tp_rank}_req{safe_request_id}.pt"
+        )
+        file_path = os.path.join(self.debug_kv_dump_dir, file_name)
+
+        layer_items = sorted(
+            self.kv_caches.items(), key=lambda item: self.layer_name_to_id[item[0]]
+        )
+        if self.debug_kv_dump_max_layers > 0:
+            layer_items = layer_items[: self.debug_kv_dump_max_layers]
+
+        payload = {
+            "phase": phase,
+            "request_id": request_id,
+            "tp_rank": self.tp_rank,
+            "local_rank": self.local_rank,
+            "block_size": self.block_size,
+            "hash_block_size": self.hash_block_size,
+            "blocks": [
+                {
+                    "ucm_block_id": ucm_block_id.hex(),
+                    "vllm_block_id": int(vllm_block_id),
+                }
+                for ucm_block_id, vllm_block_id in block_pairs
+            ],
+            "layers": {},
+        }
+
+        try:
+            for layer_name, kv_layer in layer_items:
+                layer_payload = {}
+                for ucm_block_id, vllm_block_id in block_pairs:
+                    block_key = ucm_block_id.hex()
+                    if isinstance(kv_layer, torch.Tensor):
+                        if kv_layer.dim() == 5:
+                            block_tensor = kv_layer[:, int(vllm_block_id)]
+                        elif kv_layer.dim() == 3:
+                            block_tensor = kv_layer[int(vllm_block_id)]
+                        else:
+                            raise ValueError(
+                                f"Unsupported kv cache tensor shape: {kv_layer.shape}"
+                            )
+                        layer_payload[block_key] = block_tensor.detach().cpu().clone()
+                    elif isinstance(kv_layer, Tuple):
+                        layer_payload[block_key] = tuple(
+                            tensor[int(vllm_block_id)].detach().cpu().clone()
+                            for tensor in kv_layer
+                        )
+                    else:
+                        raise TypeError(f"Unsupported kv cache type: {type(kv_layer)}")
+                payload["layers"][layer_name] = layer_payload
+            torch.save(payload, file_path)
+            logger.warning("UCM KV debug dump wrote %s", file_path)
+        except Exception as e:
+            logger.error(
+                "UCM KV debug dump failed for phase %s, request %s. %s: %s",
+                phase,
+                request_id,
+                type(e).__name__,
+                e,
+            )
 
     def generate_hash(
         self, block_size: int, token_ids: List[int], parent_block_hash_value: bytes
@@ -654,6 +748,13 @@ class UCMDirectConnector(KVConnectorBase_V1):
         for request_id, task in request_to_task.items():
             try:
                 self.store.wait(task)
+                request = metadata.request_meta[request_id]
+                self._debug_dump_kv_blocks(
+                    "load_after",
+                    request_id,
+                    request.load_block_ids[0],
+                    request.load_block_ids[1],
+                )
             except Exception as e:
                 logger.error(
                     f"request {request_id} wait load task error. {type(e).__name__}: {e}"
@@ -729,6 +830,12 @@ class UCMDirectConnector(KVConnectorBase_V1):
             if self.tp_rank != 0:
                 for i, ucm_block_id in enumerate(ucm_block_ids):
                     ucm_block_ids[i] = self.request_hasher(ucm_block_id)
+            self._debug_dump_kv_blocks(
+                "store_before",
+                request_id,
+                ucm_block_ids,
+                vllm_block_ids,
+            )
             total_ucm_block_ids.extend(ucm_block_ids)
             total_vllm_block_ids.extend(vllm_block_ids)
 
