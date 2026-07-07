@@ -32,6 +32,7 @@ namespace UC::ASU {
 class AIVTransProviderAdapter : public TransProvider {
 public:
     AIVTransProviderAdapter() : impl_(CreateAIVTransProvider()) {}
+    explicit AIVTransProviderAdapter(uint32_t deviceId) : impl_(CreateAIVTransProvider(deviceId)) {}
 
     Status CreateConnection(const std::string& localIp, const std::string& remoteIp, uint32_t port,
                             uint32_t qpNum, uint32_t timeout,
