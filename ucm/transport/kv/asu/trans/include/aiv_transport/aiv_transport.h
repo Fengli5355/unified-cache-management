@@ -78,6 +78,7 @@ public:
     virtual Status GetMemTokenId(MRHandle mrHandle, uint32_t& tokenId) = 0;
 };
 
+std::unique_ptr<AIVTransport> CreateAIVTransProvider(uint32_t deviceId);
 std::unique_ptr<AIVTransport> CreateAIVTransProvider();
 
 }  // namespace UC::ASU
