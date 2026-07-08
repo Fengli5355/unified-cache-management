@@ -245,6 +245,10 @@ void ExpectLookupMiss(UC::StoreV1& store, const UC::Detail::BlockId& block)
 
 void ExpectLoadDumpSmoke(UC::StoreV1& store, const UC::Detail::BlockId& block)
 {
+    auto* persistentStore = dynamic_cast<UC::PersistentRegionStoreV1*>(&store);
+    ASSERT_NE(persistentStore, nullptr);
+    ASSERT_TRUE(persistentStore->RegisterPersistentRegions({1}, {1}).Success());
+
     std::array<std::byte, 64> buffer{};
     auto dump = store.Dump(MakeTask(block, buffer.data()));
     ASSERT_TRUE(dump.HasValue()) << dump.Error().ToString();
@@ -298,7 +302,7 @@ TEST(UCAsuStoreTest, ClientModeSmoke)
     ExpectLoadDumpSmoke(store, block);
 }
 
-TEST(UCAsuStoreTest, RegistersEntryRegionsBeforeSubmitAndUnregistersAfterWait)
+TEST(UCAsuStoreTest, UsesPersistentRegionHandleBeforeSubmitAndKeepsItAfterWait)
 {
     UC::AsuStore::AsuStore store;
     auto state = UseFakeBackend(store);
@@ -306,6 +310,7 @@ TEST(UCAsuStoreTest, RegistersEntryRegionsBeforeSubmitAndUnregistersAfterWait)
     config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
     config.Set("asu_ids", std::vector<ssize_t>{1001});
     ASSERT_TRUE(store.Setup(config).Success());
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
     std::array<std::byte, 64> buffer{};
     auto block = UC::Test::Detail::TypesHelper::MakeBlockId("a2b2c3d4e5f6789012345678901234ab");
@@ -318,8 +323,47 @@ TEST(UCAsuStoreTest, RegistersEntryRegionsBeforeSubmitAndUnregistersAfterWait)
     EXPECT_TRUE(state->unregisteredHandles.empty());
 
     ASSERT_TRUE(store.Wait(dump.Value()).Success());
+    EXPECT_TRUE(state->unregisteredHandles.empty());
+}
+
+TEST(UCAsuStoreTest, PersistentRegionHandleIsSharedByEntriesAndNotReleasedPerTask)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeBackend(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.SetNumber("tensor_size", std::size_t{0});
+    config.Set("tensor_size_list", std::vector<ssize_t>{64, 64});
+    config.SetNumber("shard_size", std::size_t{128});
+    config.SetNumber("block_size", std::size_t{128});
+    ASSERT_TRUE(store.Setup(config).Success());
+
+    std::array<std::byte, 128> buffer{};
+    ASSERT_TRUE(store
+                    .RegisterPersistentRegions(
+                        {reinterpret_cast<std::uintptr_t>(buffer.data())}, {buffer.size()})
+                    .Success());
+    ASSERT_EQ(state->registeredRegions.size(), std::size_t{1});
+
+    UC::Detail::TaskDesc task;
+    auto block = UC::Test::Detail::TypesHelper::MakeBlockId("c2b2c3d4e5f6789012345678901234ab");
+    task.push_back(UC::Detail::Shard{block, 0, {buffer.data(), buffer.data() + 64}});
+
+    auto dump = store.Dump(std::move(task));
+    ASSERT_TRUE(dump.HasValue()) << dump.Error().ToString();
+    ASSERT_EQ(state->registeredRegions.size(), std::size_t{1});
+    ASSERT_EQ(state->lastStoreEntries.size(), std::size_t{2});
+    const auto sharedHandle = state->lastStoreEntries[0].buffer.handle;
+    EXPECT_NE(sharedHandle, UC::ASU::kInvalidMRHandle);
+    EXPECT_EQ(state->lastStoreEntries[1].buffer.handle, sharedHandle);
+
+    ASSERT_TRUE(store.Wait(dump.Value()).Success());
+    EXPECT_TRUE(state->unregisteredHandles.empty());
+
+    ASSERT_TRUE(store.UnregisterPersistentRegions().Success());
     ASSERT_EQ(state->unregisteredHandles.size(), std::size_t{1});
-    EXPECT_EQ(state->unregisteredHandles[0], state->lastStoreEntries[0].buffer.handle);
+    EXPECT_EQ(state->unregisteredHandles[0], sharedHandle);
 }
 
 TEST(UCAsuStoreTest, LookupOnPrefixUsesPrefixQueryMode)
@@ -330,6 +374,7 @@ TEST(UCAsuStoreTest, LookupOnPrefixUsesPrefixQueryMode)
     config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
     config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
     ASSERT_TRUE(store.Setup(config).Success());
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
     std::array<std::byte, 64> buffer{};
     std::vector<UC::Detail::BlockId> blocks{
@@ -430,6 +475,7 @@ TEST(UCAsuStoreTest, UsesNonLayerwiseMlaTensorOffsets)
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
     ASSERT_FALSE(state->initConfigs.empty());
     ASSERT_EQ(state->initConfigs.back().tensorSizes.size(), std::size_t{3});
     EXPECT_EQ(state->initConfigs.back().tensorSizes[0], std::size_t{512});
@@ -473,6 +519,7 @@ TEST(UCAsuStoreTest, UsesLayerwiseMlaTensorOffsets)
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
     std::array<std::byte, 128> mainCache{};
     std::array<std::byte, 64> ropeCache{};
@@ -511,6 +558,7 @@ TEST(UCAsuStoreTest, AlignsTensorSizeAndDerivesShardBlockSize)
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
     ASSERT_FALSE(state->initConfigs.empty());
     ASSERT_EQ(state->initConfigs.back().tensorSizes.size(), std::size_t{1});
     EXPECT_EQ(state->initConfigs.back().tensorSizes[0],
@@ -564,6 +612,7 @@ TEST(UCAsuStoreTest, UsesLayerwiseGqaKeyValueOffsets)
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
     std::array<std::byte, 100> key{};
     std::array<std::byte, 200> value{};
@@ -603,6 +652,7 @@ TEST(UCAsuStoreTest, UsesNonLayerwiseGqaKeyValueOffsets)
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Success()) << status.ToString();
+    ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
     std::array<std::array<std::byte, 200>, 6> buffers{};
     auto block = UC::Test::Detail::TypesHelper::MakeBlockId("c1b2c3d4e5f6789012345678901234ab");
