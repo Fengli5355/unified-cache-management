@@ -505,6 +505,18 @@ class UCMDirectConnector(KVConnectorBase_V1):
         )
 
         self.store = self._create_store(self.kv_cache_layout, store_cores)
+        config = self.connector_configs[0].get("ucm_connector_config", {})
+        if config.get("store_pipeline") == "ASU" and hasattr(
+            self.store, "register_kv_cache_regions"
+        ):
+            base_addrs, sizes = self._collect_kv_cache_region_span()
+            if base_addrs:
+                self.store.register_kv_cache_regions(base_addrs, sizes)
+                logger.info(
+                    "registered ASU KV cache persistent region: addr=%s size=%s",
+                    base_addrs[0],
+                    sizes[0],
+                )
 
         if worker_cores:
             try:
@@ -515,6 +527,31 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
         if self.device is None:
             raise RuntimeError(f"Unsupported device platform for UCMDirectConnector.")
+
+    def _collect_kv_cache_region_span(self) -> tuple[list[int], list[int]]:
+        ranges: list[tuple[int, int]] = []
+
+        def add_tensor(tensor: torch.Tensor) -> None:
+            addr = tensor.data_ptr()
+            size = tensor.numel() * tensor.element_size()
+            if addr != 0 and size > 0:
+                ranges.append((addr, addr + size))
+
+        for kv_layer in self.kv_caches.values():
+            if isinstance(kv_layer, torch.Tensor):
+                add_tensor(kv_layer)
+            elif isinstance(kv_layer, Tuple):
+                for tensor in kv_layer:
+                    add_tensor(tensor)
+            else:
+                raise TypeError(f"Unsupported kv cache type: {type(kv_layer)}")
+
+        if not ranges:
+            return [], []
+
+        base = min(start for start, _ in ranges)
+        end = max(stop for _, stop in ranges)
+        return [base], [end - base]
 
     def get_num_new_matched_tokens(
         self,

@@ -358,7 +358,7 @@ private:
     std::unique_ptr<UC::ASU::AsuTransport> transport_;
 };
 
-class AsuStore final : public StoreV1 {
+class AsuStore final : public StoreV1, public PersistentRegionStoreV1 {
 public:
 #ifdef ASU_BUILD_TESTS
     using BackendFactory = std::function<std::unique_ptr<AsuBackend>(const Config&)>;
@@ -369,6 +369,11 @@ public:
     ~AsuStore() override
     {
         if (backend_) {
+            auto unregisterStatus = UnregisterPersistentRegions();
+            if (unregisterStatus.Failure()) {
+                UC_ERROR("Failed to unregister ASU persistent regions: {}.",
+                         unregisterStatus.ToString());
+            }
             auto status = backend_->Shutdown();
             if (!status.ok()) { UC_ERROR("Failed to shutdown ASU backend: {}.", status.message); }
         }
@@ -433,6 +438,83 @@ public:
     {
         (void)blocks;
         (void)num;
+    }
+
+    Status RegisterPersistentRegions(const std::vector<std::uintptr_t>& addrs,
+                                     const std::vector<std::size_t>& sizes) override
+    {
+        if (!backend_) { return Status::Error("ASU backend is not initialized"); }
+        if (addrs.size() != sizes.size()) {
+            return Status::InvalidParam("persistent region addr/size count mismatch");
+        }
+
+        auto unregisterStatus = UnregisterPersistentRegions();
+        if (unregisterStatus.Failure()) { return unregisterStatus; }
+
+        const auto memoryType = ConfiguredMemoryType();
+        std::vector<UC::ASU::MemoryRegion> regions;
+        regions.reserve(addrs.size());
+        for (std::size_t index = 0; index < addrs.size(); ++index) {
+            if (addrs[index] == 0 || sizes[index] == 0) { continue; }
+            UC::ASU::MemoryRegion region;
+            region.memoryType = memoryType;
+            region.addr = static_cast<std::uint64_t>(addrs[index]);
+            region.size = static_cast<std::uint64_t>(sizes[index]);
+            region.deviceId = config_.deviceId;
+            regions.emplace_back(region);
+        }
+        if (regions.empty()) { return Status::OK(); }
+
+        std::vector<UC::ASU::RegisterResult> results;
+        auto status = backend_->RegisterRegions(regions, results);
+        if (!status.ok()) {
+            LogAsuStatus("register persistent regions", status);
+            return ConvertStatus(status);
+        }
+        if (results.size() != regions.size()) {
+            return Status::Error("ASU persistent register result size mismatch");
+        }
+
+        std::vector<PersistentRegion> registered;
+        registered.reserve(results.size());
+        std::vector<UC::ASU::MRHandle> handles;
+        handles.reserve(results.size());
+        for (std::size_t index = 0; index < results.size(); ++index) {
+            const auto& result = results[index];
+            if (!result.status.ok() || result.handle == UC::ASU::kInvalidMRHandle) {
+                if (!handles.empty()) { UnregisterHandles(handles); }
+                return result.status.ok()
+                           ? Status::Error("ASU persistent register returned invalid memory handle")
+                           : ConvertStatus(result.status);
+            }
+            registered.emplace_back(PersistentRegion{regions[index], result.handle});
+            handles.emplace_back(result.handle);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(persistentRegionsMu_);
+            persistentRegions_ = std::move(registered);
+        }
+        UC_INFO("ASU registered {} persistent KV cache region(s).", handles.size());
+        return Status::OK();
+    }
+
+    Status UnregisterPersistentRegions() override
+    {
+        std::vector<UC::ASU::MRHandle> handles;
+        {
+            std::lock_guard<std::mutex> lock(persistentRegionsMu_);
+            handles.reserve(persistentRegions_.size());
+            for (const auto& region : persistentRegions_) { handles.emplace_back(region.handle); }
+            persistentRegions_.clear();
+        }
+        if (handles.empty()) { return Status::OK(); }
+        auto status = backend_->UnregisterRegions(handles);
+        if (!status.ok()) {
+            LogAsuStatus("unregister persistent regions", status);
+            return ConvertStatus(status);
+        }
+        return Status::OK();
     }
 
     Expected<Detail::TaskHandle> Load(Detail::TaskDesc task) override
@@ -726,34 +808,10 @@ private:
     Expected<std::vector<UC::ASU::MRHandle>> RegisterEntryRegions(
         std::vector<UC::ASU::KVBuffer>& entries)
     {
-        std::vector<UC::ASU::MemoryRegion> regions;
-        regions.reserve(entries.size());
-        for (const auto& entry : entries) { regions.emplace_back(entry.buffer.region); }
-
-        std::vector<UC::ASU::RegisterResult> results;
-        auto status = backend_->RegisterRegions(regions, results);
-        if (!status.ok()) {
-            LogAsuStatus("register regions", status);
-            return ConvertStatus(status);
+        if (entries.empty() || entries.front().buffer.handle != UC::ASU::kInvalidMRHandle) {
+            return std::vector<UC::ASU::MRHandle>{};
         }
-        if (results.size() != entries.size()) {
-            return Status::Error("ASU register result size mismatch");
-        }
-
-        std::vector<UC::ASU::MRHandle> handles;
-        handles.reserve(results.size());
-        for (std::size_t index = 0; index < results.size(); ++index) {
-            const auto& result = results[index];
-            if (!result.status.ok() || result.handle == UC::ASU::kInvalidMRHandle) {
-                UnregisterHandles(handles);
-                return result.status.ok()
-                           ? Status::Error("ASU register returned invalid memory handle")
-                           : ConvertStatus(result.status);
-            }
-            entries[index].buffer.handle = result.handle;
-            handles.emplace_back(result.handle);
-        }
-        return handles;
+        return Status::Error("ASU entries require a persistent memory handle");
     }
 
     void TrackTaskRegions(UC::ASU::TaskId taskId, std::vector<UC::ASU::MRHandle> handles)
@@ -786,10 +844,7 @@ private:
     {
         std::vector<UC::ASU::KVBuffer> entries;
         entries.reserve(task.size() * config_.tensorSizes.size());
-        const auto memoryType = config_.memoryType.empty()
-                                    ? (config_.deviceId >= 0 ? UC::ASU::MemoryType::ASCEND_DEVICE
-                                                             : UC::ASU::MemoryType::HOST)
-                                    : ParseMemoryType(config_.memoryType);
+        const auto memoryType = ConfiguredMemoryType();
 
         for (const auto& shard : task) {
             if (shard.index >= ShardsPerBlock()) {
@@ -808,6 +863,10 @@ private:
                 entry.buffer.region.size = config_.tensorSizes[tensorIndex];
                 entry.buffer.region.deviceId = config_.deviceId;
                 entry.buffer.handle = UC::ASU::kInvalidMRHandle;
+                auto persistentHandle = GetPersistentHandle();
+                if (persistentHandle != UC::ASU::kInvalidMRHandle) {
+                    entry.buffer.handle = persistentHandle;
+                }
                 entry.offset = static_cast<std::uint32_t>(tensorOffsets[tensorIndex]);
                 entries.emplace_back(std::move(entry));
             }
@@ -833,10 +892,32 @@ private:
         UC_INFO("Set AsuStore::FakeBackendPath to {}.", config.fakeBackendPath);
     }
 
+    UC::ASU::MemoryType ConfiguredMemoryType() const
+    {
+        return config_.memoryType.empty()
+                   ? (config_.deviceId >= 0 ? UC::ASU::MemoryType::ASCEND_DEVICE
+                                            : UC::ASU::MemoryType::HOST)
+                   : ParseMemoryType(config_.memoryType);
+    }
+
+    UC::ASU::MRHandle GetPersistentHandle() const
+    {
+        std::lock_guard<std::mutex> lock(persistentRegionsMu_);
+        return persistentRegions_.empty() ? UC::ASU::kInvalidMRHandle
+                                          : persistentRegions_.front().handle;
+    }
+
+    struct PersistentRegion {
+        UC::ASU::MemoryRegion region;
+        UC::ASU::MRHandle handle{UC::ASU::kInvalidMRHandle};
+    };
+
     Config config_;
     std::unique_ptr<AsuBackend> backend_;
     std::mutex taskRegionsMu_;
     std::unordered_map<UC::ASU::TaskId, std::vector<UC::ASU::MRHandle>> taskRegions_;
+    mutable std::mutex persistentRegionsMu_;
+    std::vector<PersistentRegion> persistentRegions_;
 #ifdef ASU_BUILD_TESTS
     BackendFactory backendFactory_;
 #endif
