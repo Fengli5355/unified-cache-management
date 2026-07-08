@@ -22,7 +22,7 @@ public:
         return std::vector<Status>(ioBatches.size(), Status::OK());
     }
 
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>&,
                           std::vector<MRHandle>&) override
     {
         return Status::OK();

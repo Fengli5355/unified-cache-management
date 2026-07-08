@@ -41,12 +41,10 @@ public:
         uintptr_t localAddr{0};
     };
 
-    virtual Status RegisterMemory(ConnectionHandle connectionHandle,
-                                  const std::vector<RegisterMemoryDesc>& memoryDescs,
+    virtual Status RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                   std::vector<MRHandle>& mrHandles) = 0;
 
     struct UnregisterMemoryDesc {
-        ConnectionHandle connectionHandle;
         MRHandle mrHandle;
     };
 

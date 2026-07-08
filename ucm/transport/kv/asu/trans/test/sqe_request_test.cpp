@@ -67,7 +67,7 @@ public:
     {
         return {};
     }
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>&,
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>&,
                           std::vector<MRHandle>& handles) override
     {
         handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(1)));

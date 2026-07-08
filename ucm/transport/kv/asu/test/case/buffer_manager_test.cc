@@ -415,7 +415,7 @@ public:
     {
         return {};
     }
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& descs,
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>& descs,
                           std::vector<MRHandle>& handles) override
     {
         registerCount++;

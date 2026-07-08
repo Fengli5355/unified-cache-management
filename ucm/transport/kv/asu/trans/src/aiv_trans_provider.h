@@ -59,8 +59,7 @@ public:
         return FromImpl(impl_->Send(batches, kernelCount, quietCount));
     }
 
-    Status RegisterMemory(ConnectionHandle connectionHandle,
-                          const std::vector<RegisterMemoryDesc>& memoryDescs,
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                           std::vector<MRHandle>& mrHandles) override
     {
         std::vector<AIVTransport::RegisterMemoryDesc> descs;
@@ -69,7 +68,7 @@ public:
             descs.push_back(
                 {static_cast<AIVTransport::MemType>(desc.memoryType), desc.addr, desc.size});
         }
-        return FromImpl(impl_->RegisterMemory(connectionHandle, descs, mrHandles));
+        return FromImpl(impl_->RegisterMemory(descs, mrHandles));
     }
 
     std::vector<Status> UnregisterMemory(
@@ -78,7 +77,7 @@ public:
         std::vector<AIVTransport::UnregisterMemoryDesc> descs;
         descs.reserve(memoryDescs.size());
         for (const auto& desc : memoryDescs) {
-            descs.push_back({desc.connectionHandle, desc.mrHandle});
+            descs.push_back({desc.mrHandle});
         }
         return FromImpl(impl_->UnregisterMemory(descs));
     }

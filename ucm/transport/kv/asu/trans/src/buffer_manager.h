@@ -57,6 +57,7 @@ public:
 
     Status Init(std::string name, MemoryType type, std::size_t slot_capacity, std::size_t slot_num,
                 TransProvider* provider = nullptr);
+    Status Shutdown();
 
     Status Allocate(std::size_t size, ScatterGatherEntry& sge);
     Status Free(std::uint32_t slot_index);

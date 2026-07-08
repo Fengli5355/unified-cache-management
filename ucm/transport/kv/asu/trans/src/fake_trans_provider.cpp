@@ -503,8 +503,7 @@ std::vector<Status> FakeTransProvider::Send(const std::vector<SendIoBatch>& ioBa
     return statuses;
 }
 
-Status FakeTransProvider::RegisterMemory(ConnectionHandle,
-                                         const std::vector<RegisterMemoryDesc>& memoryDescs,
+Status FakeTransProvider::RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                          std::vector<MRHandle>& mrHandles)
 {
     mrHandles.clear();

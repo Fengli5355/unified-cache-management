@@ -99,18 +99,26 @@ bool IsTransportBufferReady(const ScatterGatherEntry& sge)
            sge.slot_index != UINT32_MAX;
 }
 
-BufferManager::~BufferManager()
+BufferManager::~BufferManager() { (void)Shutdown(); }
+
+Status BufferManager::Shutdown()
 {
+    Status finalStatus = Status::OK();
     if (provider_ && mrHandle_) {
-        std::vector<TransProvider::UnregisterMemoryDesc> descs{
-            {nullptr, mrHandle_}
-        };
-        provider_->UnregisterMemory(descs);
+        std::vector<TransProvider::UnregisterMemoryDesc> descs{{mrHandle_}};
+        const auto statuses = provider_->UnregisterMemory(descs);
+        for (const auto& status : statuses) {
+            if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
+        }
     }
+    provider_ = nullptr;
+    mrHandle_ = kInvalidMRHandle;
+    tokenId_ = 0;
     region_.Reset();
     slot_capacity_ = 0;
     slot_stride_ = 0;
     slot_num_ = 0;
+    return finalStatus;
 }
 
 Status BufferManager::Init(std::string name, MemoryType type, std::size_t slot_capacity,
@@ -173,7 +181,7 @@ Status BufferManager::RegisterMemory()
          reinterpret_cast<uintptr_t>(region_.localAddr)}
     };
     std::vector<MRHandle> mrHandles;
-    auto regStatus = provider_->RegisterMemory(nullptr, descs, mrHandles);
+    auto regStatus = provider_->RegisterMemory(descs, mrHandles);
     if (!regStatus.ok() || mrHandles.empty()) {
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              name_ + ": failed to register memory: " + regStatus.message);
@@ -181,9 +189,7 @@ Status BufferManager::RegisterMemory()
 
     auto tokenStatus = provider_->GetMemTokenId(mrHandles[0], tokenId_);
     if (!tokenStatus.ok()) {
-        std::vector<TransProvider::UnregisterMemoryDesc> unregDescs{
-            {nullptr, mrHandles[0]}
-        };
+        std::vector<TransProvider::UnregisterMemoryDesc> unregDescs{{mrHandles[0]}};
         provider_->UnregisterMemory(unregDescs);
         return Status::Error(StatusCode::INTERNAL_ERROR,
                              name_ + ": failed to get token id: " + tokenStatus.message);

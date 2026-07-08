@@ -50,7 +50,7 @@ public:
     std::vector<Status> Send(const std::vector<SendIoBatch>& ioBatches, uint32_t kernelCount,
                              uint32_t quietCount) override;
 
-    Status RegisterMemory(ConnectionHandle, const std::vector<RegisterMemoryDesc>& memoryDescs,
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                           std::vector<MRHandle>& mrHandles) override;
 
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>& handles) override;

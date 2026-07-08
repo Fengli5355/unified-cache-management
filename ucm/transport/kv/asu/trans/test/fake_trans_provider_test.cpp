@@ -14,9 +14,9 @@ TEST(FakeTransProviderTest, RegisterMemoryReturnsUniqueHandlesAcrossCalls)
     };
 
     std::vector<MRHandle> firstHandles;
-    ASSERT_TRUE(provider.RegisterMemory(nullptr, descs, firstHandles).ok());
+    ASSERT_TRUE(provider.RegisterMemory(descs, firstHandles).ok());
     std::vector<MRHandle> secondHandles;
-    ASSERT_TRUE(provider.RegisterMemory(nullptr, descs, secondHandles).ok());
+    ASSERT_TRUE(provider.RegisterMemory(descs, secondHandles).ok());
 
     std::unordered_set<MRHandle> uniqueHandles;
     uniqueHandles.insert(firstHandles.begin(), firstHandles.end());
