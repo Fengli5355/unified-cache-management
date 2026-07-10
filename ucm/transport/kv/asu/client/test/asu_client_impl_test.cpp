@@ -220,7 +220,7 @@ public:
         state_->registerCalls.emplace_back(config_.asuId);
         results.clear();
         for (std::size_t index = 0; index < regions.size(); ++index) {
-            results.emplace_back(RegisterResult{Status::OK(), MakeTestMrHandle(500 + index), 0, 0,
+            results.emplace_back(RegisterResult{Status::OK(), MakeTestMrHandle(500 + index),
                                                 900 + static_cast<std::uint32_t>(index)});
         }
         return Status::OK();
@@ -233,8 +233,7 @@ public:
         state_->boundRegions[config_.asuId] = regions;
         results.clear();
         for (const auto& region : regions) {
-            results.emplace_back(RegisterResult{Status::OK(), region.handle, region.lkey,
-                                                region.rkey, region.tokenId});
+            results.emplace_back(RegisterResult{Status::OK(), region.handle, region.tokenId});
         }
         return Status::OK();
     }
@@ -1015,7 +1014,7 @@ TEST(AsuClientImplTest, MemoryRegister_PartialRegisterFailureDoesNotBindFollower
             results.reserve(regions.size());
             if (!regions.empty()) {
                 results.emplace_back(
-                    RegisterResult{Status::OK(), MakeTestMrHandle(500), 0, 0, 900});
+                    RegisterResult{Status::OK(), MakeTestMrHandle(500), 900});
             }
             if (regions.size() > 1) {
                 results.emplace_back(RegisterResult{

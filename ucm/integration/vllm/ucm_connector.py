@@ -401,6 +401,13 @@ class UCMDirectConnector(KVConnectorBase_V1):
         )
 
         self.store = self._create_store(self.kv_cache_layout, store_cores)
+        config = self.connector_configs[0].get("ucm_connector_config", {})
+        if config.get("store_pipeline") == "ASU" and hasattr(
+            self.store, "register_kv_cache_regions"
+        ):
+            base_addrs, sizes = self._collect_kv_cache_regions()
+            if base_addrs:
+                self.store.register_kv_cache_regions(base_addrs, sizes)
 
         if worker_cores:
             try:
@@ -411,6 +418,43 @@ class UCMDirectConnector(KVConnectorBase_V1):
 
         if self.device is None:
             raise RuntimeError(f"Unsupported device platform for UCMDirectConnector.")
+
+    def _collect_kv_cache_regions(self) -> tuple[list[int], list[int]]:
+        range_groups: list[list[tuple[int, int]]] = []
+        unique_regions: set[tuple[int, int]] = set()
+
+        def add_tensor(group_index: int, tensor: torch.Tensor) -> None:
+            addr = tensor.data_ptr()
+            size = tensor.numel() * tensor.element_size()
+            region = (addr, size)
+            if addr == 0 or size <= 0:
+                return
+            if region in unique_regions:
+                return
+            while len(range_groups) <= group_index:
+                range_groups.append([])
+            range_groups[group_index].append(region)
+            unique_regions.add(region)
+
+        for kv_layer in self.kv_caches.values():
+            if isinstance(kv_layer, torch.Tensor):
+                if kv_layer.dim() == 5:
+                    add_tensor(0, kv_layer[0])
+                    add_tensor(1, kv_layer[1])
+                elif kv_layer.dim() == 3:
+                    add_tensor(0, kv_layer)
+                else:
+                    raise ValueError(
+                        f"Unsupported kv cache tensor shape: {kv_layer.shape}"
+                    )
+            elif isinstance(kv_layer, Tuple):
+                for group_index, tensor in enumerate(kv_layer):
+                    add_tensor(group_index, tensor)
+            else:
+                raise TypeError(f"Unsupported kv cache type: {type(kv_layer)}")
+
+        regions = [region for group in range_groups for region in group]
+        return ([addr for addr, _ in regions], [size for _, size in regions])
 
     def get_num_new_matched_tokens(
         self,

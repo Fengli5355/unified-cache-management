@@ -157,6 +157,22 @@ class UcmPipelineStore(UcmKVStoreBaseV1):
     def check(self, task: Task) -> bool:
         return self.store_.Check(task.task_id)
 
+    def register_kv_cache_regions(
+        self, base_addrs: List[int] | np.ndarray, sizes: List[int] | np.ndarray
+    ) -> None:
+        addrs_np = (
+            base_addrs
+            if isinstance(base_addrs, np.ndarray)
+            else np.array(base_addrs, dtype=np.uint64)
+        )
+        sizes_np = (
+            sizes if isinstance(sizes, np.ndarray) else np.array(sizes, dtype=np.uint64)
+        )
+        self.store_.RegisterPersistentRegions(addrs_np, sizes_np)
+
+    def unregister_kv_cache_regions(self) -> None:
+        self.store_.UnregisterPersistentRegions()
+
 
 def _cache_ds3fs_pipeline_builder(
     config: Dict[str, object], pipeline: ucmpipelinestore.PipelineStore

@@ -24,6 +24,10 @@
 #ifndef UNIFIEDCACHE_STORE_V1_H
 #define UNIFIEDCACHE_STORE_V1_H
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
 #include "status/status.h"
 #include "type/dictionary.h"
 #include "type/types.h"
@@ -154,6 +158,19 @@ protected:
      * Prevents direct instantiation and enforces derivation.
      */
     StoreV1() = default;
+};
+
+struct PersistentRegion {
+    std::uintptr_t addr{0};
+    std::size_t size{0};
+};
+
+class PersistentRegionRegistrar {
+public:
+    virtual ~PersistentRegionRegistrar() = default;
+
+    virtual Status RegisterPersistentRegions(const std::vector<PersistentRegion>& regions) = 0;
+    virtual Status UnregisterPersistentRegions() = 0;
 };
 
 }  // namespace UC

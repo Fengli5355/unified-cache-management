@@ -168,6 +168,34 @@ public:
         }
         ThrowIfFailed(status);
     }
+    void RegisterPersistentRegions(const pybind11::buffer& addrs, const pybind11::buffer& sizes)
+    {
+        BufferArrayView<std::uintptr_t> addrArr{addrs};
+        BufferArrayView<std::size_t> sizeArr{sizes};
+        if (addrArr.num != sizeArr.num) {
+            ThrowIfFailed(
+                Status::InvalidParam("invalid persistent region dim: {},{}", addrArr.num,
+                                     sizeArr.num));
+        }
+        auto* store = dynamic_cast<PersistentRegionRegistrar*>(StoreBack());
+        if (store == nullptr) {
+            ThrowIfFailed(Status::Unsupported());
+        }
+        std::vector<PersistentRegion> regions;
+        regions.reserve(addrArr.num);
+        for (std::size_t index = 0; index < addrArr.num; ++index) {
+            regions.emplace_back(PersistentRegion{addrArr.data[index], sizeArr.data[index]});
+        }
+        ThrowIfFailed(store->RegisterPersistentRegions(regions));
+    }
+    void UnregisterPersistentRegions()
+    {
+        auto* store = dynamic_cast<PersistentRegionRegistrar*>(StoreBack());
+        if (store == nullptr) {
+            ThrowIfFailed(Status::Unsupported());
+        }
+        ThrowIfFailed(store->UnregisterPersistentRegions());
+    }
 };
 
 }  // namespace UC::PipelineStore
@@ -192,4 +220,7 @@ PYBIND11_MODULE(ucmpipelinestore, m)
           py::arg("addrs").noconvert(), py::arg("prerequisite_handle") = 0);
     s.def("Check", &PipelineStore::Check);
     s.def("Wait", &PipelineStore::Wait);
+    s.def("RegisterPersistentRegions", &PipelineStore::RegisterPersistentRegions,
+          py::arg("addrs").noconvert(), py::arg("sizes").noconvert());
+    s.def("UnregisterPersistentRegions", &PipelineStore::UnregisterPersistentRegions);
 }
