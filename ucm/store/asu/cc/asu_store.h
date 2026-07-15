@@ -18,7 +18,7 @@ struct Config {
     std::vector<std::string> asuIps;
     std::string asuLocalIp;
     std::string asuNamePrefix{"asu"};
-    std::uint16_t asuPort{0};
+    std::vector<std::uint16_t> asuPorts;
     std::uint64_t defaultWaitTimeoutMs{100};
     std::uint64_t queryTimeoutMs{5};
     std::uint64_t loadTimeoutMs{100};
@@ -55,11 +55,9 @@ public:
     virtual UC::ASU::Status Check(UC::ASU::TaskId taskId, UC::ASU::TaskResult& result) = 0;
     virtual UC::ASU::Status Wait(UC::ASU::TaskId taskId, std::uint64_t timeoutMs,
                                  UC::ASU::TaskResult& result) = 0;
-    virtual UC::ASU::Status RegisterRegions(
-        const std::vector<UC::ASU::MemoryRegion>& regions,
-        std::vector<UC::ASU::RegisterResult>& results) = 0;
-    virtual UC::ASU::Status UnregisterRegions(
-        const std::vector<UC::ASU::MRHandle>& handles) = 0;
+    virtual UC::ASU::Status RegisterRegions(const std::vector<UC::ASU::MemoryRegion>& regions,
+                                            std::vector<UC::ASU::RegisterResult>& results) = 0;
+    virtual UC::ASU::Status UnregisterRegions(const std::vector<UC::ASU::MRHandle>& handles) = 0;
 };
 
 }  // namespace UC::AsuStore

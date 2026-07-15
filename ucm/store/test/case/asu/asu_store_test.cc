@@ -150,8 +150,8 @@ public:
         state_->registeredRegions.insert(state_->registeredRegions.end(), regions.begin(),
                                          regions.end());
         for (std::size_t index = 0; index < regions.size(); ++index) {
-            results.emplace_back(UC::ASU::RegisterResult{UC::ASU::Status::OK(),
-                                                         MakeTestMrHandle(nextMrHandle_++)});
+            results.emplace_back(
+                UC::ASU::RegisterResult{UC::ASU::Status::OK(), MakeTestMrHandle(nextMrHandle_++)});
         }
         return UC::ASU::Status::OK();
     }
@@ -210,7 +210,7 @@ UC::Detail::Dictionary MakeBaseConfig()
     UC::Detail::Dictionary config;
     config.Set("asu_client_id", std::string{"asu-store-test"});
     config.Set("asu_name_prefix", std::string{"asu-store-test"});
-    config.SetNumber("asu_port", 12345);
+    config.Set("asu_port", std::vector<ssize_t>{12345});
     config.SetNumber("device_id", -1);
     config.SetNumber("tensor_size", std::size_t{64});
     config.SetNumber("shard_size", std::size_t{64});
@@ -268,6 +268,7 @@ TEST(UCAsuStoreTest, TransportModeRejectsMultipleAsus)
     config.Set("asu_mode", std::string{"transport"});
     config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
     config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
+    config.Set("asu_port", std::vector<ssize_t>{12345, 12346});
 
     auto status = store.Setup(config);
     ASSERT_TRUE(status.Failure());
@@ -295,11 +296,53 @@ TEST(UCAsuStoreTest, ClientModeSmoke)
     auto config = MakeBaseConfig();
     config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
     config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
+    config.Set("asu_port", std::vector<ssize_t>{12345, 12346});
     ASSERT_TRUE(store.Setup(config).Success());
 
     auto block = UC::Test::Detail::TypesHelper::MakeBlockId("b1b2c3d4e5f6789012345678901234ab");
     ExpectLookupMiss(store, block);
     ExpectLoadDumpSmoke(store, block);
+}
+
+TEST(UCAsuStoreTest, MapsPortsToAsuEndpointsByIndex)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeBackend(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
+    config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
+    config.Set("asu_port", std::vector<ssize_t>{19001, 19002});
+
+    ASSERT_TRUE(store.Setup(config).Success());
+    ASSERT_EQ(state->initConfigs.size(), std::size_t{1});
+
+    const auto first = UC::AsuStore::BuildTransportConfig(state->initConfigs[0], 0);
+    const auto second = UC::AsuStore::BuildTransportConfig(state->initConfigs[0], 1);
+    ASSERT_EQ(first.endpoints.size(), std::size_t{1});
+    ASSERT_EQ(second.endpoints.size(), std::size_t{1});
+    EXPECT_EQ(first.endpoints[0].port, std::uint16_t{19001});
+    EXPECT_EQ(second.endpoints[0].port, std::uint16_t{19002});
+}
+
+TEST(UCAsuStoreTest, RejectsMismatchedAsuPortCount)
+{
+    UC::AsuStore::AsuStore store;
+    auto config = MakeBaseConfig();
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
+    config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
+
+    EXPECT_TRUE(store.Setup(config).Failure());
+}
+
+TEST(UCAsuStoreTest, RejectsScalarAsuPort)
+{
+    UC::AsuStore::AsuStore store;
+    auto config = MakeBaseConfig();
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.SetNumber("asu_port", 12345);
+
+    EXPECT_TRUE(store.Setup(config).Failure());
 }
 
 TEST(UCAsuStoreTest, UsesPersistentRegionHandleBeforeSubmitAndKeepsItAfterWait)
@@ -341,14 +384,16 @@ TEST(UCAsuStoreTest, PersistentRegionHandleIsSharedByEntriesAndNotReleasedPerTas
 
     std::array<std::byte, 128> buffer{};
     ASSERT_TRUE(store
-                    .RegisterPersistentRegions(
-                        {reinterpret_cast<std::uintptr_t>(buffer.data())}, {buffer.size()})
+                    .RegisterPersistentRegions({reinterpret_cast<std::uintptr_t>(buffer.data())},
+                                               {buffer.size()})
                     .Success());
     ASSERT_EQ(state->registeredRegions.size(), std::size_t{1});
 
     UC::Detail::TaskDesc task;
     auto block = UC::Test::Detail::TypesHelper::MakeBlockId("c2b2c3d4e5f6789012345678901234ab");
-    task.push_back(UC::Detail::Shard{block, 0, {buffer.data(), buffer.data() + 64}});
+    task.push_back(UC::Detail::Shard{
+        block, 0, {buffer.data(), buffer.data() + 64}
+    });
 
     auto dump = store.Dump(std::move(task));
     ASSERT_TRUE(dump.HasValue()) << dump.Error().ToString();
@@ -373,6 +418,7 @@ TEST(UCAsuStoreTest, LookupOnPrefixUsesPrefixQueryMode)
     auto config = MakeBaseConfig();
     config.Set("asu_ips", std::vector<std::string>{"127.0.0.1", "127.0.0.2"});
     config.Set("asu_ids", std::vector<ssize_t>{1001, 1002});
+    config.Set("asu_port", std::vector<ssize_t>{12345, 12346});
     ASSERT_TRUE(store.Setup(config).Success());
     ASSERT_TRUE(store.RegisterPersistentRegions({1}, {1}).Success());
 
@@ -523,8 +569,7 @@ TEST(UCAsuStoreTest, UsesLayerwiseMlaTensorOffsets)
 
     std::array<std::byte, 128> mainCache{};
     std::array<std::byte, 64> ropeCache{};
-    auto block =
-        UC::Test::Detail::TypesHelper::MakeBlockId("e1b2c3d4e5f6789012345678901234ab");
+    auto block = UC::Test::Detail::TypesHelper::MakeBlockId("e1b2c3d4e5f6789012345678901234ab");
     UC::Detail::TaskDesc task;
     task.brief = "asu-store-test";
     task.push_back(UC::Detail::Shard{

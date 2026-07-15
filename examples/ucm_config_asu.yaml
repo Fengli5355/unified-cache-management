@@ -15,7 +15,7 @@ ucm_connectors:
       # asu_info.1=protocol=TCP,local.comm_id=127.0.0.1,port=19001,local.phy_device_id=0
       # The ASU store YAML path maps local.comm_id/port/device into the transport endpoint.
       asu_ips: ["127.0.0.1"]
-      asu_port: 19001
+      asu_port: [19001]
       device_id: 0
 
       # ASU client routing. Keep the default close to kv-test's fake_backend config.
