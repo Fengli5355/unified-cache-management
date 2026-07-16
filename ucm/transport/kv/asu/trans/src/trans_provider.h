@@ -44,6 +44,10 @@ public:
     virtual Status RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                   std::vector<MRHandle>& mrHandles) = 0;
 
+    // TODO: Confirm the AIV binding cleanup contract. The current design reuses the owner's
+    // handle and relies on the owner registration to control the shared memory lifetime.
+    virtual Status BindMemory(const std::vector<RegisteredMemory>& regions) = 0;
+
     struct UnregisterMemoryDesc {
         MRHandle mrHandle;
     };

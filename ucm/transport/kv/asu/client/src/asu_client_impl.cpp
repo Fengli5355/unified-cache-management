@@ -357,6 +357,7 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
     }
 
     Status finalStatus = Status::OK();
+    std::vector<std::pair<AsuId, std::shared_ptr<AsuTransport>>> boundTransports;
     for (std::size_t asuIndex = 1; asuIndex < snapshot->asuIds.size(); ++asuIndex) {
         auto iter = snapshot->transports.find(snapshot->asuIds[asuIndex]);
         if (iter == snapshot->transports.end()) {
@@ -377,24 +378,44 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
                             "asuIndex=" + std::to_string(asuIndex) +
                                 " asuId=" + std::to_string(snapshot->asuIds[asuIndex]) +
                                 " region_count=" + std::to_string(registeredRegions.size()));
-        } else if (status.ok() && childResults.size() != registeredRegions.size() &&
-                   finalStatus.ok()) {
-            finalStatus =
-                WithContext(PartialFailed("one or more asu region bindings failed"),
-                            "asuIndex=" + std::to_string(asuIndex) +
-                                " asuId=" + std::to_string(snapshot->asuIds[asuIndex]) +
-                                " region_count=" + std::to_string(registeredRegions.size()) +
-                                " result_count=" + std::to_string(childResults.size()));
+        } else if (status.ok()) {
+            boundTransports.emplace_back(snapshot->asuIds[asuIndex], iter->second);
+            if (childResults.size() != registeredRegions.size() && finalStatus.ok()) {
+                finalStatus =
+                    WithContext(PartialFailed("one or more asu region bindings failed"),
+                                "asuIndex=" + std::to_string(asuIndex) +
+                                    " asuId=" + std::to_string(snapshot->asuIds[asuIndex]) +
+                                    " region_count=" + std::to_string(registeredRegions.size()) +
+                                    " result_count=" + std::to_string(childResults.size()));
+            }
         }
     }
 
-    if (finalStatus.ok()) {
-        std::lock_guard<std::mutex> lock{mutex_};
-        for (std::size_t index = 0; index < regions.size(); ++index) {
-            registeredResources_.emplace_back(RegisteredResource{regions[index], results[index]});
+    if (!finalStatus.ok()) {
+        std::vector<MRHandle> handles;
+        handles.reserve(results.size());
+        for (const auto& result : results) { handles.emplace_back(result.handle); }
+
+        for (auto iter = boundTransports.rbegin(); iter != boundTransports.rend(); ++iter) {
+            auto rollbackStatus = iter->second->UnregisterRegions(handles);
+            if (!rollbackStatus.ok()) {
+                UC_ERROR("Rollback bound ASU regions failed, asuId={}: {}", iter->first,
+                         rollbackStatus.message);
+            }
         }
+        auto rollbackStatus = firstIter->second->UnregisterRegions(handles);
+        if (!rollbackStatus.ok()) {
+            UC_ERROR("Rollback owner ASU regions failed, asuId={}: {}", snapshot->asuIds.front(),
+                     rollbackStatus.message);
+        }
+        return finalStatus;
     }
-    return finalStatus;
+
+    std::lock_guard<std::mutex> lock{mutex_};
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+        registeredResources_.emplace_back(RegisteredResource{regions[index], results[index]});
+    }
+    return Status::OK();
 }
 
 Status AsuClientImpl::SubmitAsync(ClientOpType opType, const std::vector<KVBuffer>& entries,
@@ -798,6 +819,8 @@ Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles
     if (!snapshot) { return NotInitialized(); }
 
     Status finalStatus = Status::OK();
+    // TODO: Also unregister the recorded owner when it has moved to retiredTransports_. The
+    // current snapshot-only traversal can forget the resource while the retired owner keeps it.
     for (const auto& item : snapshot->transports) {
         auto status = item.second->UnregisterRegions(handles);
         if (!status.ok() && finalStatus.ok()) {

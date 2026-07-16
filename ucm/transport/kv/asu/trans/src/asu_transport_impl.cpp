@@ -415,6 +415,9 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
     results.reserve(regions.size());
 
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
+    auto status = transProvider_->BindMemory(regions);
+    if (!status.ok()) { return status; }
+
     for (const auto& region : regions) {
         registeredRegions_[region.handle] = region;
         results.emplace_back(
@@ -430,6 +433,8 @@ Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
     descs.reserve(handles.size());
     for (auto handle : handles) {
         if (handle == kInvalidMRHandle) { continue; }
+        // TODO: Add follower-side provider cleanup if AIV BindMemory owns follower-local state.
+        // Current behavior only forgets follower metadata and lets the owner unregister the MR.
         if (ownedRegisteredRegionHandles_.find(handle) == ownedRegisteredRegionHandles_.end()) {
             continue;
         }

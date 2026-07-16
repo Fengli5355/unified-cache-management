@@ -22,7 +22,17 @@ TEST(FakeTransProviderTest, RegisterMemoryReturnsUniqueHandlesAcrossCalls)
     uniqueHandles.insert(firstHandles.begin(), firstHandles.end());
     uniqueHandles.insert(secondHandles.begin(), secondHandles.end());
     EXPECT_EQ(uniqueHandles.size(), firstHandles.size() + secondHandles.size());
-    EXPECT_EQ(uniqueHandles.count(nullptr), 0);
+    EXPECT_EQ(uniqueHandles.count(kInvalidMRHandle), 0);
+}
+
+TEST(FakeTransProviderTest, BindMemoryAcceptsRegisteredRegions)
+{
+    FakeTransProvider provider(FakeTransProviderConfig{});
+    std::vector<RegisteredMemory> regions(2);
+    regions[0].handle = reinterpret_cast<MRHandle>(std::uintptr_t{101});
+    regions[1].handle = reinterpret_cast<MRHandle>(std::uintptr_t{102});
+
+    EXPECT_TRUE(provider.BindMemory(regions).ok());
 }
 
 }  // namespace

@@ -22,11 +22,12 @@ public:
         return std::vector<Status>(ioBatches.size(), Status::OK());
     }
 
-    Status RegisterMemory(const std::vector<RegisterMemoryDesc>&,
-                          std::vector<MRHandle>&) override
+    Status RegisterMemory(const std::vector<RegisterMemoryDesc>&, std::vector<MRHandle>&) override
     {
         return Status::OK();
     }
+
+    Status BindMemory(const std::vector<RegisteredMemory>&) override { return Status::OK(); }
 
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>& handles) override
     {

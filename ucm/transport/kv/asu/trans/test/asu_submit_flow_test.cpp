@@ -44,8 +44,10 @@ std::vector<Status> g_sendStatuses;
 class StubTransProvider : public TransProvider {
 public:
     std::uint32_t registerCount{0};
+    std::uint32_t bindCount{0};
     std::uint32_t unregisterCount{0};
     std::uint32_t failRegisterAt{0};
+    std::vector<MRHandle> unregisteredHandles;
 
     Status CreateConnection(const std::string&, const std::string&, uint32_t, uint32_t qpNum,
                             uint32_t, std::vector<ConnectionHandle>& handles) override
@@ -80,9 +82,16 @@ public:
         return Status::OK();
     }
 
+    Status BindMemory(const std::vector<RegisteredMemory>& regions) override
+    {
+        bindCount += static_cast<std::uint32_t>(regions.size());
+        return Status::OK();
+    }
+
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>& descs) override
     {
         unregisterCount += static_cast<std::uint32_t>(descs.size());
+        for (const auto& desc : descs) { unregisteredHandles.push_back(desc.mrHandle); }
         return std::vector<Status>(descs.size(), Status::OK());
     }
 
@@ -205,6 +214,39 @@ TEST(AsuTransportRegisterTest, RegisterDeviceRegionDoesNotRequireConnection)
     ASSERT_EQ(results.size(), std::size_t{1});
     EXPECT_TRUE(results[0].status.ok()) << results[0].status.message;
     EXPECT_EQ(providerPtr->registerCount, std::uint32_t{1});
+}
+
+TEST(AsuTransportRegisterTest, BoundRegionsDoNotUnregisterOwnerMemory)
+{
+    auto provider = std::make_unique<StubTransProvider>();
+    auto* providerPtr = provider.get();
+
+    AsuTransportImpl transport;
+    transport.SetTransProvider(std::move(provider));
+
+    RegisteredMemory region;
+    region.region.memoryType = MemoryType::ASCEND_DEVICE;
+    region.region.addr = 0x1000;
+    region.region.size = 4096;
+    region.handle = reinterpret_cast<MRHandle>(std::uintptr_t{7});
+    region.tokenId = 23;
+
+    std::vector<RegisterResult> results;
+    auto status = transport.BindRegisteredRegions({region}, results);
+
+    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(results.size(), std::size_t{1});
+    EXPECT_EQ(results[0].handle, region.handle);
+    EXPECT_EQ(results[0].tokenId, region.tokenId);
+    EXPECT_EQ(providerPtr->bindCount, std::uint32_t{1});
+
+    status = transport.UnregisterRegions({region.handle});
+
+    EXPECT_TRUE(status.ok()) << status.message;
+    EXPECT_EQ(providerPtr->unregisterCount, std::uint32_t{0});
+    EXPECT_TRUE(providerPtr->unregisteredHandles.empty());
+    EXPECT_TRUE(transport.registeredRegions_.empty());
+    EXPECT_TRUE(transport.ownedRegisteredRegionHandles_.empty());
 }
 
 TEST(AsuTransportRegisterTest, RegisterRegionsStopsAtFirstFailure)

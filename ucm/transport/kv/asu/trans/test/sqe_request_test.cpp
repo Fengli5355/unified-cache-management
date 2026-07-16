@@ -73,6 +73,7 @@ public:
         handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(1)));
         return Status::OK();
     }
+    Status BindMemory(const std::vector<RegisteredMemory>&) override { return Status::OK(); }
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>&) override
     {
         return {};

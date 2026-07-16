@@ -71,10 +71,11 @@ public:
         handles.reserve(descs.size());
         for (std::size_t index = 0; index < descs.size(); ++index) {
             handles.push_back(reinterpret_cast<MRHandle>(static_cast<std::uintptr_t>(index) +
-                                                          static_cast<std::uintptr_t>(1)));
+                                                         static_cast<std::uintptr_t>(1)));
         }
         return Status::OK();
     }
+    Status BindMemory(const std::vector<RegisteredMemory>&) override { return Status::OK(); }
     std::vector<Status> UnregisterMemory(const std::vector<UnregisterMemoryDesc>&) override
     {
         return {};

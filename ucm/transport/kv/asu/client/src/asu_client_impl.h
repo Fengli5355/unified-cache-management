@@ -91,6 +91,8 @@ private:
     using ClientTaskContextPtr = std::shared_ptr<ClientTaskContext>;
 
     // RegisteredResource keeps memory metadata that must be rebound after refresh.
+    // TODO: Track the registration owner ASU/transport so explicit unregister can reach a
+    // retired owner. Define explicit owner promotion before allowing ownership to move.
     struct RegisteredResource {
         MemoryRegion region;
         RegisterResult result;

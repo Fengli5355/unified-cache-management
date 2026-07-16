@@ -66,6 +66,10 @@ public:
     virtual Status RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                   std::vector<MRHandle>& memoryHandles) = 0;
 
+    // TODO: Implement this interface in NIDS and confirm the binding cleanup contract. The
+    // current UCM design reuses the owner's handle and does not unregister from followers.
+    virtual Status BindMemory(const std::vector<RegisteredMemory>& regions) = 0;
+
     struct UnregisterMemoryDesc {
         MRHandle memoryHandle;
     };

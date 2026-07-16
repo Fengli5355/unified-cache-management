@@ -514,11 +514,15 @@ Status FakeTransProvider::RegisterMemory(const std::vector<RegisterMemoryDesc>& 
         if (handle == 0) { handle = nextMemoryHandle_.fetch_add(1, std::memory_order_relaxed); }
         auto mrHandle = reinterpret_cast<MRHandle>(handle);
         if (desc.localAddr != 0) {
-            registeredMemories_[mrHandle] =
-                RegisteredMemory{desc.addr, desc.localAddr, desc.size};
+            registeredMemories_[mrHandle] = RegisteredMemory{desc.addr, desc.localAddr, desc.size};
         }
         mrHandles.push_back(mrHandle);
     }
+    return Status::OK();
+}
+
+Status FakeTransProvider::BindMemory(const std::vector<::UC::ASU::RegisteredMemory>&)
+{
     return Status::OK();
 }
 

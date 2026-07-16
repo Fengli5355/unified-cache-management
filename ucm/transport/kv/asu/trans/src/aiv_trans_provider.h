@@ -71,14 +71,19 @@ public:
         return FromImpl(impl_->RegisterMemory(descs, mrHandles));
     }
 
+    Status BindMemory(const std::vector<RegisteredMemory>& regions) override
+    {
+        // TODO: Land the matching NIDS AIVTransport interface and implementation, then rebuild
+        // the provider library before enabling the AIV provider in UCM.
+        return FromImpl(impl_->BindMemory(regions));
+    }
+
     std::vector<Status> UnregisterMemory(
         const std::vector<UnregisterMemoryDesc>& memoryDescs) override
     {
         std::vector<AIVTransport::UnregisterMemoryDesc> descs;
         descs.reserve(memoryDescs.size());
-        for (const auto& desc : memoryDescs) {
-            descs.push_back({desc.mrHandle});
-        }
+        for (const auto& desc : memoryDescs) { descs.push_back({desc.mrHandle}); }
         return FromImpl(impl_->UnregisterMemory(descs));
     }
 
