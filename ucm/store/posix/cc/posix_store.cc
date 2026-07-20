@@ -165,6 +165,11 @@ public:
         if (s.Failure()) [[unlikely]] { UC_ERROR("Failed({}) to wait task({}).", s, taskId); }
         return s;
     }
+    bool NeedRegisterKVCaches() const override { return false; }
+    Status RegisterKVCaches(const KVCacheRegistration*, std::size_t) override
+    {
+        return Status::OK();
+    }
 
 private:
     static void RecordLookupQueries(size_t count)

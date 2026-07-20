@@ -126,6 +126,11 @@ public:
         }
         return s;
     }
+    bool NeedRegisterKVCaches() const override { return false; }
+    Status RegisterKVCaches(const KVCacheRegistration*, std::size_t) override
+    {
+        return Status::OK();
+    }
 
 private:
     Config ParseConfig(const Detail::Dictionary& config)
