@@ -37,6 +37,12 @@ BUILD_UCM_ASU = os.getenv("BUILD_UCM_ASU", "0") not in ("", "0", "false", "False
 ENABLE_MINDIE = os.getenv("UCM_ENABLE_MINDIE", "0") not in ("", "0", "false", "False")
 ENABLE_GDR = os.getenv("ENABLE_GDR", "0") not in ("", "0", "false", "False")
 ASCEND_ROOT = os.getenv("ASCEND_ROOT")
+BUILD_UCM_ASU_PROVIDER_AIV = os.getenv("BUILD_UCM_ASU_PROVIDER_AIV", "0") not in (
+    "",
+    "0",
+    "false",
+    "False",
+)
 
 
 def get_abi_flag_from_env() -> str:
