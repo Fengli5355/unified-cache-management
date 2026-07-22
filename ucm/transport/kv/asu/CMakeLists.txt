@@ -139,6 +139,9 @@ if(BUILD_UNIT_TESTS)
     include(GoogleTest)
     file(GLOB_RECURSE ASU_TEST_SOURCE_FILES CONFIGURE_DEPENDS test/case/*.cc)
     file(GLOB_RECURSE ASU_TRANSPORT_TEST_SOURCE_FILES CONFIGURE_DEPENDS trans/test/*.cpp)
+    list(FILTER ASU_TRANSPORT_TEST_SOURCE_FILES EXCLUDE REGEX
+        "aiv_repeat_registration_test\\.cpp$"
+    )
     list(APPEND ASU_TEST_SOURCE_FILES ${ASU_TRANSPORT_TEST_SOURCE_FILES})
     file(GLOB_RECURSE ASU_CLIENT_TEST_SOURCE_FILES CONFIGURE_DEPENDS client/test/*.cpp)
     list(APPEND ASU_TEST_SOURCE_FILES ${ASU_CLIENT_TEST_SOURCE_FILES})
@@ -156,4 +159,17 @@ if(BUILD_UNIT_TESTS)
         gtest_main gtest
     )
     gtest_discover_tests(asu.test)
+
+    if(BUILD_UCM_ASU_PROVIDER_AIV)
+        add_executable(aiv_repeat_registration.test
+            trans/test/aiv_repeat_registration_test.cpp
+        )
+        target_link_libraries(aiv_repeat_registration.test PRIVATE
+            asu_transport
+            asu_ascend_deps
+            gtest_main gtest
+        )
+        add_test(NAME aiv_repeat_registration COMMAND aiv_repeat_registration.test)
+        set_tests_properties(aiv_repeat_registration PROPERTIES LABELS "aiv;hardware")
+    endif()
 endif()
