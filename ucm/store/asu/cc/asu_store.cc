@@ -171,6 +171,37 @@ void ReadClientAttr(const Detail::Dictionary& inConfig, const std::string& yamlK
     if (TryGetStringLike(inConfig, yamlKey, value)) { config.clientAttrs[attrKey] = value; }
 }
 
+Status ResolveAsuLocalIp(const Detail::Dictionary& inConfig, Config& config)
+{
+    std::vector<std::string> deviceIps;
+    inConfig.Get("device_ip", deviceIps);
+    if (deviceIps.empty()) { return Status::OK(); }
+    if (config.deviceId < 0) {
+        return Status::InvalidParam("device_id is required when device_ip is configured");
+    }
+
+    std::int32_t physicalDeviceId = -1;
+    const auto ret = aclrtGetPhyDevIdByLogicDevId(config.deviceId, &physicalDeviceId);
+    if (ret != ACL_SUCCESS) {
+        return Status::Error(
+            fmt::format("failed to resolve physical device ID from logical device ID({}), ret({})",
+                        config.deviceId, ret));
+    }
+    if (physicalDeviceId < 0 || static_cast<std::size_t>(physicalDeviceId) >= deviceIps.size()) {
+        return Status::InvalidParam("device_ip does not contain physical device ID({})",
+                                    physicalDeviceId);
+    }
+
+    config.localIp = deviceIps[static_cast<std::size_t>(physicalDeviceId)];
+    if (config.localIp.empty()) {
+        return Status::InvalidParam("device_ip for physical device ID({}) is empty",
+                                    physicalDeviceId);
+    }
+    UC_INFO("Resolved ASU local IP({}) for logical device ID({}), physical device ID({}).",
+            config.localIp, config.deviceId, physicalDeviceId);
+    return Status::OK();
+}
+
 }  // namespace
 
 UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t index)
@@ -178,6 +209,7 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
     UC::ASU::TransportConfig transportConfig;
     transportConfig.asuId = static_cast<UC::ASU::AsuId>(config.asuIds[index]);
     transportConfig.asuName = config.asuNamePrefix + "-" + std::to_string(config.asuIds[index]);
+    transportConfig.deviceId = config.deviceId;
     transportConfig.queryTimeoutMs = config.queryTimeoutMs;
     transportConfig.loadTimeoutMs = config.loadTimeoutMs;
     transportConfig.storeTimeoutMs = config.storeTimeoutMs;
@@ -188,17 +220,17 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
     // Set for all backends including fake
     const auto kvNsIndex = config.uniqueId.find("_fawa_wa") == std::string::npos ? 0 : 1;
     transportConfig.attrs["kv_ns_id"] = std::to_string(config.kvNsIds[kvNsIndex]);
-    if (!config.asuLocalIp.empty()) { transportConfig.attrs["localIp"] = config.asuLocalIp; }
+    if (!config.localIp.empty()) { transportConfig.attrs["localIp"] = config.localIp; }
 
     if (!config.asuIps.empty()) {
         UC::ASU::AsuEndpoint endpoint;
         endpoint.ip = config.asuIps[index];
         endpoint.port = config.asuPort;
-        endpoint.deviceId = config.deviceId;
         transportConfig.endpoints.emplace_back(std::move(endpoint));
     }
     if (config.transProviderType == UC::ASU::TransProviderType::FAKE) {
         const auto fakeDeviceId = config.deviceId >= 0 ? config.deviceId : 0;
+        transportConfig.deviceId = fakeDeviceId;
         transportConfig.attrs.try_emplace("kernel_count", "1");
         transportConfig.attrs.try_emplace("quiet_count", "1");
         transportConfig.attrs.try_emplace("dtype", "0");
@@ -214,7 +246,6 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
             endpoint.ip = "fake_backend";
             endpoint.port = 19001;
             endpoint.protocol = UC::ASU::Protocol::TCP;
-            endpoint.deviceId = fakeDeviceId;
             transportConfig.endpoints.emplace_back(std::move(endpoint));
         }
     }
@@ -312,6 +343,8 @@ public:
         auto config = ParseConfig(inConfig);
         NormalizeAsuShardConfig(config);
         auto status = CheckConfig(config);
+        if (status.Failure()) { return status; }
+        status = ResolveAsuLocalIp(inConfig, config);
         if (status.Failure()) { return status; }
 
         tensorLayout_ = ParseTensorLayout(config.tensorLayout);
@@ -468,7 +501,6 @@ private:
         inConfig.Get("asu_view_service_addrs", config.viewServiceAddrs);
         inConfig.GetNumbers("asu_ids", config.asuIds);
         inConfig.Get("asu_ips", config.asuIps);
-        inConfig.Get("asu_local_ip", config.asuLocalIp);
         inConfig.Get("asu_name_prefix", config.asuNamePrefix);
         inConfig.GetNumbers("kv_ns_ids", config.kvNsIds);
         ssize_t asuPort = 0;
