@@ -37,6 +37,7 @@
 #include <string>
 #include <utility>
 #include "asu_client/asu_client.h"
+#include "device_id_helper.h"
 #include "logger/logger.h"
 #include "ucmstore_v1.h"
 
@@ -182,12 +183,8 @@ Status ResolveAsuLocalIp(const Detail::Dictionary& inConfig, Config& config)
     }
 
     std::int32_t physicalDeviceId = -1;
-    const auto ret = aclrtGetPhyDevIdByLogicDevId(config.deviceId, &physicalDeviceId);
-    if (ret != ACL_SUCCESS) {
-        return Status::Error(
-            fmt::format("failed to resolve physical device ID from logical device ID({}), ret({})",
-                        config.deviceId, ret));
-    }
+    auto status = Tool::GetPhysicalDeviceId(config.deviceId, physicalDeviceId);
+    if (status.Failure()) { return status; }
     if (physicalDeviceId < 0 || static_cast<std::size_t>(physicalDeviceId) >= deviceIps.size()) {
         return Status::InvalidParam("device_ip does not contain physical device ID({})",
                                     physicalDeviceId);

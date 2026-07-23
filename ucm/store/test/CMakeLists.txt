@@ -23,6 +23,7 @@ if(BUILD_UNIT_TESTS)
             delegator
             buffer_pool
             asu_ascend_deps
+            device_id_helper
         )
         target_compile_definitions(ucmstore.test PRIVATE ASU_BUILD_TESTS)
     endif()

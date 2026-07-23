@@ -1,6 +1,7 @@
 add_subdirectory(vendor)
 add_subdirectory(infra)
 add_subdirectory(trans)
+add_subdirectory(tool)
 if(RUNTIME_ENVIRONMENT STREQUAL "ascend")
     add_subdirectory(pool)
 endif()
