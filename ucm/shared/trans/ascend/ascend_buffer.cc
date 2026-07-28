@@ -213,4 +213,12 @@ Status Buffer::GetHostDevicePointer(void* host, void** pDevice)
 
 void Buffer::UnregisterHostBuffer(void* host) { aclrtHostUnregister(host); }
 
+Status ZeroDeviceMemory(void* ptr, std::size_t size)
+{
+    if (aclrtMemset(ptr, size, 0, size) != ACL_SUCCESS) {
+        return Status::Error("aclrtMemset failed to zero device memory");
+    }
+    return Status::OK();
+}
+
 }  // namespace UC::Trans
