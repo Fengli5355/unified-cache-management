@@ -67,6 +67,31 @@ TEST(ViewServerTest, ConfigBackedViewServerBuildsViewFromTransportConfigs)
     EXPECT_EQ(view.asuMap[10].endpoints[0].protocol, Protocol::ROCE);
 }
 
+TEST(ViewServerTest, ConfigFilePreservesIpv6Endpoint)
+{
+    constexpr const char* kConfigPath = "asu_view_server_ipv6_test.conf";
+    {
+        std::ofstream configFile{kConfigPath};
+        ASSERT_TRUE(configFile.is_open());
+        configFile << "asu_ids=1\n";
+        configFile << "asu_info.1=protocol=TCP,local.comm_id=2001:db8::2,port=19003\n";
+    }
+
+    AsuClientConfig config;
+    config.viewServiceAddrs = {kConfigPath};
+    auto viewServer = CreateDefaultViewServer(config);
+
+    GlobalView view;
+    auto status = viewServer->GetGlobalView(view);
+    std::remove(kConfigPath);
+
+    ASSERT_TRUE(status.ok()) << status.message;
+    ASSERT_EQ(view.asuMap[1].endpoints.size(), std::size_t{1});
+    EXPECT_EQ(view.asuMap[1].endpoints[0].ip, "2001:db8::2");
+    EXPECT_EQ(view.asuMap[1].endpoints[0].port, std::uint16_t{19003});
+    EXPECT_EQ(view.asuMap[1].endpoints[0].protocol, Protocol::TCP);
+}
+
 TEST(ViewServerTest, PublishAndRefreshPolicies)
 {
     AsuClientConfig config;

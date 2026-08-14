@@ -20,11 +20,14 @@ ucm_connectors:
       # replace this with: kv_ns_ids: [100, 101]  # [FA, WA]
       kv_ns_ids: [100]
 
-      # cpu ip where mock server runs
+      # CPU IP where the mock server runs. IPv4 and raw IPv6 are supported.
       # Multi-ASU example: asu_ips: ["223.223.8.11", "223.223.8.12"]
       # Multi-ASU example: asu_ports: [19001, 19002]
       asu_ips: ["223.223.8.11"]
       asu_ports: [19001]
+      # RaSocket discovers the local address matching the ASU IP family.
+      # Optional IPv6 fallback if HCCP cannot discover the local VNIC address:
+      # asu_local_ip: "2001:db8::195"
       # Used by the scheduler. Worker processes overwrite it with local_rank.
       device_id: 0
 

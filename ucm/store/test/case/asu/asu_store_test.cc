@@ -578,6 +578,19 @@ TEST(UCAsuStoreTest, PropagatesKvNamespaceToEveryTransport)
     }
 }
 
+TEST(UCAsuStoreTest, PropagatesIpv6LocalIpWithoutModification)
+{
+    UC::AsuStore::Config config;
+    config.asuIds = {1001};
+    config.kvNsIds = {100};
+    config.localIp = "2001:db8::195";
+    config.transProviderType = UC::ASU::TransProviderType::FAKE;
+
+    const auto transportConfig = UC::AsuStore::BuildTransportConfig(config, 0);
+
+    EXPECT_EQ(transportConfig.attrs.at("localIp"), "2001:db8::195");
+}
+
 TEST(UCAsuStoreTest, SchedulerUsesConfiguredDeviceId)
 {
     UC::AsuStore::AsuStore store;
