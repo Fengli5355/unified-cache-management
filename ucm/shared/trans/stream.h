@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <vector>
+#include "event.h"
 #include "status/status.h"
 
 namespace UC::Trans {
@@ -93,7 +94,7 @@ public:
 
     virtual Status AppendCallback(std::function<void(bool)> cb) = 0;
     virtual Status Synchronized() = 0;
-    virtual Status WaitEvent(void* event) = 0;
+    virtual Status WaitEvent(const Event& event) = 0;
 };
 
 }  // namespace UC::Trans
