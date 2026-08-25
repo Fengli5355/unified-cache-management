@@ -180,7 +180,9 @@ TEST(AsuSubmitFlowTest, SendSubBatchBuffersReadsSendCountsFromAttrs)
     subBatchContexts[0].state = TransportSubBatchState::PENDING;
     subBatchContexts[0].entryStatus.assign(1, Status::OK());
 
-    transport.taskExecutor_->SendSubBatchBuffers(subBatchContexts, ioBatches);
+    TransportTask task;
+    transport.taskExecutor_->SendSubBatchBuffers(task, subBatchContexts, ioBatches,
+                                                 std::chrono::steady_clock::now());
 
     EXPECT_EQ(g_kernelCount, std::uint32_t{3});
     EXPECT_EQ(g_quietCount, std::uint32_t{7});
@@ -254,7 +256,9 @@ TEST(AsuSubmitFlowTest, SendSubBatchBuffersReportsSendFailures)
     subBatchContexts[1].channel = channel1;
     subBatchContexts[1].entryStatus.assign(1, Status::OK());
 
-    transport.taskExecutor_->SendSubBatchBuffers(subBatchContexts, ioBatches);
+    TransportTask task;
+    transport.taskExecutor_->SendSubBatchBuffers(task, subBatchContexts, ioBatches,
+                                                 std::chrono::steady_clock::now());
 
     EXPECT_EQ(subBatchContexts[0].status.code, StatusCode::CONNECTION_ERROR);
     EXPECT_EQ(channel0->GetState(), ChannelState::DRAINING);
@@ -323,7 +327,9 @@ TEST(AsuSubmitFlowTest, SendSubBatchBuffersFailsAllSentSubBatchesWhenStatusCount
     subBatchContexts[1].state = TransportSubBatchState::PENDING;
     subBatchContexts[1].entryStatus.assign(1, Status::OK());
 
-    transport.taskExecutor_->SendSubBatchBuffers(subBatchContexts, ioBatches);
+    TransportTask task;
+    transport.taskExecutor_->SendSubBatchBuffers(task, subBatchContexts, ioBatches,
+                                                 std::chrono::steady_clock::now());
 
     EXPECT_EQ(subBatchContexts[0].state, TransportSubBatchState::COMPLETED);
     EXPECT_EQ(subBatchContexts[0].status.code, StatusCode::INTERNAL_ERROR);

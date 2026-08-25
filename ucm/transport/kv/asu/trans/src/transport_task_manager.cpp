@@ -1,8 +1,24 @@
 #include "transport_task_manager.h"
+#include <chrono>
 #include <utility>
 #include "asu_response_status.h"
+#include "logger.h"
 
 namespace UC::ASU {
+
+namespace {
+
+std::int64_t DurationMicroseconds(std::chrono::steady_clock::time_point start,
+                                  std::chrono::steady_clock::time_point end)
+{
+    if (start == std::chrono::steady_clock::time_point{} ||
+        end == std::chrono::steady_clock::time_point{}) {
+        return -1;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
+
+}  // namespace
 
 TransportTask::TransportTask() : subBatchContexts(std::make_shared<TransportSubBatchList>()) {}
 
@@ -16,6 +32,7 @@ bool TransportTask::NotifyCompletion(TaskResult result)
     if (!onComplete || completionNotified.exchange(true, std::memory_order_acq_rel)) {
         return false;
     }
+    completedAt = std::chrono::steady_clock::now();
     onComplete(std::move(result));
     return true;
 }
@@ -57,7 +74,21 @@ void TransportTaskManager::NotifyCompletion(const TransportTaskPtr& task)
 {
     TaskResult result;
     BuildResult(*task, result);
-    (void)task->NotifyCompletion(std::move(result));
+    const auto transportStatusCode = task->finalStatus.code;
+    if (task->NotifyCompletion(std::move(result))) {
+        UC_INFO_UNLIMITED(
+            "[ASU_PERF] event=asu_transport_complete client_task_id={} transport_task_id={} "
+            "asu_id={} op={} client_age_at_complete_us={} transport_total_us={} "
+            "transport_queue_us={} prepare_us={} assign_us={} build_send_us={} "
+            "send_setup_us={} send_us={} completion_wait_us={} status={}",
+            task->clientTaskId, task->taskId, task->asuId, static_cast<int>(task->opType),
+            DurationMicroseconds(task->clientSubmittedAt, task->completedAt),
+            DurationMicroseconds(task->submittedAt, task->completedAt),
+            DurationMicroseconds(task->submittedAt, task->executeStartedAt), task->prepareUs,
+            task->assignUs, task->buildSendUs, task->sendSetupUs, task->sendUs,
+            DurationMicroseconds(task->sendEndedAt, task->completedAt),
+            static_cast<int>(transportStatusCode));
+    }
     (void)Remove(task->taskId);
 }
 

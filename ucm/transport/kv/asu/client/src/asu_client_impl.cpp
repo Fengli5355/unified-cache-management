@@ -23,6 +23,7 @@
  * */
 #include "asu_client_impl.h"
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <thread>
 #include <utility>
@@ -360,6 +361,7 @@ Status AsuClientImpl::SubmitAsync(AsuOpType opType, const std::vector<KVBuffer>&
         }
     }
     ctx->entryStatus.assign(entries.size(), Status::OK());
+    ctx->submittedAt = std::chrono::steady_clock::now();
 
     auto status = taskManager_.Submit(std::move(ctx), taskId);
     if (!status.ok()) { return status; }
@@ -404,6 +406,7 @@ Status AsuClientImpl::SubmitAsync(AsuOpType opType, const std::vector<CacheKey>&
     ctx->keys = keys;
     ctx->entryStatus.assign(keys.size(), Status::OK());
     ctx->queryResult.exists.assign(opType == AsuOpType::QUERY ? keys.size() : 0, 0);
+    ctx->submittedAt = std::chrono::steady_clock::now();
 
     auto status = taskManager_.Submit(std::move(ctx), taskId);
     if (!status.ok()) { return status; }

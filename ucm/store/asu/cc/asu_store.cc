@@ -24,7 +24,9 @@
 #include "asu_store.h"
 #include <algorithm>
 #include <any>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -34,6 +36,8 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include "asu_client/asu_client.h"
 #include "logger/logger.h"
@@ -91,6 +95,13 @@ Status ConvertStatus(const AsuStatus& status)
         case AsuStatusCode::IN_PROGRESS: return Status::Retry();
         default: return Status::Error(message);
     }
+}
+
+std::int64_t ElapsedMicroseconds(std::chrono::steady_clock::time_point start)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                 start)
+        .count();
 }
 
 void LogAsuStatus(const char* operation, const AsuStatus& status)
@@ -341,7 +352,7 @@ public:
 
     Expected<Detail::TaskHandle> Load(Detail::TaskDesc task) override
     {
-        return Submit(std::move(task), &UC::ASU::AsuClient::BatchLoadAsync);
+        return Submit(std::move(task), &UC::ASU::AsuClient::BatchLoadAsync, "batch_load");
     }
 
     Expected<Detail::TaskHandle> Dump(Detail::TaskDesc task) override
@@ -351,7 +362,7 @@ public:
             UC_ERROR("ASU wait prerequisite event failed: status={}.", status);
             return status;
         }
-        return Submit(std::move(task), &UC::ASU::AsuClient::BatchStoreAsync);
+        return Submit(std::move(task), &UC::ASU::AsuClient::BatchStoreAsync, "batch_store");
     }
 
     Expected<bool> Check(Detail::TaskHandle taskId) override
@@ -362,8 +373,11 @@ public:
     Status Wait(Detail::TaskHandle taskId) override
     {
         UC::ASU::TaskResult result;
+        const auto waitStart = std::chrono::steady_clock::now();
         auto status = client_->Wait(static_cast<UC::ASU::TaskId>(taskId),
                                     config_.defaultWaitTimeoutMs, result);
+        LogIoCompletion(taskId, status.ok() ? result.status : status,
+                        ElapsedMicroseconds(waitStart));
         if (!status.ok()) {
             LogAsuStatus("wait task", status);
             return ConvertStatus(status);
@@ -637,18 +651,40 @@ private:
 
     AsuStatus Query(const std::vector<UC::ASU::CacheKey>& keys, UC::ASU::QueryResult& result) const
     {
+        const auto traceId = nextPerfTraceId_.fetch_add(1, std::memory_order_relaxed);
+        const auto start = std::chrono::steady_clock::now();
+        UC_INFO_UNLIMITED("[ASU_PERF] event=asu_store_io_start trace_id={} op=query items={}",
+                          traceId, keys.size());
         UC::ASU::TaskId taskId = UC::ASU::kInvalidTaskId;
         auto status = client_->QueryAsync(keys, taskId);
-        if (!status.ok()) { return status; }
+        if (!status.ok()) {
+            UC_INFO_UNLIMITED(
+                "[ASU_PERF] event=asu_store_io_done trace_id={} client_task_id={} op=query "
+                "items={} total_us={} wait_us=0 status={}",
+                traceId, taskId, keys.size(), ElapsedMicroseconds(start),
+                static_cast<int>(status.code));
+            return status;
+        }
+        UC_INFO_UNLIMITED(
+            "[ASU_PERF] event=asu_store_io_submitted trace_id={} client_task_id={} op=query "
+            "items={} submit_us={} status=0",
+            traceId, taskId, keys.size(), ElapsedMicroseconds(start));
 
         UC::ASU::TaskResult taskResult;
+        const auto waitStart = std::chrono::steady_clock::now();
         status = client_->Wait(taskId, config_.queryTimeoutMs, taskResult);
+        const auto waitUs = ElapsedMicroseconds(waitStart);
         if (taskResult.queryResult.has_value()) {
             result = std::move(*taskResult.queryResult);
         } else if (status.ok()) {
-            return AsuStatus::Error(UC::ASU::StatusCode::INTERNAL_ERROR,
-                                    "client query result is missing");
+            status = AsuStatus::Error(UC::ASU::StatusCode::INTERNAL_ERROR,
+                                      "client query result is missing");
         }
+        UC_INFO_UNLIMITED(
+            "[ASU_PERF] event=asu_store_io_done trace_id={} client_task_id={} op=query "
+            "items={} total_us={} wait_us={} status={}",
+            traceId, taskId, keys.size(), ElapsedMicroseconds(start), waitUs,
+            static_cast<int>(status.code));
         return status;
     }
 
@@ -684,18 +720,55 @@ private:
         return keys;
     }
 
-    Expected<Detail::TaskHandle> Submit(Detail::TaskDesc task, SubmitFunc submit)
+    Expected<Detail::TaskHandle> Submit(Detail::TaskDesc task, SubmitFunc submit,
+                                        std::string_view op)
     {
         auto entries = BuildKvBuffers(task);
         if (!entries) { return entries.Error(); }
 
+        const auto traceId = nextPerfTraceId_.fetch_add(1, std::memory_order_relaxed);
+        const auto start = std::chrono::steady_clock::now();
+        UC_INFO_UNLIMITED("[ASU_PERF] event=asu_store_io_start trace_id={} op={} items={}", traceId,
+                          op, entries.Value().size());
         UC::ASU::TaskId taskId = UC::ASU::kInvalidTaskId;
         auto status = ((*client_).*submit)(entries.Value(), taskId);
         if (!status.ok()) {
+            UC_INFO_UNLIMITED(
+                "[ASU_PERF] event=asu_store_io_done trace_id={} client_task_id={} op={} items={} "
+                "total_us={} wait_us=0 status={}",
+                traceId, taskId, op, entries.Value().size(), ElapsedMicroseconds(start),
+                static_cast<int>(status.code));
             LogAsuStatus("submit task", status);
             return ConvertStatus(status);
         }
+        UC_INFO_UNLIMITED(
+            "[ASU_PERF] event=asu_store_io_submitted trace_id={} client_task_id={} op={} items={} "
+            "submit_us={} status=0",
+            traceId, taskId, op, entries.Value().size(), ElapsedMicroseconds(start));
+        {
+            std::lock_guard<std::mutex> lock(perfContextsMu_);
+            perfContexts_.emplace(
+                static_cast<Detail::TaskHandle>(taskId),
+                IoPerfContext{traceId, start, std::string(op), entries.Value().size()});
+        }
         return static_cast<Detail::TaskHandle>(taskId);
+    }
+
+    void LogIoCompletion(Detail::TaskHandle taskId, const AsuStatus& status, std::int64_t waitUs)
+    {
+        IoPerfContext context;
+        {
+            std::lock_guard<std::mutex> lock(perfContextsMu_);
+            auto iter = perfContexts_.find(taskId);
+            if (iter == perfContexts_.end()) { return; }
+            context = std::move(iter->second);
+            perfContexts_.erase(iter);
+        }
+        UC_INFO_UNLIMITED(
+            "[ASU_PERF] event=asu_store_io_done trace_id={} client_task_id={} op={} items={} "
+            "total_us={} wait_us={} status={}",
+            context.traceId, taskId, context.op, context.itemCount,
+            ElapsedMicroseconds(context.start), waitUs, static_cast<int>(status.code));
     }
 
     Expected<std::vector<UC::ASU::KVBuffer>> BuildKvBuffers(const Detail::TaskDesc& task) const
@@ -768,11 +841,21 @@ private:
         UC::ASU::MRHandle handle{UC::ASU::kInvalidMRHandle};
     };
 
+    struct IoPerfContext {
+        std::uint64_t traceId{0};
+        std::chrono::steady_clock::time_point start;
+        std::string op;
+        std::size_t itemCount{0};
+    };
+
     Config config_;
     TensorLayout tensorLayout_{TensorLayout::MLA};
     std::unique_ptr<UC::ASU::AsuClient> client_;
     mutable std::mutex persistentRegionsMu_;
     std::vector<RegisteredPersistentRegion> persistentRegions_;
+    mutable std::atomic<std::uint64_t> nextPerfTraceId_{1};
+    std::mutex perfContextsMu_;
+    std::unordered_map<Detail::TaskHandle, IoPerfContext> perfContexts_;
 #ifdef ASU_BUILD_TESTS
     ClientFactory clientFactory_;
 #endif

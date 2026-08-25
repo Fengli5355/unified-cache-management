@@ -75,6 +75,42 @@ Status AddContext(Status status, const std::string& context)
     return status;
 }
 
+std::int64_t DurationMicroseconds(std::chrono::steady_clock::time_point start,
+                                  std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
+
+void LogClientCompletion(const ClientTaskPtr& task)
+{
+    const auto completedAt = std::chrono::steady_clock::now();
+    if (task->lastTransportCompletedAt == std::chrono::steady_clock::time_point{}) {
+        task->lastTransportCompletedAt = completedAt;
+    }
+    UC_INFO_UNLIMITED(
+        "[ASU_PERF] event=asu_client_complete client_task_id={} op={} client_total_us={} "
+        "client_queue_us={} client_scatter_us={} client_transport_us={} client_finalize_us={} "
+        "status={}",
+        task->taskId, AsuOpTypeName(task->opType),
+        DurationMicroseconds(task->submittedAt, completedAt),
+        DurationMicroseconds(task->submittedAt, task->processStartedAt),
+        DurationMicroseconds(task->processStartedAt, task->scatterCompletedAt),
+        DurationMicroseconds(task->scatterCompletedAt, task->lastTransportCompletedAt),
+        DurationMicroseconds(task->lastTransportCompletedAt, completedAt),
+        static_cast<int>(task->finalStatus.code));
+}
+
+void LogClientDispatch(const ClientTaskPtr& task, std::chrono::steady_clock::time_point start,
+                       const Status& status)
+{
+    UC_INFO_UNLIMITED(
+        "[ASU_PERF] event=asu_client_dispatch client_task_id={} op={} transport_tasks={} "
+        "client_dispatch_us={} status={}",
+        task->taskId, AsuOpTypeName(task->opType), task->transportTasks.size(),
+        DurationMicroseconds(start, std::chrono::steady_clock::now()),
+        static_cast<int>(status.code));
+}
+
 }  // namespace
 
 bool ClientTask::Done() const
@@ -124,9 +160,13 @@ Status ClientTaskManager::Process(const ClientTaskPtr& task)
     if (!task) {
         return Status::Error(StatusCode::INVALID_ARGUMENT, "client task context is null");
     }
+    task->processStartedAt = std::chrono::steady_clock::now();
     task->state.store(ClientTaskState::INFLIGHT, std::memory_order_release);
 
     auto status = BuildTransportTasks(task);
+    if (task->scatterCompletedAt == std::chrono::steady_clock::time_point{}) {
+        task->scatterCompletedAt = std::chrono::steady_clock::now();
+    }
     if (!status.ok()) {
         CompleteWithError(task, status);
         return status;
@@ -139,6 +179,8 @@ void ClientTaskManager::CompleteWithError(const ClientTaskPtr& task, const Statu
     std::lock_guard<std::mutex> lock{task->waitMu};
     std::fill(task->entryStatus.begin(), task->entryStatus.end(), status);
     task->finalStatus = status;
+    task->lastTransportCompletedAt = task->scatterCompletedAt;
+    LogClientCompletion(task);
     UC_ERROR("ASU client task failed: client_task_id={} op={} code={} message={}.", task->taskId,
              AsuOpTypeName(task->opType), static_cast<int>(status.code), status.message);
     task->state.store(ClientTaskState::COMPLETED, std::memory_order_release);
@@ -173,6 +215,10 @@ void ClientTaskManager::CompleteTransportTask(const ClientTaskPtr& task,
 
     transportTask->clientCompleted = true;
     transportTask->finalStatus = completionStatus;
+    task->lastTransportCompletedAt =
+        transportTask->completedAt == std::chrono::steady_clock::time_point{}
+            ? std::chrono::steady_clock::now()
+            : transportTask->completedAt;
     for (std::size_t index = 0; index < transportTask->originalIndices.size(); ++index) {
         task->entryStatus[transportTask->originalIndices[index]] =
             !invalidQueryResult && index < result.entryStatus.size() ? result.entryStatus[index]
@@ -204,7 +250,10 @@ void ClientTaskManager::CompleteUndispatchedTransportTasks(const ClientTaskPtr& 
         task->remainingTransportTasks.fetch_sub(1, std::memory_order_acq_rel);
     }
 
-    if (task->AllTransportTasksCompleted()) { Finalize(task); }
+    if (task->AllTransportTasksCompleted()) {
+        task->lastTransportCompletedAt = std::chrono::steady_clock::now();
+        Finalize(task);
+    }
 }
 
 void ClientTaskManager::Finalize(const ClientTaskPtr& task)
@@ -238,20 +287,29 @@ void ClientTaskManager::Finalize(const ClientTaskPtr& task)
         UC_DEBUG("ASU client task completed: client_task_id={} op={} transport_tasks={}.",
                  task->taskId, AsuOpTypeName(task->opType), task->transportTasks.size());
     }
+    LogClientCompletion(task);
     task->state.store(ClientTaskState::COMPLETED, std::memory_order_release);
     task->cv.notify_all();
 }
 
 Status ClientTaskManager::BuildTransportTasks(const ClientTaskPtr& task)
 {
+    const auto scatterStart = task->processStartedAt;
     auto snapshot = task->viewSnapshot;
     if (!snapshot || !snapshot->router || snapshot->transports.empty()) {
         return Status::Error(StatusCode::NOT_INITIALIZED, "client has no ASU transports");
     }
 
+    const auto itemCount = task->opType == AsuOpType::QUERY || task->opType == AsuOpType::DELETE
+                               ? task->keys.size()
+                               : task->entries.size();
+    const auto routeStart = std::chrono::steady_clock::now();
     const auto routes = task->opType == AsuOpType::QUERY || task->opType == AsuOpType::DELETE
                             ? snapshot->router->RouteKeys(ToRouterKeys(task->keys))
                             : snapshot->router->RouteKeys(ExtractEntryKeys(task->entries));
+    const auto routeUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::steady_clock::now() - routeStart)
+                             .count();
     for (const auto& [asuId, indices] : routes) {
         if (snapshot->transports.find(asuId) == snapshot->transports.end()) {
             return AddContext(
@@ -264,6 +322,8 @@ Status ClientTaskManager::BuildTransportTasks(const ClientTaskPtr& task)
     for (const auto& [asuId, indices] : routes) {
         auto transportTask = std::make_shared<TransportTask>();
         transportTask->asuId = asuId;
+        transportTask->clientTaskId = task->taskId;
+        transportTask->clientSubmittedAt = task->submittedAt;
         transportTask->transport = snapshot->transports.at(asuId);
         transportTask->originalIndices.reserve(indices.size());
         if (task->opType == AsuOpType::QUERY || task->opType == AsuOpType::DELETE) {
@@ -284,14 +344,23 @@ Status ClientTaskManager::BuildTransportTasks(const ClientTaskPtr& task)
     std::vector<KVBuffer>{}.swap(task->entries);
     std::vector<CacheKey>{}.swap(task->keys);
     task->remainingTransportTasks.store(task->transportTasks.size(), std::memory_order_release);
+    task->scatterCompletedAt = std::chrono::steady_clock::now();
+    const auto scatterUs = DurationMicroseconds(scatterStart, task->scatterCompletedAt);
+    UC_INFO_UNLIMITED(
+        "[ASU_PERF] event=asu_dht_scatter client_task_id={} op={} items={} asu_count={} "
+        "route_us={} scatter_us={} status=0",
+        task->taskId, AsuOpTypeName(task->opType), itemCount, routes.size(), routeUs, scatterUs);
     return Status::OK();
 }
 
 Status ClientTaskManager::DispatchTask(const ClientTaskPtr& task)
 {
+    const auto dispatchStart = std::chrono::steady_clock::now();
     if (task->transportTasks.empty()) {
         std::lock_guard<std::mutex> lock(task->waitMu);
+        task->lastTransportCompletedAt = dispatchStart;
         Finalize(task);
+        LogClientDispatch(task, dispatchStart, Status::OK());
         return Status::OK();
     }
 
@@ -311,9 +380,11 @@ Status ClientTaskManager::DispatchTask(const ClientTaskPtr& task)
             const auto dispatchStatus =
                 AddContext(status, "asuId=" + std::to_string(transportTask->asuId));
             CompleteUndispatchedTransportTasks(task, taskIndex, dispatchStatus);
+            LogClientDispatch(task, dispatchStart, dispatchStatus);
             return dispatchStatus;
         }
     }
+    LogClientDispatch(task, dispatchStart, Status::OK());
     return Status::OK();
 }
 

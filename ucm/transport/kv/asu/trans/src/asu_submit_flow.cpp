@@ -22,6 +22,7 @@
  * SOFTWARE.
  * */
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <utility>
 #include "connection_internal.h"
@@ -45,6 +46,12 @@ void SetSubBatchSendFailed(TransportSubBatchContext& subBatchContext, const Stat
     std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(), status);
     subBatchContext.state = TransportSubBatchState::COMPLETED;
     subBatchContext.status = status;
+}
+
+std::int64_t DurationMicroseconds(std::chrono::steady_clock::time_point start,
+                                  std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
 
 }  // namespace
@@ -126,14 +133,30 @@ void TransportTaskExecutor::BuildSubBatchSendBuffers(
 }
 
 void TransportTaskExecutor::SendSubBatchBuffers(
-    std::vector<TransportSubBatchContext>& subBatchContexts,
-    const std::vector<TransProvider::SendIoBatch>& ioBatches)
+    TransportTask& task, std::vector<TransportSubBatchContext>& subBatchContexts,
+    const std::vector<TransProvider::SendIoBatch>& ioBatches,
+    std::chrono::steady_clock::time_point sendSetupStart)
 {
-    if (ioBatches.empty()) { return; }
+    if (ioBatches.empty()) {
+        task.sendEndedAt = std::chrono::steady_clock::now();
+        task.sendSetupUs = DurationMicroseconds(sendSetupStart, task.sendEndedAt);
+        return;
+    }
 
     const auto kernelCount = GetSendCountAttr(config_.attrs, "kernel_count");
     const auto quietCount = GetSendCountAttr(config_.attrs, "quiet_count");
+    const auto sendStart = std::chrono::steady_clock::now();
+    task.sendSetupUs = DurationMicroseconds(sendSetupStart, sendStart);
     const auto sendStatuses = transProvider_->Send(ioBatches, kernelCount, quietCount);
+    task.sendEndedAt = std::chrono::steady_clock::now();
+    task.sendUs = DurationMicroseconds(sendStart, task.sendEndedAt);
+    const auto failedSubBatches = std::count_if(sendStatuses.begin(), sendStatuses.end(),
+                                                [](const Status& status) { return !status.ok(); });
+    UC_INFO_UNLIMITED(
+        "[ASU_PERF] event=asu_transport_send client_task_id={} transport_task_id={} asu_id={} "
+        "op={} sub_batches={} send_us={} failed_sub_batches={}",
+        task.clientTaskId, task.taskId, task.asuId, static_cast<int>(task.opType), ioBatches.size(),
+        task.sendUs, failedSubBatches);
     if (sendStatuses.size() != ioBatches.size()) {
         const auto status = Status::Error(StatusCode::INTERNAL_ERROR,
                                           "transport send returned unexpected status count");

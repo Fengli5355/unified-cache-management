@@ -39,6 +39,12 @@ namespace {
 
 constexpr std::size_t kFlagBufferHeaderCopySize = kCqeDwordCount * sizeof(std::uint32_t);
 
+std::int64_t DurationMicroseconds(std::chrono::steady_clock::time_point start,
+                                  std::chrono::steady_clock::time_point end)
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+}
+
 Status CopyDeviceToHost(const ScatterGatherEntry& sge, void* host, std::size_t size)
 {
     if (size > sge.length) {
@@ -192,20 +198,32 @@ bool TransportTaskExecutor::Execute(const TransportTaskPtr& task)
                                              std::memory_order_acq_rel)) {
         return false;
     }
+    task->executeStartedAt = std::chrono::steady_clock::now();
 
     std::vector<TransportSubBatchContext> subBatchContexts;
+    auto phaseStart = task->executeStartedAt;
     auto status = PrepareTaskSubBatches(*task, subBatchContexts);
+    auto phaseEnd = std::chrono::steady_clock::now();
+    task->prepareUs = DurationMicroseconds(phaseStart, phaseEnd);
 
+    phaseStart = phaseEnd;
     if (status.ok()) { status = AssignSubBatchConnections(subBatchContexts); }
+    phaseEnd = std::chrono::steady_clock::now();
+    task->assignUs = DurationMicroseconds(phaseStart, phaseEnd);
 
     std::vector<TransProvider::SendIoBatch> ioBatches;
+    phaseStart = phaseEnd;
     if (status.ok()) { BuildSubBatchSendBuffers(subBatchContexts, ioBatches); }
+    phaseEnd = std::chrono::steady_clock::now();
+    task->buildSendUs = DurationMicroseconds(phaseStart, phaseEnd);
 
     if (!status.ok()) {
+        task->sendEndedAt = std::chrono::steady_clock::now();
+        task->sendSetupUs = DurationMicroseconds(phaseEnd, task->sendEndedAt);
         UC_ERROR("Abort transport task before send task_id={} code={} message={}", task->taskId,
                  static_cast<int>(status.code), status.message);
     } else {
-        SendSubBatchBuffers(subBatchContexts, ioBatches);
+        SendSubBatchBuffers(*task, subBatchContexts, ioBatches, phaseEnd);
     }
 
     bool done = false;

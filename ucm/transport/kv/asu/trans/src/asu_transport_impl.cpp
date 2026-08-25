@@ -241,6 +241,7 @@ Status AsuTransportImpl::CheckHealth()
 Status AsuTransportImpl::Submit(const TransportTaskPtr& task)
 {
     if (!task) { return Status::Error(StatusCode::INVALID_ARGUMENT, "transport task is null"); }
+    task->submittedAt = std::chrono::steady_clock::now();
     const auto entryCount = IsEntryBatchOp(task->opType) ? task->entries.size() : task->keys.size();
     task->entryStatus.assign(entryCount, Status::OK());
     task->deadline = TaskDeadline(config_.timeoutMs);

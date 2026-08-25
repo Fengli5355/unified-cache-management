@@ -85,6 +85,7 @@ struct TransportTask {
     TransportTask();
 
     AsuId asuId{0};
+    TaskId clientTaskId{kInvalidTaskId};
     TaskId taskId{kInvalidTaskId};
     AsuOpType opType{AsuOpType::QUERY};
     std::weak_ptr<AsuTransport> transport;
@@ -96,6 +97,16 @@ struct TransportTask {
 
     std::shared_ptr<TransportSubBatchList> subBatchContexts;
     std::uint32_t remainingSubBatchCount{0};
+    std::chrono::steady_clock::time_point clientSubmittedAt;
+    std::chrono::steady_clock::time_point submittedAt;
+    std::chrono::steady_clock::time_point executeStartedAt;
+    std::chrono::steady_clock::time_point sendEndedAt;
+    std::chrono::steady_clock::time_point completedAt;
+    std::int64_t prepareUs{0};
+    std::int64_t assignUs{0};
+    std::int64_t buildSendUs{0};
+    std::int64_t sendSetupUs{0};
+    std::int64_t sendUs{0};
     std::chrono::steady_clock::time_point deadline{std::chrono::steady_clock::time_point::max()};
     TaskCompletionCallback onComplete;
     std::atomic<bool> completionNotified{false};
@@ -123,6 +134,10 @@ struct ClientTask {
     std::vector<TransportTaskPtr> transportTasks;
     std::vector<Status> entryStatus;
     QueryResult queryResult;
+    std::chrono::steady_clock::time_point submittedAt;
+    std::chrono::steady_clock::time_point processStartedAt;
+    std::chrono::steady_clock::time_point scatterCompletedAt;
+    std::chrono::steady_clock::time_point lastTransportCompletedAt;
 
     std::atomic<std::size_t> remainingTransportTasks{0};
     std::atomic<ClientTaskState> state{ClientTaskState::PENDING};

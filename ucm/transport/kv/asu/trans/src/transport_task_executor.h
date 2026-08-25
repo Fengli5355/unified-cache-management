@@ -24,6 +24,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -82,8 +83,10 @@ private:
     Status AssignSubBatchConnections(std::vector<TransportSubBatchContext>& subBatchContexts);
     void BuildSubBatchSendBuffers(std::vector<TransportSubBatchContext>& subBatchContexts,
                                   std::vector<TransProvider::SendIoBatch>& ioBatches);
-    void SendSubBatchBuffers(std::vector<TransportSubBatchContext>& subBatchContexts,
-                             const std::vector<TransProvider::SendIoBatch>& ioBatches);
+    void SendSubBatchBuffers(TransportTask& task,
+                             std::vector<TransportSubBatchContext>& subBatchContexts,
+                             const std::vector<TransProvider::SendIoBatch>& ioBatches,
+                             std::chrono::steady_clock::time_point sendSetupStart);
 
     void AbortSubBatchesBeforeSend(TransportTask& task,
                                    std::vector<TransportSubBatchContext>& subBatchContexts);
