@@ -53,6 +53,7 @@ UC::ASU::MRHandle MakeTestMrHandle(std::uintptr_t value)
 
 struct FakeAsuClientState {
     std::vector<UC::AsuStore::Config> initConfigs;
+    std::vector<UC::ASU::CacheKey> lastQueryKeys;
     std::vector<UC::ASU::KVBuffer> lastLoadEntries;
     std::vector<UC::ASU::KVBuffer> lastStoreEntries;
     std::vector<UC::ASU::MemoryRegion> registeredRegions;
@@ -86,6 +87,7 @@ public:
                                UC::ASU::TaskId& taskId) override
     {
         if (!initialized_) { return NotInitialized(); }
+        state_->lastQueryKeys = keys;
 
         UC::ASU::TaskResult taskResult;
         taskResult.status = UC::ASU::Status::OK();
@@ -1201,4 +1203,22 @@ TEST(UCAsuStoreTest, RegistersKvCacheRegions)
     ASSERT_EQ(state->registeredRegions.size(), std::size_t{1});
     EXPECT_EQ(state->registeredRegions[0].addr, std::uint64_t{0x1000});
     EXPECT_EQ(state->registeredRegions[0].size, std::uint64_t{1024});
+}
+
+TEST(UCAsuStoreTest, RegisterKvCachesWarmsUpAivProviderWithQuery)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeClient(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.Set("asu_trans_provider_backend", std::string{"aiv"});
+    config.SetNumber("device_id", 0);
+    ASSERT_TRUE(store.Setup(config).Success());
+    const UC::KVCacheRegistration registrations[]{
+        {0x1000, 1024}
+    };
+
+    ASSERT_TRUE(store.RegisterKVCaches(registrations, std::size(registrations)).Success());
+    ASSERT_EQ(state->lastQueryKeys.size(), std::size_t{1});
+    EXPECT_EQ(UC::ASU::CacheKeyView(state->lastQueryKeys[0]), "aaaaaaaa");
 }

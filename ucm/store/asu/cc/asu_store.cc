@@ -347,6 +347,21 @@ public:
             persistentRegions_ = std::move(registered);
         }
         UC_INFO("ASU registered {} persistent KV cache region(s).", regions.size());
+
+        if (config_.transProviderType == UC::ASU::TransProviderType::AIV) {
+            static constexpr std::string_view kWarmupKey = "aaaaaaaa";
+            static_assert(kWarmupKey.size() == UC::ASU::kCacheKeySizeBytes);
+            UC::ASU::CacheKey key{};
+            std::memcpy(key.data(), kWarmupKey.data(), key.size());
+
+            UC::ASU::QueryResult queryResult;
+            status = Query({key}, queryResult);
+            if (!status.ok()) {
+                LogAsuStatus("AIV warmup query", status);
+                return ConvertStatus(status);
+            }
+            UC_INFO("ASU AIV warmup query completed.");
+        }
         return Status::OK();
     }
 
