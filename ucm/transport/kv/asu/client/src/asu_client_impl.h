@@ -24,6 +24,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -149,6 +150,7 @@ private:
     ClientTaskManager taskManager_;
     // Serializes producers and protects the shutdown acceptance boundary.
     std::mutex producerMu_;
+    std::condition_variable workerCv_;
     UC::SpscRingQueue<ClientTaskPtr> taskQueue_;
     std::atomic_bool stopWorker_{true};
     std::thread worker_;

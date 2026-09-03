@@ -129,6 +129,7 @@ Status AsuClientImpl::Shutdown()
         std::lock_guard<std::mutex> lock{producerMu_};
         stopWorker_.store(true, std::memory_order_release);
     }
+    workerCv_.notify_one();
     JoinBackgroundRefresh();
     if (worker_.joinable()) { worker_.join(); }
 
@@ -381,6 +382,7 @@ Status AsuClientImpl::SubmitAsync(AsuOpType opType, const std::vector<KVBuffer>&
             return Status::Error(StatusCode::RESOURCE_BUSY, "client task queue is full");
         }
     }
+    workerCv_.notify_one();
     return Status::OK();
 }
 
@@ -428,6 +430,7 @@ Status AsuClientImpl::SubmitAsync(AsuOpType opType, const std::vector<CacheKey>&
             return Status::Error(StatusCode::RESOURCE_BUSY, "client task queue is full");
         }
     }
+    workerCv_.notify_one();
     return Status::OK();
 }
 
@@ -437,7 +440,7 @@ void AsuClientImpl::WorkerLoop()
         auto status = taskManager_.Process(ctx);
         if (IsRefreshNeeded(status)) { RequestBackgroundRefresh(); }
     };
-    taskQueue_.ConsumerLoop(stopWorker_, processTask);
+    taskQueue_.ConsumerLoop(stopWorker_, producerMu_, workerCv_, processTask);
 
     ClientTaskPtr ctx;
     while (taskQueue_.TryPop(ctx)) { processTask(std::move(ctx)); }
