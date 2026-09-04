@@ -201,6 +201,8 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
             std::to_string(config.fakeBackendLatencyMs);
         transportConfig.attrs["fake_backend.worker_threads"] =
             std::to_string(config.fakeBackendWorkerThreads);
+        transportConfig.attrs["fake_backend.complete_immediately"] =
+            config.fakeBackendCompleteImmediately ? "true" : "false";
         transportConfig.attrs["fake_backend.device_id"] = std::to_string(fakeDeviceId);
         if (transportConfig.endpoints.empty()) {
             UC::ASU::AsuEndpoint endpoint;
@@ -414,6 +416,8 @@ private:
         inConfig.Get("asu_fake_backend_path", config.fakeBackendPath);
         inConfig.GetNumber("asu_fake_backend_latency_ms", config.fakeBackendLatencyMs);
         inConfig.GetNumber("asu_fake_backend_worker_threads", config.fakeBackendWorkerThreads);
+        inConfig.Get("asu_fake_backend_complete_immediately",
+                     config.fakeBackendCompleteImmediately);
         inConfig.GetNumber("asu_shared_provider", config.sharedProviderMode);
         inConfig.Get("asu_sc", config.sc);
         ReadClientAttr(inConfig, "asu_router_type", "hash_table.type", config);
@@ -770,6 +774,8 @@ private:
                 TransProviderBackendName(config.transProviderType));
         UC_INFO("Set AsuStore::FakeBackendPath to {}.", config.fakeBackendPath);
         UC_INFO("Set AsuStore::FakeBackendWorkerThreads to {}.", config.fakeBackendWorkerThreads);
+        UC_INFO("Set AsuStore::FakeBackendCompleteImmediately to {}.",
+                config.fakeBackendCompleteImmediately);
     }
 
     UC::ASU::MRHandle FindPersistentHandle(const UC::ASU::MemoryRegion& region) const
