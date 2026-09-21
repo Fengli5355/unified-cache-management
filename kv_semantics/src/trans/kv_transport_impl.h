@@ -26,6 +26,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -73,7 +74,9 @@ private:
     kv::SpscRingQueue<TransportTaskPtr> executeQueue_;
     std::mutex producerMu_;
     std::condition_variable workerCv_;
+    std::mutex completionMu_;
     std::condition_variable completionCv_;
+    std::deque<TransportTaskPtr> pendingCompletionTasks_;
 
     std::thread worker_;
     std::thread completionWorker_;

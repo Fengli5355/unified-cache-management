@@ -193,6 +193,10 @@ Status AsuTransportImpl::Shutdown()
     stopCompletionWorker_.store(true, std::memory_order_release);
     completionCv_.notify_one();
     if (completionWorker_.joinable()) { completionWorker_.join(); }
+    {
+        std::lock_guard<std::mutex> lock(completionMu_);
+        pendingCompletionTasks_.clear();
+    }
 
     for (const auto& ctx : taskManager_.GetAll()) {
         if (ctx == nullptr) { continue; }
@@ -271,6 +275,10 @@ Status AsuTransportImpl::SubmitTask(const TransportTaskPtr& task)
         task->taskId = kInvalidTaskId;
         return Status::Error(StatusCode::RESOURCE_BUSY, "transport task queue is full");
     }
+    {
+        std::lock_guard<std::mutex> completionLock(completionMu_);
+        pendingCompletionTasks_.emplace_back(task);
+    }
     workerCv_.notify_one();
     completionCv_.notify_one();
     return Status::OK();
@@ -289,24 +297,39 @@ void AsuTransportImpl::WorkerLoop()
 void AsuTransportImpl::CompletionLoop()
 {
     std::size_t noCompletionRounds = 0;
+    std::vector<TransportTaskPtr> activeTasks;
 
     while (!stopCompletionWorker_.load(std::memory_order_acquire)) {
-        const auto tasks = taskManager_.GetAll();
-        if (tasks.empty()) {
+        {
+            std::unique_lock<std::mutex> lock(completionMu_);
+            if (activeTasks.empty()) {
+                completionCv_.wait(lock, [this] {
+                    return stopCompletionWorker_.load(std::memory_order_acquire) ||
+                           !pendingCompletionTasks_.empty();
+                });
+            }
+            while (!pendingCompletionTasks_.empty()) {
+                activeTasks.emplace_back(std::move(pendingCompletionTasks_.front()));
+                pendingCompletionTasks_.pop_front();
+            }
+        }
+
+        if (activeTasks.empty()) {
             noCompletionRounds = 0;
-            std::unique_lock<std::mutex> lock(producerMu_);
-            completionCv_.wait(lock, [this] {
-                return stopCompletionWorker_.load(std::memory_order_acquire) ||
-                       !taskManager_.GetAll().empty();
-            });
             continue;
         }
 
         bool completedTask = false;
-        for (const auto& ctx : tasks) {
+        for (auto iter = activeTasks.begin(); iter != activeTasks.end();) {
+            const auto& ctx = *iter;
             if (taskExecutor_->Poll(ctx)) {
                 taskManager_.NotifyCompletion(ctx);
                 completedTask = true;
+            }
+            if (ctx->Done()) {
+                iter = activeTasks.erase(iter);
+            } else {
+                ++iter;
             }
         }
 
