@@ -73,6 +73,7 @@ private:
     kv::SpscRingQueue<TransportTaskPtr> executeQueue_;
     std::mutex producerMu_;
     std::condition_variable workerCv_;
+    std::condition_variable completionCv_;
 
     std::thread worker_;
     std::thread completionWorker_;
