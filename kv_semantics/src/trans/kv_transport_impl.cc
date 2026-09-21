@@ -190,7 +190,10 @@ Status AsuTransportImpl::Shutdown()
         }
     }
 
-    stopCompletionWorker_.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(completionMu_);
+        stopCompletionWorker_.store(true, std::memory_order_release);
+    }
     completionCv_.notify_one();
     if (completionWorker_.joinable()) { completionWorker_.join(); }
     {
@@ -275,12 +278,7 @@ Status AsuTransportImpl::SubmitTask(const TransportTaskPtr& task)
         task->taskId = kInvalidTaskId;
         return Status::Error(StatusCode::RESOURCE_BUSY, "transport task queue is full");
     }
-    {
-        std::lock_guard<std::mutex> completionLock(completionMu_);
-        pendingCompletionTasks_.emplace_back(task);
-    }
     workerCv_.notify_one();
-    completionCv_.notify_one();
     return Status::OK();
 }
 
@@ -288,9 +286,17 @@ void AsuTransportImpl::WorkerLoop()
 {
     executeQueue_.ConsumerLoop(stopWorker_, producerMu_, workerCv_, [this](TransportTaskPtr task) {
         if (!task) { return; }
-        if (taskExecutor_->Execute(task) || taskExecutor_->Poll(task)) {
+        if (taskExecutor_->Execute(task)) {
             taskManager_.NotifyCompletion(task);
+            return;
         }
+        if (task->Done()) { return; }
+
+        {
+            std::lock_guard<std::mutex> lock(completionMu_);
+            pendingCompletionTasks_.emplace_back(std::move(task));
+        }
+        completionCv_.notify_one();
     });
 }
 
