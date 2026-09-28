@@ -1083,9 +1083,9 @@ struct AICPUTransProvider::Impl {
         param.status_array = workspace.DeviceStatuses();
         param.timeout_ms = sendTimeoutMs;
         param.stats = nullptr;
-        // Staged Hcomm channels use USER_CTL sender CQs. The paired HixlBatchSend
-        // consumes one sender CQE and advances CQ/SQ CI before HcommThreadJoin.
-        param.complete_sender_cqe = 1U;
+        // CQE bring-up stub: return after posting the SQE so the executor can complete
+        // the task after its fixed delay without waiting for a sender CQE.
+        param.complete_sender_cqe = 0U;
 
         aclrtArgsHandle args = nullptr;
         aclrtParamHandle paramHandle = nullptr;
@@ -1179,7 +1179,7 @@ AICPUTransProvider::AICPUTransProvider(const TransportConfig& config)
     KV_INFO(
         "AICPU_TRANSPORT_PROVIDER_SIGNATURE={} pid={} asu_id={} logical_device_id={} "
         "device_source={} provider_context={} protocol=ubg channel_api={} "
-        "send_with_imm=1 complete_sender_cqe=1 publish_mrs=1 mapped_batch_io=1 "
+        "send_with_imm=1 complete_sender_cqe=0 publish_mrs=1 mapped_batch_io=1 "
         "channel_name={}",
         kProviderSignature, static_cast<long>(::getpid()), impl_->config.nodeId,
         impl_->localDeviceId, impl_->deviceSelectionSource,
