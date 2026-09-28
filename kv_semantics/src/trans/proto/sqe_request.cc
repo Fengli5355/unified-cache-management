@@ -42,6 +42,20 @@ namespace {
 
 constexpr std::size_t kFlagBufferHeaderSize = 16;
 
+std::string BytesToHex(const void* data, std::size_t size)
+{
+    static constexpr char kHex[] = "0123456789abcdef";
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    std::string text;
+    text.reserve(size * 2);
+    for (std::size_t index = 0; index < size; ++index) {
+        const auto byte = bytes[index];
+        text.push_back(kHex[byte >> 4]);
+        text.push_back(kHex[byte & 0x0F]);
+    }
+    return text;
+}
+
 Status ValidateSqeMrKeys(const BatchView<KVBuffer>& entries)
 {
     for (std::size_t index = 0; index < entries.size; ++index) {
@@ -161,6 +175,11 @@ Status PackSubBatchRequest(ProtocolManager& protocolManager, BufferManager& send
         SetSubBatchBuildFailed(subBatchContext, status);
         return status;
     }
+
+    KV_INFO_UNLIMITED(
+        "SQE opcode={} cid={} length={} sqe_hex={}", static_cast<int>(opcode), subBatchContext.cid,
+        packedSize,
+        BytesToHex(reinterpret_cast<const void*>(subBatchContext.sendSge.local_addr), packedSize));
 
     subBatchContext.status = status;
     return status;

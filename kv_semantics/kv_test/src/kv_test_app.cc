@@ -119,6 +119,26 @@ CommandOptions BuildEffectiveOptions(const CommandOptions& options, const KvTest
     return effective;
 }
 
+Status PrintTensorData(const std::string& operation,
+                       const std::vector<std::vector<std::uint8_t>>& tensors)
+{
+    KeyValueGenerator generator;
+    for (std::size_t index = 0; index < tensors.size(); ++index) {
+        std::string digest;
+        auto status = generator.Digest(tensors[index], digest);
+        if (!status.Ok()) { return status; }
+        std::cout << operation << "_tensor_hash[" << index << "]=" << digest << '\n';
+    }
+
+    if (tensors.empty()) { return Status::Success(); }
+
+    std::ostringstream data;
+    data << std::hex << std::setfill('0');
+    for (const auto byte : tensors.front()) { data << std::setw(2) << static_cast<int>(byte); }
+    std::cout << operation << "_first_tensor_data=" << data.str() << '\n';
+    return Status::Success();
+}
+
 Status WritePowerCycleMetadata(const CommandOptions& options, const KvTestConfig& config)
 {
     std::error_code errorCode;
@@ -567,6 +587,7 @@ Status KvTestApp::RunStoreLikeCommand(const CommandOptions& options, const KvTes
                                       ? SubmitMode::SINGLE_ENTRY_PER_CALL
                                       : SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
     status = clientRunner.Store(buffers, submitMode, options.timeoutMs, result);
+    if (status.Ok()) { status = PrintTensorData("store", data.values); }
 
     auto unregisterStatus = clientRunner.UnregisterBuffers(buffers);
     if (status.Ok() && !unregisterStatus.Ok()) { status = unregisterStatus; }
@@ -630,8 +651,9 @@ Status KvTestApp::RunRetrieveLikeCommand(const CommandOptions& options, const Kv
                                       ? SubmitMode::SINGLE_ENTRY_PER_CALL
                                       : SubmitMode::ALL_ENTRIES_IN_ONE_CALL;
     status = clientRunner.Retrieve(buffers, submitMode, options.timeoutMs, result);
+    if (status.Ok()) { status = bufferAllocator_.CopyDeviceBuffersToHost(buffers); }
+    if (status.Ok()) { status = PrintTensorData("retrieve", buffers.ownedBuffers); }
     const bool checkResult = options.check || options.command == CommandType::POWER_CYCLE_VERIFY;
-    if (status.Ok() && checkResult) { status = bufferAllocator_.CopyDeviceBuffersToHost(buffers); }
     if (status.Ok() && checkResult) {
         status = consistencyChecker_.CheckRetrieveResult(data, buffers, result, result.consistency);
     }

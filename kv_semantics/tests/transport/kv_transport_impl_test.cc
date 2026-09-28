@@ -92,6 +92,7 @@ protected:
     void SetUp() override
     {
         transport_ = std::make_unique<AsuTransportImpl>();
+        transport_->config_.providerType = TransProviderType::FAKE;
         transport_->SetTransProvider(std::make_unique<StubTransProvider>());
         CreateTaskExecutor(*transport_);
         auto status = transport_->taskExecutor_->sendBufferManager_.Init(
@@ -261,6 +262,110 @@ TEST_F(TransportTaskCompletionTest, PollTaskCompletionsTimesOutAndReleasesResour
     EXPECT_EQ(subBatchContext.flagBuffer.slot_index, UINT32_MAX);
     EXPECT_EQ(channel->GetErrorCount(), std::uint32_t{1});
     EXPECT_EQ(channel->GetState(), ChannelState::ACTIVE);
+}
+
+TEST_F(TransportTaskCompletionTest, AicpuDataCqeStubCompletesAllDataOperations)
+{
+    transport_->config_.providerType = TransProviderType::AICPU;
+    const std::array<AsuOpType, 4> opTypes = {
+        AsuOpType::STORE,
+        AsuOpType::LOAD,
+        AsuOpType::BATCH_STORE,
+        AsuOpType::BATCH_LOAD,
+    };
+
+    for (const auto opType : opTypes) {
+        auto ctx = std::make_shared<TransportTask>();
+        ctx->state.store(TransportTaskState::INFLIGHT, std::memory_order_release);
+        ctx->opType = opType;
+        ctx->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        ctx->sendCompletedAt = std::chrono::steady_clock::now() - std::chrono::seconds(3);
+        ctx->sendReturned.store(true, std::memory_order_release);
+        ctx->entryStatus.assign(1, Status::OK());
+        ctx->subBatchContexts->resize(1);
+        ctx->remainingSubBatchCount = 1;
+        auto& subBatchContext = (*ctx->subBatchContexts)[0];
+        subBatchContext.opType = opType;
+        subBatchContext.entryStatus.assign(1, Status::OK());
+
+        EXPECT_TRUE(transport_->taskExecutor_->Poll(ctx));
+        EXPECT_TRUE(ctx->finalStatus.ok());
+        EXPECT_EQ(ctx->state.load(std::memory_order_acquire), TransportTaskState::COMPLETED);
+        EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
+        EXPECT_TRUE(subBatchContext.status.ok());
+        ASSERT_EQ(subBatchContext.entryStatus.size(), std::size_t{1});
+        EXPECT_TRUE(subBatchContext.entryStatus[0].ok());
+    }
+}
+
+TEST_F(TransportTaskCompletionTest, AicpuDataCqeStubIgnoresCqeBeforeDelay)
+{
+    transport_->config_.providerType = TransProviderType::AICPU;
+    auto ctx = std::make_shared<TransportTask>();
+    ctx->state.store(TransportTaskState::INFLIGHT, std::memory_order_release);
+    ctx->opType = AsuOpType::BATCH_STORE;
+    ctx->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    ctx->sendCompletedAt = std::chrono::steady_clock::now();
+    ctx->sendReturned.store(true, std::memory_order_release);
+    ctx->entryStatus.assign(1, Status::OK());
+    ctx->subBatchContexts->resize(1);
+    ctx->remainingSubBatchCount = 1;
+
+    auto& subBatchContext = (*ctx->subBatchContexts)[0];
+    subBatchContext.cid = 123;
+    subBatchContext.opType = AsuOpType::BATCH_STORE;
+    subBatchContext.entryStatus.assign(1, Status::OK());
+    ASSERT_TRUE(
+        transport_->taskExecutor_->flagBufferManager_
+            .Allocate((kCqeDwordCount + 1) * sizeof(std::uint32_t), subBatchContext.flagBuffer)
+            .ok());
+    auto* cqe = reinterpret_cast<std::uint32_t*>(subBatchContext.flagBuffer.local_addr);
+    cqe[3] = subBatchContext.cid;
+
+    EXPECT_FALSE(transport_->taskExecutor_->Poll(ctx));
+    EXPECT_EQ(ctx->state.load(std::memory_order_acquire), TransportTaskState::INFLIGHT);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::PENDING);
+    EXPECT_NE(subBatchContext.flagBuffer.slot_index, UINT32_MAX);
+
+    EXPECT_TRUE(transport_->taskExecutor_->Cancel(ctx));
+}
+
+TEST_F(TransportTaskCompletionTest, AicpuDataCqeStubReleasesResourcesWithoutUpdatingHealth)
+{
+    transport_->config_.providerType = TransProviderType::AICPU;
+    auto* provider = transport_->transProvider_.get();
+    transport_->connManager_ = std::make_unique<ConnectionManager>(*provider, "", 5000, 3);
+    ASSERT_TRUE(transport_->connManager_->AddGroup(NodeEndpoint{}, 1).ok());
+    auto channel = transport_->connManager_->SelectConnection();
+    ASSERT_NE(channel, nullptr);
+    transport_->connManager_->ReportFailure(channel);
+    ASSERT_EQ(channel->GetErrorCount(), std::uint32_t{1});
+
+    auto ctx = std::make_shared<TransportTask>();
+    ctx->state.store(TransportTaskState::INFLIGHT, std::memory_order_release);
+    ctx->opType = AsuOpType::LOAD;
+    ctx->deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    ctx->sendCompletedAt = std::chrono::steady_clock::now() - std::chrono::seconds(3);
+    ctx->sendReturned.store(true, std::memory_order_release);
+    ctx->entryStatus.assign(1, Status::OK());
+    ctx->subBatchContexts->resize(1);
+    ctx->remainingSubBatchCount = 1;
+
+    auto& subBatchContext = (*ctx->subBatchContexts)[0];
+    subBatchContext.opType = AsuOpType::LOAD;
+    subBatchContext.entryStatus.assign(1, Status::OK());
+    subBatchContext.channel = channel;
+    ASSERT_TRUE(
+        transport_->taskExecutor_->sendBufferManager_.Allocate(64, subBatchContext.sendSge).ok());
+    ASSERT_TRUE(
+        transport_->taskExecutor_->flagBufferManager_.Allocate(64, subBatchContext.flagBuffer)
+            .ok());
+
+    EXPECT_TRUE(transport_->taskExecutor_->Poll(ctx));
+    EXPECT_EQ(subBatchContext.sendSge.slot_index, UINT32_MAX);
+    EXPECT_EQ(subBatchContext.flagBuffer.slot_index, UINT32_MAX);
+    EXPECT_EQ(channel->GetInflightCount(), std::uint32_t{0});
+    EXPECT_EQ(channel->GetErrorCount(), std::uint32_t{1});
 }
 
 TEST_F(TransportTaskCompletionTest, ExecutionTimeoutCountsEachSubBatch)

@@ -1021,6 +1021,15 @@ struct AICPUTransProvider::Impl {
         if (getRet != ACL_SUCCESS) {
             return AclError("aclrtBinaryGetFunction HixlBatchSend", getRet);
         }
+        KV_WARN(
+            "[SendTrace] kernel_loaded json_path={} kernel={} binary={} function={} "
+            "batch_abi_size={} imm_offset={} param_abi_size={} timeout_offset={} "
+            "stats_offset={} complete_offset={}",
+            hixlKernelJsonPath, kBatchSendKernelName, static_cast<const void*>(hixlBin),
+            static_cast<const void*>(func), sizeof(UcmHixlSendIoBatch),
+            offsetof(UcmHixlSendIoBatch, imm_data), sizeof(UcmHixlBatchSendParam),
+            offsetof(UcmHixlBatchSendParam, timeout_ms), offsetof(UcmHixlBatchSendParam, stats),
+            offsetof(UcmHixlBatchSendParam, complete_sender_cqe));
         hixlFunc.store(func, std::memory_order_release);
         return Status::OK();
     }
@@ -1083,9 +1092,29 @@ struct AICPUTransProvider::Impl {
         param.status_array = workspace.DeviceStatuses();
         param.timeout_ms = sendTimeoutMs;
         param.stats = nullptr;
-        // Staged Hcomm channels use USER_CTL sender CQs. The paired HixlBatchSend
-        // consumes one sender CQE and advances CQ/SQ CI before HcommThreadJoin.
-        param.complete_sender_cqe = 1U;
+        // CQE bring-up stub: return after posting the SQE so the executor can complete
+        // the task after its fixed delay without waiting for a sender CQE.
+        param.complete_sender_cqe = 0U;
+
+        KV_WARN(
+            "[SendTrace] params pid={} device={} stream={} function={} thread={} "
+            "batches={} io_host={} io_device={} status_host={} status_device={} "
+            "timeout_ms={} complete_sender_cqe={}",
+            getpid(), localDeviceId, static_cast<const void*>(connection.stream),
+            static_cast<const void*>(func), param.thread, param.batch_size,
+            static_cast<const void*>(workspace.HostBatches()),
+            static_cast<const void*>(param.io_batches),
+            static_cast<const void*>(workspace.HostStatuses()),
+            static_cast<const void*>(param.status_array), param.timeout_ms,
+            param.complete_sender_cqe);
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            const auto& batch = workspace.HostBatches()[i];
+            KV_WARN(
+                "[SendTrace] entry index={} channel={} local_src={} len={} imm=0x{:x} "
+                "reserved={} initial_status={}",
+                i, batch.channel, batch.local_src, batch.len, batch.imm_data, batch.reserved,
+                workspace.HostStatuses()[i]);
+        }
 
         aclrtArgsHandle args = nullptr;
         aclrtParamHandle paramHandle = nullptr;
@@ -1123,7 +1152,10 @@ struct AICPUTransProvider::Impl {
 
         std::atomic_thread_fence(std::memory_order_acquire);
         auto* statuses = static_cast<volatile std::uint32_t*>(workspace.HostStatuses());
-        for (std::size_t i = 0; i < hixlStatuses.size(); ++i) { hixlStatuses[i] = statuses[i]; }
+        for (std::size_t i = 0; i < hixlStatuses.size(); ++i) {
+            hixlStatuses[i] = statuses[i];
+            KV_WARN("[SendTrace] result index={} status={}", i, hixlStatuses[i]);
+        }
         return Status::OK();
     }
 
@@ -1179,7 +1211,7 @@ AICPUTransProvider::AICPUTransProvider(const TransportConfig& config)
     KV_INFO(
         "AICPU_TRANSPORT_PROVIDER_SIGNATURE={} pid={} asu_id={} logical_device_id={} "
         "device_source={} provider_context={} protocol=ubg channel_api={} "
-        "send_with_imm=1 complete_sender_cqe=1 publish_mrs=1 mapped_batch_io=1 "
+        "send_with_imm=1 complete_sender_cqe=0 publish_mrs=1 mapped_batch_io=1 "
         "channel_name={}",
         kProviderSignature, static_cast<long>(::getpid()), impl_->config.nodeId,
         impl_->localDeviceId, impl_->deviceSelectionSource,

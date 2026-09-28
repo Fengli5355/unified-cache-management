@@ -35,6 +35,17 @@
 
 namespace kv {
 
+namespace {
+
+constexpr auto kAicpuCqeStubDelay = std::chrono::seconds(3);
+
+bool IsAicpuDataCqeStubTask(const TransportConfig& config, const TransportTask& task)
+{
+    return config.providerType == TransProviderType::AICPU && IsEntryBatchOp(task.opType);
+}
+
+}  // namespace
+
 TransportTaskExecutor::TransportTaskExecutor(
     const TransportConfig& config, const std::shared_ptr<TransProvider>& transProvider,
     const std::unique_ptr<ConnectionManager>& connectionManager)
@@ -388,7 +399,23 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         }
         if (task->subBatchContexts->empty()) { return false; }
 
-        if (std::chrono::steady_clock::now() >= task->deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool useAicpuCqeStub = IsAicpuDataCqeStubTask(config_, *task);
+        if (useAicpuCqeStub && task->sendReturned.load(std::memory_order_acquire) &&
+            now - task->sendCompletedAt >= kAicpuCqeStubDelay) {
+            for (auto& subBatchContext : *task->subBatchContexts) {
+                if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
+
+                std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
+                          Status::OK());
+                CompleteSubBatch(*task, subBatchContext, Status::OK());
+            }
+            task->TryFinalizeFromSubBatches();
+            KV_WARN(
+                "AICPU data task completed by CQE stub after {} ms: task_id={} op_type={}",
+                std::chrono::duration_cast<std::chrono::milliseconds>(kAicpuCqeStubDelay).count(),
+                task->taskId, static_cast<int>(task->opType));
+        } else if (now >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
                 Status::Error(StatusCode::TIMEOUT, "transport task execution timeout");
@@ -403,7 +430,7 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
             }
             task->finalStatus = timeoutStatus;
             task->state.store(TransportTaskState::COMPLETED, std::memory_order_release);
-        } else {
+        } else if (!useAicpuCqeStub) {
             for (auto& subBatchContext : *task->subBatchContexts) {
                 if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
 
