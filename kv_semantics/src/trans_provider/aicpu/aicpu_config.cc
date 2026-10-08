@@ -175,15 +175,26 @@ EndpointLocType ResolveLocType(const TransportConfig& config, const NodeEndpoint
 Status FillCommAddr(const std::string& text, CommAddr& out)
 {
     if (TryFillEidCommAddr(text, out)) {
-        KV_INFO("AICPUTransProvider: parsed HCOMM endpoint address as EID addr={}", text);
+        KV_INFO(
+            "AICPUTransProvider: parsed HCOMM endpoint address addr={} addr_type=eid "
+            "family=not_applicable",
+            text);
         return Status::OK();
     }
     if (inet_pton(AF_INET, text.c_str(), &out.addr) == 1) {
         out.type = COMM_ADDR_TYPE_IP_V4;
+        KV_INFO(
+            "AICPUTransProvider: parsed HCOMM endpoint address addr={} addr_type=ipv4 "
+            "family=AF_INET({})",
+            text, AF_INET);
         return Status::OK();
     }
     if (inet_pton(AF_INET6, text.c_str(), &out.addr6) == 1) {
         out.type = COMM_ADDR_TYPE_IP_V6;
+        KV_INFO(
+            "AICPUTransProvider: parsed HCOMM endpoint address addr={} addr_type=ipv6 "
+            "family=AF_INET6({})",
+            text, AF_INET6);
         return Status::OK();
     }
     const auto parsed = ParseConfigUint64(text, std::numeric_limits<std::uint64_t>::max());
