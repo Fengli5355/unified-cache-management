@@ -21,6 +21,7 @@ public:
 private:
     Status RunCommand(const CommandOptions& options, const KvTestConfig& config,
                       KvClientRunner& clientRunner, CommandResult& result);
+    Status RunConnectReuseCommand(const KvTestConfig& config, KvClientRunner& clientRunner);
     Status RunStoreLikeCommand(const CommandOptions& options, const KvTestConfig& config,
                                KvClientRunner& clientRunner, CommandResult& result);
     Status RunRetrieveLikeCommand(const CommandOptions& options, const KvTestConfig& config,

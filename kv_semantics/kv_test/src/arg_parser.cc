@@ -11,6 +11,7 @@ std::string CommandTypeName(CommandType command)
 {
     switch (command) {
         case CommandType::CONNECT: return "connect";
+        case CommandType::CONNECT_REUSE: return "connect-reuse";
         case CommandType::CONFIG_CHECK: return "config check";
         case CommandType::STORE: return "store";
         case CommandType::RETRIEVE: return "retrieve";
@@ -93,6 +94,7 @@ CommandType ParseCommand(const std::string& command)
 {
     static const std::unordered_map<std::string, CommandType> kCommands = {
         {"connect",        CommandType::CONNECT       },
+        {"connect-reuse",  CommandType::CONNECT_REUSE },
         {"version",        CommandType::VERSION       },
         {"store",          CommandType::STORE         },
         {"retrieve",       CommandType::RETRIEVE      },

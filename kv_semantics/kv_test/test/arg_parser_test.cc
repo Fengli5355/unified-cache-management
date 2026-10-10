@@ -36,6 +36,16 @@ TEST(ArgParserTest, NonBenchCountKeepsKeyGenerationCount)
     EXPECT_EQ(options.ioCount, 0U);
 }
 
+TEST(ArgParserTest, ParsesConnectReuseCommand)
+{
+    CommandOptions options;
+    auto status = ParseArguments({"kv-test", "connect-reuse"}, options);
+
+    ASSERT_TRUE(status.Ok()) << status.message;
+    EXPECT_EQ(options.command, CommandType::CONNECT_REUSE);
+    EXPECT_EQ(CommandTypeName(options.command), "connect-reuse");
+}
+
 TEST(ArgParserTest, BenchCountMustBePositive)
 {
     CommandOptions options;

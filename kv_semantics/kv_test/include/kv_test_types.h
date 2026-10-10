@@ -13,6 +13,7 @@ constexpr std::uint64_t kDefaultMemoryMaxBytes = 4ULL * 1024ULL * 1024ULL * 1024
 
 enum class CommandType {
     CONNECT = 0,
+    CONNECT_REUSE,
     CONFIG_CHECK,
     STORE,
     RETRIEVE,

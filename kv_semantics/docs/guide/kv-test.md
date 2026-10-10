@@ -103,6 +103,7 @@ Supported commands:
 | Command | Current behavior |
 | --- | --- |
 | `connect` | Initializes the ASU client and exits. |
+| `connect-reuse` | Initializes the ASU client, then performs two memory register/unregister rounds on the same connection without sending KV IO. |
 | `config check` | Loads config, validates fixed kv-test behavior constraints, prints selected config values, and exits. |
 | `version` | Prints `kv-test version <value>`, where the value is read from `version.ini`. |
 | `store` | Stores all selected entries in one ASU client call in the current implementation. |
@@ -370,6 +371,19 @@ kv-test connect --configpath ./ucm/transport/kv/kv-test/kv_test.conf
 
 The tool loads config, creates the ASU client, initializes it, opens the output
 directory, writes a summary, shuts the client down, and exits.
+
+### connect-reuse
+
+```bash
+kv-test connect-reuse --configpath ./ucm/transport/kv/kv-test/kv_test.conf
+```
+
+The command initializes the ASU client once and keeps the resulting transports
+alive while it performs two memory register/unregister rounds. For the AICPU
+staged-channel provider, each registration updates the existing channel's local
+memory information. The command does not submit a KV SQE or ring the send
+doorbell. It is intended to diagnose whether a channel remains usable after
+connection setup.
 
 ### config check
 

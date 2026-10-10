@@ -201,6 +201,7 @@ void PrintGeneralHelp()
         << "  KV_TEST_CONFIG=<path>    Default config file path when --configpath is omitted.\n\n"
         << "Commands:\n"
         << "  connect\n"
+        << "  connect-reuse\n"
         << "  config check\n"
         << "  version\n"
         << "  store | retrieve | delete | exist\n"
@@ -229,6 +230,7 @@ void PrintGeneralHelp()
         << "Examples:\n"
         << "  export KV_TEST_CONFIG=/abs/path/to/kv_test.conf\n"
         << "  kv-test connect\n"
+        << "  kv-test connect-reuse\n"
         << "  kv-test store --key hello --check\n"
         << "  kv-test retrieve --keys hello,world --check\n"
         << "  kv-test delete --keys-file ./keys.txt\n"
@@ -240,6 +242,11 @@ void PrintCommandHelp(CommandType command)
     switch (command) {
         case CommandType::CONNECT:
             std::cout << "Usage: kv-test connect [--configpath <path>] [--timeout <ms>]\n";
+            break;
+        case CommandType::CONNECT_REUSE:
+            std::cout << "Usage: kv-test connect-reuse [--configpath <path>]\n"
+                      << "       Reuses the initialized connection for two memory "
+                         "register/unregister rounds without sending KV IO.\n";
             break;
         case CommandType::CONFIG_CHECK:
             std::cout << "Usage: kv-test config check [--configpath <path>]\n";
@@ -523,6 +530,7 @@ Status KvTestApp::RunCommand(const CommandOptions& options, const KvTestConfig& 
 {
     switch (options.command) {
         case CommandType::CONNECT: return Status::Success();
+        case CommandType::CONNECT_REUSE: return RunConnectReuseCommand(config, clientRunner);
         case CommandType::CONFIG_CHECK:
         case CommandType::VERSION: return Status::Success();
         case CommandType::STORE:
@@ -539,6 +547,41 @@ Status KvTestApp::RunCommand(const CommandOptions& options, const KvTestConfig& 
         case CommandType::UNKNOWN:
         default: return Status::Error(kExitInvalidArgument, "unknown kv-test command");
     }
+}
+
+Status KvTestApp::RunConnectReuseCommand(const KvTestConfig& config, KvClientRunner& clientRunner)
+{
+    constexpr std::size_t kProbeBufferSize = 64;
+    constexpr std::size_t kProbeRoundCount = 2;
+
+    GeneratedData data;
+    kv::CacheKey key{};
+    auto status = StringToCacheKey("connect-reuse-probe", "connect-reuse", key);
+    if (!status.Ok()) { return status; }
+    data.keys.emplace_back(key);
+    data.values.emplace_back(kProbeBufferSize, 0xA5U);
+
+    BufferSet buffers;
+    status = bufferAllocator_.BuildStoreBuffers(data, PayloadPlacementForConfig(config),
+                                                AllocationPolicyForConfig(config),
+                                                ResolvePayloadDeviceId(config), buffers);
+    if (!status.Ok()) { return status; }
+
+    for (std::size_t round = 0; round < kProbeRoundCount; ++round) {
+        status = clientRunner.RegisterBuffers(buffers);
+        if (!status.Ok()) {
+            (void)clientRunner.UnregisterBuffers(buffers);
+            return status;
+        }
+
+        std::cout << "connect_reuse_round=" << round + 1
+                  << " registered_regions=" << buffers.registeredRegions.size() << '\n';
+
+        status = clientRunner.UnregisterBuffers(buffers);
+        if (!status.Ok()) { return status; }
+    }
+
+    return Status::Success();
 }
 
 Status KvTestApp::RunStoreLikeCommand(const CommandOptions& options, const KvTestConfig& config,
