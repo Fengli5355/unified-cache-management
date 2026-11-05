@@ -582,27 +582,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             windowStartedAt = sampleAt;
         };
 
-        auto recordOutcome = [&](const OperationOutcome& outcome) {
-            if (!outcome.status.Ok()) {
-                ++result.benchMetrics.errorCount;
-                if (collectStats) { ++windowErrors; }
-                result.status = outcome.status;
-                return outcome.status;
-            }
-            if (!collectStats) { return Status::Success(); }
-
-            measuredLatenciesUs.push_back(outcome.latencyUs);
-            ++result.benchMetrics.completedOperations;
-            result.benchMetrics.completedEntries += outcome.entryCount;
-            result.benchMetrics.completedBytes += outcome.bytes;
-            metrics::UpdateStats(outcome.isRead ? KV_METRIC("kv_test_bench_retrieve_bytes_total")
-                                                : KV_METRIC("kv_test_bench_store_bytes_total"),
-                                 static_cast<double>(outcome.bytes));
-            ++windowOperationCount;
-            windowEntryCount += outcome.entryCount;
-            windowBytes += outcome.bytes;
-            windowLatencyUs += outcome.latencyUs;
-
+        auto advanceProgressWindow = [&]() {
             const auto elapsedSec =
                 std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - phaseStart)
                     .count() +
@@ -616,11 +596,34 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 windowErrors = 0;
                 windowLatencyUs = 0.0;
             }
-            return Status::Success();
+        };
+
+        auto recordOutcome = [&](const OperationOutcome& outcome) {
+            if (!outcome.status.Ok()) {
+                if (collectStats) {
+                    ++result.benchMetrics.errorCount;
+                    ++windowErrors;
+                    advanceProgressWindow();
+                }
+                return;
+            }
+            if (!collectStats) { return; }
+
+            measuredLatenciesUs.push_back(outcome.latencyUs);
+            ++result.benchMetrics.completedOperations;
+            result.benchMetrics.completedEntries += outcome.entryCount;
+            result.benchMetrics.completedBytes += outcome.bytes;
+            metrics::UpdateStats(outcome.isRead ? KV_METRIC("kv_test_bench_retrieve_bytes_total")
+                                                : KV_METRIC("kv_test_bench_store_bytes_total"),
+                                 static_cast<double>(outcome.bytes));
+            ++windowOperationCount;
+            windowEntryCount += outcome.entryCount;
+            windowBytes += outcome.bytes;
+            windowLatencyUs += outcome.latencyUs;
+            advanceProgressWindow();
         };
 
         auto drainPending = [&](bool waitForAll) {
-            Status finalStatus = Status::Success();
             for (auto iter = pending.begin(); iter != pending.end();) {
                 if (!waitForAll &&
                     iter->wait_for(std::chrono::microseconds(0)) != std::future_status::ready) {
@@ -630,10 +633,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 auto outcome = iter->get();
                 iter = pending.erase(iter);
                 availableSlots.emplace_back(outcome.bufferSlotIndex);
-                auto outcomeStatus = recordOutcome(outcome);
-                if (finalStatus.Ok() && !outcomeStatus.Ok()) { finalStatus = outcomeStatus; }
+                recordOutcome(outcome);
             }
-            return finalStatus;
         };
 
         auto shouldContinue = [&]() {
@@ -644,11 +645,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             std::this_thread::sleep_until(nextSubmit);
             if (ioCount == 0 && Clock::now() >= phaseEnd) { break; }
 
-            auto drainStatus = drainPending(false);
-            if (!drainStatus.Ok()) {
-                (void)drainPending(true);
-                return drainStatus;
-            }
+            drainPending(false);
 
             const auto begin =
                 static_cast<std::size_t>((operationIndex * entryCountPerOperation) % keyCount);
@@ -667,7 +664,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 auto growStatus =
                     ValidateBenchBufferConfig(bench, newPoolEntryCount, config.memoryMaxBytes);
                 if (!growStatus.Ok()) {
-                    (void)drainPending(true);
+                    drainPending(true);
                     return growStatus;
                 }
 
@@ -686,7 +683,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 }
                 if (!growStatus.Ok()) {
                     (void)UnregisterBenchBuffers(clientRunner, newSlot);
-                    (void)drainPending(true);
+                    drainPending(true);
                     return growStatus;
                 }
                 bufferPool.emplace_back(std::move(newSlot.front()));
@@ -702,7 +699,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 currentOperationIndex, keyPrefix, useDeviceBuffers, taskId);
             if (!submitStatus.Ok()) {
                 availableSlots.emplace_back(bufferSlotIndex);
-                (void)drainPending(true);
+                drainPending(true);
                 return submitStatus;
             }
 
@@ -717,15 +714,14 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 (void)WaitBenchOperation(config, clientRunner, taskId, operationStart,
                                          currentEntryCount, bufferSlotIndex, isRead);
                 availableSlots.emplace_back(bufferSlotIndex);
-                (void)drainPending(true);
+                drainPending(true);
                 return Status::Error(kExitInvalidArgument, "bench completion submission failed: " +
                                                                std::string(error.what()));
             }
             nextSubmit += ioInterval;
         }
 
-        auto drainStatus = drainPending(true);
-        if (!drainStatus.Ok()) { return drainStatus; }
+        drainPending(true);
 
         if (collectStats && (windowOperationCount != 0 || windowErrors != 0)) {
             emitProgressSample(windowOperationCount);
