@@ -252,7 +252,7 @@ Mooncake 指标用于判断**数据是否由 Mooncake 提供、是否下探后�
 
 ### 1.6 ASU / KV 指标
 
-ASU 将以下 37 个 KV 指标（23 个 Counter、14 个 Histogram）接入 UCM 采集器。以下 KV 指标使用 `kv:` 前缀。提交计数反映 KV API 调用及条目数量，不代表去重后的推理请求数，也不代表异步任务成功完成数。
+ASU 将以下 39 个 KV 指标（25 个 Counter、14 个 Histogram）接入 UCM 采集器。以下 KV 指标使用 `kv:` 前缀。提交计数反映 KV API 调用及条目数量，不代表去重后的推理请求数，也不代表异步任务成功完成数。kv-test bench 字节 Counter 仅统计测量阶段成功完成的操作，不包含预热流量。
 
 生成器的 `--check` 会校验英文、中文和旧版参考文档中 KV 表格的名称、类型分组、重复、遗漏和数量。说明文字与单位仍由人工维护；`--sync-ucm` 不会重写这些表格。
 
@@ -299,6 +299,8 @@ adapter 使用现有 UCM `UpdateStats()` 接口。采集器尚未初始化或指
 | `kv:kv_transport_task_completion_timeouts_total` | 次 | KV transport 任务完成等待超时次数 |
 | `kv:kv_transport_task_io_timeouts_total` | 次 | KV transport 子批次 IO 超时次数 |
 | `kv:kv_transport_task_connection_errors_total` | 次 | KV transport 连接错误次数 |
+| `kv:kv_test_bench_store_bytes_total` | 字节 | kv-test bench 测量阶段成功完成的 store 负载累计字节数 |
+| `kv:kv_test_bench_retrieve_bytes_total` | 字节 | kv-test bench 测量阶段成功完成的 retrieve 负载累计字节数 |
 
 #### Histograms
 

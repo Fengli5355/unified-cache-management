@@ -252,7 +252,7 @@ For slow loads, inspect queuing, batch-get, backend waits and H2D. For slow save
 
 ### 1.6 ASU / KV metrics
 
-ASU forwards these 37 KV metrics (23 Counters and 14 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions.
+ASU forwards these 39 KV metrics (25 Counters and 14 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions. The kv-test bench byte counters count only successfully completed operations in the measured phase; warmup traffic is excluded.
 
 The generator's `--check` validates KV table names, type sections, duplicates, omissions, and counts in the English, Chinese, and legacy references. Descriptions and units remain manually maintained; `--sync-ucm` does not rewrite these tables.
 
@@ -299,6 +299,8 @@ The adapter uses the existing UCM `UpdateStats()` API. Samples are silently skip
 | `kv:kv_transport_task_completion_timeouts_total` | count | Total KV transport task completion timeouts |
 | `kv:kv_transport_task_io_timeouts_total` | count | Total KV transport sub-batch IO timeouts |
 | `kv:kv_transport_task_connection_errors_total` | count | Total KV transport connection errors |
+| `kv:kv_test_bench_store_bytes_total` | bytes | Total successfully completed store payload bytes measured by kv-test bench |
+| `kv:kv_test_bench_retrieve_bytes_total` | bytes | Total successfully completed retrieve payload bytes measured by kv-test bench |
 
 #### Histograms
 
