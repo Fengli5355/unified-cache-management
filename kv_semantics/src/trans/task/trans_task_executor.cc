@@ -338,6 +338,12 @@ bool TransportTaskExecutor::Execute(const TransportTaskPtr& task)
         metrics::UpdateStats(preSendUpdates, std::size(preSendUpdates));
         SendSubBatchBuffers(subBatchContexts, ioBatches);
         task->sendCompletedAt = std::chrono::steady_clock::now();
+        KV_DEBUG("[CompletionTrace] send_return task_id={} queue_us={} prepare_us={} send_call_us={} timeout_ms={}",
+                 task->taskId,
+                 std::chrono::duration_cast<std::chrono::microseconds>(processingStartedAt - task->submittedAt).count(),
+                 std::chrono::duration_cast<std::chrono::microseconds>(preSendAt - processingStartedAt).count(),
+                 std::chrono::duration_cast<std::chrono::microseconds>(task->sendCompletedAt - preSendAt).count(),
+                 config_.timeoutMs);
         task->sendReturned.store(true, std::memory_order_release);
         const metrics::MetricUpdate sendUpdates[] = {
             {KV_METRIC("kv_transport_task_send_duration_seconds"),
@@ -389,6 +395,14 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         if (task->subBatchContexts->empty()) { return false; }
 
         const auto pollAt = std::chrono::steady_clock::now();
+        for (auto& sub : *task->subBatchContexts) {
+            if (sub.state == TransportSubBatchState::COMPLETED) { continue; }
+            const auto previous = sub.diagnosticPollCount == 0 ? task->sendCompletedAt : sub.diagnosticLastPoll;
+            sub.diagnosticMaxPollGap = std::max(sub.diagnosticMaxPollGap,
+                std::chrono::duration_cast<std::chrono::microseconds>(pollAt - previous));
+            sub.diagnosticLastPoll = pollAt;
+            ++sub.diagnosticPollCount;
+        }
         if (pollAt >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
@@ -419,6 +433,12 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                     std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->deadline)
                         .count());
 
+                KV_ERROR("[CompletionTrace] timeout task_id={} cid={} polls={} read_errors={} cid_mismatches={} last_cid={} max_poll_gap_us={} timeout_ms={} deadline_budget_us={} after_send_us={}",
+                         task->taskId, subBatchContext.cid, subBatchContext.diagnosticPollCount,
+                         subBatchContext.diagnosticReadErrors, subBatchContext.diagnosticCidMismatches,
+                         subBatchContext.diagnosticLastCid, subBatchContext.diagnosticMaxPollGap.count(), config_.timeoutMs,
+                         std::chrono::duration_cast<std::chrono::microseconds>(task->deadline - task->submittedAt).count(),
+                         std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->sendCompletedAt).count());
                 std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                           timeoutStatus);
                 connManager_->ReportFailure(subBatchContext.channel);
@@ -443,9 +463,19 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 if (const auto status =
                         protocolManager_.PollResponseCid(responseData, completedCid);
                     !status.ok()) {
+                    ++subBatchContext.diagnosticReadErrors;
                     continue;
                 }
-                if (completedCid == 0 || completedCid != subBatchContext.cid) { continue; }
+                subBatchContext.diagnosticLastCid = completedCid;
+                if (completedCid == 0 || completedCid != subBatchContext.cid) {
+                    if (completedCid != 0) { ++subBatchContext.diagnosticCidMismatches; }
+                    continue;
+                }
+                KV_DEBUG("[CompletionTrace] response task_id={} cid={} polls={} max_poll_gap_us={} after_send_us={} total_us={}",
+                         task->taskId, completedCid, subBatchContext.diagnosticPollCount,
+                         subBatchContext.diagnosticMaxPollGap.count(),
+                         std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->sendCompletedAt).count(),
+                         std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->submittedAt).count());
 
                 KvResponse response;
                 const auto batchNumber =

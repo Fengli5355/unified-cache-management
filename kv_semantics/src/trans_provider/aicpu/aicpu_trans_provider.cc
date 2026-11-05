@@ -1663,6 +1663,8 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
             continue;
         }
         for (std::size_t groupIndex = 0; groupIndex < hixlStatuses.size(); ++groupIndex) {
+            KV_DEBUG("[SendTrace] batch_status pid={} channel={} batch_index={} status={}",
+                     getpid(), group.connection->channel, group.originalIndexes[groupIndex], hixlStatuses[groupIndex]);
             if (hixlStatuses[groupIndex] == 0U) { continue; }
             const auto originalIndex = group.originalIndexes[groupIndex];
             results[originalIndex] = Status::Error(

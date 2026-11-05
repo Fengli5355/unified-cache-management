@@ -23,6 +23,7 @@
  * */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -36,6 +37,13 @@
 namespace kv {
 
 struct TransportSubBatchContext {
+    // Diagnostic state is protected by the task mutex.
+    std::uint64_t diagnosticPollCount{0};
+    std::uint64_t diagnosticReadErrors{0};
+    std::uint64_t diagnosticCidMismatches{0};
+    std::uint16_t diagnosticLastCid{0};
+    std::chrono::steady_clock::time_point diagnosticLastPoll{};
+    std::chrono::microseconds diagnosticMaxPollGap{0};
     std::uint16_t cid{0};
     AsuOpType opType{AsuOpType::QUERY};
     TransportSubBatchState state{TransportSubBatchState::PENDING};
