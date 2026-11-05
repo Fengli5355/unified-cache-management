@@ -388,13 +388,29 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         }
         if (task->subBatchContexts->empty()) { return false; }
 
-        if (std::chrono::steady_clock::now() >= task->deadline) {
+        const auto pollAt = std::chrono::steady_clock::now();
+        if (pollAt >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
                 Status::Error(StatusCode::TIMEOUT, "transport task execution timeout");
             std::fill(task->entryStatus.begin(), task->entryStatus.end(), timeoutStatus);
             for (auto& subBatchContext : *task->subBatchContexts) {
                 if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
+
+                std::uint16_t completedCid = 0;
+                const void* responseData =
+                    reinterpret_cast<void*>(subBatchContext.flagBuffer.local_addr);
+                (void)protocolManager_.PollResponseCid(responseData, completedCid);
+                const auto channelId = subBatchContext.channel == nullptr
+                                           ? 0
+                                           : subBatchContext.channel->GetChannelId();
+                KV_ERROR(
+                    "Transport task completion timeout task_id={} expected_cid={} actual_cid={} "
+                    "channel_id={} task_age_us={} timeout_ms={}",
+                    task->taskId, subBatchContext.cid, completedCid, channelId,
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->submittedAt)
+                        .count(),
+                    config_.timeoutMs);
 
                 std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                           timeoutStatus);
