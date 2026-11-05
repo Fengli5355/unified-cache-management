@@ -39,6 +39,8 @@ namespace kv {
 
 namespace {
 
+constexpr auto kCompletionPollDelayWarning = std::chrono::milliseconds(100);
+
 std::chrono::steady_clock::time_point TaskDeadline(std::uint64_t timeoutMs)
 {
     if (timeoutMs == 0) { return std::chrono::steady_clock::time_point::max(); }
@@ -286,14 +288,28 @@ void AsuTransportImpl::WorkerLoop()
 void AsuTransportImpl::CompletionLoop()
 {
     std::size_t noCompletionRounds = 0;
+    auto lastPollAt = std::chrono::steady_clock::now();
+    bool hadInflightTasks = false;
 
     while (!stopCompletionWorker_.load(std::memory_order_acquire)) {
+        const auto pollStartedAt = std::chrono::steady_clock::now();
         const auto tasks = taskManager_.GetAll();
         if (tasks.empty()) {
             noCompletionRounds = 0;
+            hadInflightTasks = false;
+            lastPollAt = pollStartedAt;
             std::this_thread::sleep_for(std::chrono::microseconds(50));
             continue;
         }
+
+        const auto pollGap = pollStartedAt - lastPollAt;
+        if (hadInflightTasks && pollGap >= kCompletionPollDelayWarning) {
+            KV_WARN("Transport completion poll delayed gap_us={} inflight_tasks={}",
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollGap).count(),
+                    tasks.size());
+        }
+        hadInflightTasks = true;
+        lastPollAt = pollStartedAt;
 
         bool completedTask = false;
         for (const auto& ctx : tasks) {

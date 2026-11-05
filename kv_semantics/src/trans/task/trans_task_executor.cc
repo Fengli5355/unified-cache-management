@@ -388,13 +388,36 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         }
         if (task->subBatchContexts->empty()) { return false; }
 
-        if (std::chrono::steady_clock::now() >= task->deadline) {
+        const auto pollAt = std::chrono::steady_clock::now();
+        if (pollAt >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
                 Status::Error(StatusCode::TIMEOUT, "transport task execution timeout");
             std::fill(task->entryStatus.begin(), task->entryStatus.end(), timeoutStatus);
             for (auto& subBatchContext : *task->subBatchContexts) {
                 if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
+
+                std::uint16_t completedCid = 0;
+                const void* responseData =
+                    reinterpret_cast<void*>(subBatchContext.flagBuffer.local_addr);
+                (void)protocolManager_.PollResponseCid(responseData, completedCid);
+                const auto channelId = subBatchContext.channel == nullptr
+                                           ? 0
+                                           : subBatchContext.channel->GetChannelId();
+                KV_ERROR(
+                    "Transport task completion timeout diagnostics task_id={} expected_cid={} "
+                    "actual_cid={} flag_slot={} flag_local_addr={} flag_device_addr={} "
+                    "flag_token_id={} channel_id={} send_returned={} task_age_us={} "
+                    "deadline_late_us={}",
+                    task->taskId, subBatchContext.cid, completedCid,
+                    subBatchContext.flagBuffer.slot_index, subBatchContext.flagBuffer.local_addr,
+                    subBatchContext.flagBuffer.device_addr, subBatchContext.flagBuffer.tokenId,
+                    channelId, task->sendReturned.load(std::memory_order_acquire),
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt -
+                                                                          task->submittedAt)
+                        .count(),
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->deadline)
+                        .count());
 
                 std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                           timeoutStatus);
