@@ -296,6 +296,8 @@ The adapter uses the existing UCM `UpdateStats()` API. Samples are silently skip
 | `kv:kv_transport_task_completion_timeouts_total` | count | Total KV transport task completion timeouts |
 | `kv:kv_transport_task_io_timeouts_total` | count | Total KV transport sub-batch IO timeouts |
 | `kv:kv_transport_task_connection_errors_total` | count | Total KV transport connection errors |
+| `kv:kv_test_bench_store_bytes_total` | bytes | Total successfully completed store payload bytes measured by kv-test bench |
+| `kv:kv_test_bench_retrieve_bytes_total` | bytes | Total successfully completed retrieve payload bytes measured by kv-test bench |
 
 #### Histograms
 

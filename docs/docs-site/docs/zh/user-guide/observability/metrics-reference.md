@@ -296,6 +296,8 @@ adapter 使用现有 UCM `UpdateStats()` 接口。采集器尚未初始化或指
 | `kv:kv_transport_task_completion_timeouts_total` | 次 | KV transport 任务完成等待超时次数 |
 | `kv:kv_transport_task_io_timeouts_total` | 次 | KV transport 子批次 IO 超时次数 |
 | `kv:kv_transport_task_connection_errors_total` | 次 | KV transport 连接错误次数 |
+| `kv:kv_test_bench_store_bytes_total` | 字节 | kv-test bench 测量阶段成功完成的 store 负载累计字节数 |
+| `kv:kv_test_bench_retrieve_bytes_total` | 字节 | kv-test bench 测量阶段成功完成的 retrieve 负载累计字节数 |
 
 #### Histograms
 

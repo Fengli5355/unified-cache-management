@@ -18,6 +18,7 @@
 #include <thread>
 #include "buffer_allocator.h"
 #include "key_value_generator.h"
+#include "kv_metrics/metrics.h"
 #include "kv_test_config_helpers.h"
 #include "payload_buffer_runtime.h"
 
@@ -44,6 +45,7 @@ struct OperationOutcome {
     std::size_t entryCount{0};
     std::size_t bufferSlotIndex{0};
     std::uint64_t bytes{0};
+    bool isRead{false};
 };
 
 using BenchBufferPool = std::vector<BenchBufferSlot>;
@@ -429,7 +431,8 @@ Status SubmitBenchOperation(BenchOpType requestedOp, const KvTestConfig& config,
 OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& clientRunner,
                                     kv::TaskId taskId,
                                     std::chrono::steady_clock::time_point operationStart,
-                                    std::size_t entryCount, std::size_t bufferSlotIndex)
+                                    std::size_t entryCount, std::size_t bufferSlotIndex,
+                                    bool isRead)
 {
     CommandResult operationResult;
     auto opStatus =
@@ -443,6 +446,7 @@ OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& 
     outcome.entryCount = entryCount;
     outcome.bufferSlotIndex = bufferSlotIndex;
     outcome.bytes = entryCount * config.bench.ioSize;
+    outcome.isRead = isRead;
     return outcome;
 }
 
@@ -583,6 +587,9 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             ++result.benchMetrics.completedOperations;
             result.benchMetrics.completedEntries += outcome.entryCount;
             result.benchMetrics.completedBytes += outcome.bytes;
+            metrics::UpdateStats(outcome.isRead ? KV_METRIC("kv_test_bench_retrieve_bytes_total")
+                                                : KV_METRIC("kv_test_bench_store_bytes_total"),
+                                 static_cast<double>(outcome.bytes));
             ++windowOperationCount;
             windowEntryCount += outcome.entryCount;
             windowBytes += outcome.bytes;
@@ -645,6 +652,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                           remainingEntryCount}));
             scheduledEntryCount += currentEntryCount;
             const auto currentOperationIndex = operationIndex++;
+            const bool isRead = IsBenchReadOperation(bench.op, currentOperationIndex, config.bench);
             if (availableSlots.empty()) {
                 const auto newPoolEntryCount =
                     entryCountPerOperation * static_cast<std::uint64_t>(bufferPool.size() + 1);
@@ -691,14 +699,15 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             }
 
             try {
-                pending.emplace_back(executor->Submit([&, taskId, operationStart, currentEntryCount,
-                                                       bufferSlotIndex]() -> OperationOutcome {
-                    return WaitBenchOperation(config, clientRunner, taskId, operationStart,
-                                              currentEntryCount, bufferSlotIndex);
-                }));
+                pending.emplace_back(
+                    executor->Submit([&, taskId, operationStart, currentEntryCount, bufferSlotIndex,
+                                      isRead]() -> OperationOutcome {
+                        return WaitBenchOperation(config, clientRunner, taskId, operationStart,
+                                                  currentEntryCount, bufferSlotIndex, isRead);
+                    }));
             } catch (const std::exception& error) {
                 (void)WaitBenchOperation(config, clientRunner, taskId, operationStart,
-                                         currentEntryCount, bufferSlotIndex);
+                                         currentEntryCount, bufferSlotIndex, isRead);
                 availableSlots.emplace_back(bufferSlotIndex);
                 (void)drainPending(true);
                 return Status::Error(kExitInvalidArgument, "bench completion submission failed: " +

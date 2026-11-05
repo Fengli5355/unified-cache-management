@@ -331,6 +331,8 @@ TEST_F(StandaloneMetricsTest, ExposesKvTestCoreBuiltInMetrics)
         {KV_METRIC("kv_transport_task_send_call_duration_seconds"),  0.0001},
         {KV_METRIC("kv_transport_task_completion_duration_seconds"), 0.001 },
         {KV_METRIC("kv_transport_task_e2e_duration_seconds"),        0.002 },
+        {KV_METRIC("kv_test_bench_store_bytes_total"),               4096.0},
+        {KV_METRIC("kv_test_bench_retrieve_bytes_total"),            8192.0},
     };
     UpdateStats(updates, std::size(updates));
     Flush();
@@ -346,6 +348,8 @@ TEST_F(StandaloneMetricsTest, ExposesKvTestCoreBuiltInMetrics)
               std::string::npos);
     EXPECT_NE(response.find("kv:kv_transport_task_e2e_duration_seconds_count 1"),
               std::string::npos);
+    EXPECT_NE(response.find("kv:kv_test_bench_store_bytes_total 4096"), std::string::npos);
+    EXPECT_NE(response.find("kv:kv_test_bench_retrieve_bytes_total 8192"), std::string::npos);
     Shutdown();
 }
 
