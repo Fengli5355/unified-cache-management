@@ -10,38 +10,22 @@ that library, then reads kv-test-specific options from the same file.
 
 ## Build and environment
 
-`kv-test` is built from `ucm/transport/kv/kv-test/CMakeLists.txt`. The
-`kv_client` and `kv_transport` shared libraries are built as separate
-artifacts and loaded by `kv-test` at runtime with `dlopen`.
-
-`kv-test` is included only when ASU support is enabled:
+Build the AICPU example from the repository root:
 
 ```bash
-cmake -S . -B build-kv-test -DBUILD_UCM_ASU=ON -DBUILD_UCM_STORE=OFF -DBUILD_UNIT_TESTS=OFF -DRUNTIME_ENVIRONMENT=ascend -DBUILD_KV_CLIENT_PROVIDER_FAKE=ON
-cmake --build build-kv-test --target kv_transport kv_client
-cmake --build build-kv-test --target kv-test
+BUILD_KV_CLIENT_PROVIDER_AICPU=ON BUILD_KV_CLIENT_PROVIDER_FAKE=OFF bash kv_semantics/kv_test/build.sh
+source kv_semantics/kv_test/set_kvtest_env.sh
+kv-test connect --configpath ./kv_semantics/kv_test/kv_test_aicpu.conf
 ```
 
-Provider implementations are selected at build time:
+The build directory defaults to `build-kv-test`; override it with `BUILD_DIR`.
+Use the matching CANN/HCOMM environment and staged server in `--conn-mode rm`.
+Replace the example local and remote EIDs with actual device endpoints.
 
-| CMake option | Default | Extra dependency |
-| --- | --- | --- |
-| `BUILD_KV_CLIENT_PROVIDER_AICPU` | `OFF` | Reserved for the AICPU provider library. |
-| `BUILD_KV_CLIENT_PROVIDER_FAKE` | `ON` | None. |
-| `BUILD_KV_CLIENT_PROVIDER_AIV` | `OFF` | `libumc.a`, found through `KV_CLIENT_AIV_PROVIDER_ROOT`. |
-
-The configured `transport.provider_type` must be built into `kv_transport`.
-For example, real AIV testing needs:
-
-```bash
-cmake -S . -B build-kv-test -DBUILD_UCM_ASU=ON -DBUILD_UCM_STORE=OFF -DBUILD_UNIT_TESTS=OFF -DRUNTIME_ENVIRONMENT=ascend -DBUILD_KV_CLIENT_PROVIDER_FAKE=ON -DBUILD_KV_CLIENT_PROVIDER_AIV=ON -DKV_CLIENT_AIV_PROVIDER_ROOT=/path/to/aiv/provider
-```
-
-The same build can be started from any working directory with:
-
-```bash
-bash ucm/transport/kv/kv-test/build.sh
-```
+Currently, local device and remote ASU EIDs are explicitly written into the
+config and view files. This is a current implementation limitation. Future
+work must discover EIDs automatically and remove EIDs from configuration;
+automatic discovery is not implemented yet.
 
 If the shared libraries are not discoverable from the dynamic linker search
 path or from the default build-tree sibling directory, set
@@ -51,7 +35,7 @@ or export `KV_TEST_ASU_CLIENT_LIB` and `KV_TEST_ASU_TRANSPORT_LIB`.
 The example environment script is:
 
 ```bash
-source ucm/transport/kv/kv-test/set_kvtest_env.sh
+source kv_semantics/kv_test/set_kvtest_env.sh
 ```
 
 Use `source` if the exported `KV_TEST_CONFIG` and `PATH` must remain visible in
@@ -61,13 +45,13 @@ script process and does not update the caller's shell.
 The bundled example config is:
 
 ```text
-ucm/transport/kv/kv-test/kv_test.conf
+kv_semantics/kv_test/kv_test_aicpu.conf
 ```
 
 The bundled example view file is:
 
 ```text
-kv_semantics/kv_test/kv_client_view.conf
+kv_semantics/kv_test/kv_view_aicpu.conf
 ```
 
 The sample config uses relative paths such as `view.config_path`,
@@ -174,47 +158,37 @@ The config file format is `key=value`. Empty lines and lines beginning with
 Example:
 
 ```ini
-client.client_id=kv-test-client-0
-wait_timeout_ms=5000
-# Optional when libasu_client.so/libasu_transport.so are not discoverable.
-# asu.client_library_path=/path/to/libasu_client.so
-# asu.transport_library_path=/path/to/libasu_transport.so
-
-fake_backend.path=./kv-test-fake-backend-store
-fake_backend.latency_us=1000
-fake_backend.worker_threads=4
-fake_backend.complete_immediately=true
-
-view.config_path=./kv_semantics/kv_test/kv_client_view.conf
+client.client_id=kv-test-aicpu-client-0
+wait_timeout_ms=30000
+view.config_path=./kv_semantics/kv_test/kv_view_aicpu.conf
 client.use_batch_io_for_single_key=true
 client.hash_table.type=RING_HASH
 client.ring_hash.virtual_node_count=128
 client.asu_shared_provider=0
-
-transport.asu_ids=1,2,3
-transport.provider_type=FAKE
+transport.asu_ids=1
+transport.provider_type=AICPU
+transport.aicpu_hcomm_protocol=ubg
 transport.device_id=0
-asu_info.1=protocol=TCP,local.comm_id=127.0.0.1,port=19001
-asu_info.2=protocol=TCP,local.comm_id=127.0.0.1,port=19002
-asu_info.3=protocol=TCP,local.comm_id=127.0.0.1,port=19003
-
-kv.key_prefix=kv-test-key-
+# Current: explicit EID configuration. Future: automatic discovery, no EIDs in config.
+transport.aicpu_local_eid.0=eid:00112233445566778899aabbccddeeff
+transport.timeout=30000
+asu_info.1=local.comm_id=eid:ffeeddccbbaa99887766554433221100,port=19001
+transport.kv_ns_id=1
+transport.sc=true
+kv.key_prefix=k
 kv.seed=20260530
 kv.value_size=4096
-kv.count=16
-
+kv.count=1
 limits.memory_max_bytes=4294967296
-
 bench.io_size=4096
-bench.io_interval_us=1000
 bench.concurrency=1
+bench.io_interval_us=1000
 bench.duration_sec=10
 bench.warmup_sec=1
 bench.read_ratio=50
 bench.write_ratio=50
-bench.batch_size=16
-
-output.path=./kv-test-output
+bench.batch_size=10
+output.path=./kv-test-output/aicpu
 output.realtime_file_max_bytes=104857600
 ```
 
@@ -224,7 +198,7 @@ These fields are parsed by the ASU client config parser:
 
 | Field | Description |
 | --- | --- |
-| `client_id` | Client identifier. |
+| `client.client_id` | Client identifier. |
 | `view_service_addrs` | View service addresses. |
 | `view.config_path` | File used by the default `ConfigFileViewServer`. |
 | `wait_timeout_ms` | Client wait and transport task timeout in milliseconds. |
@@ -232,11 +206,11 @@ These fields are parsed by the ASU client config parser:
 | `transport.provider_type` | Transport provider used by `AsuTransportImpl`. Supported values are `AICPU`, `FAKE`, and `AIV`. The selected provider must also be enabled in CMake. The aliases `transport.provider_backend`, `transport.trans_provider_type`, and `transport.trans_provider_backend` are also accepted. |
 | `transport.device_id` | Local logical device id used to initialize the transport provider. |
 | `asu_info.<id>` | Endpoint config for one ASU. |
-| `hash_table.type` | Router hash table type. |
-| `ring_hash.virtual_node_count` | Ring hash virtual node count. |
-| `maglev.table_size` | Maglev table size. |
-| `contiguous_block_affinity.*` | Contiguous block affinity options. |
-| `batch_topk_affinity.*` | Batch top-k affinity options. |
+| `client.hash_table.type` | Router hash table type. |
+| `client.ring_hash.virtual_node_count` | Ring hash virtual node count. |
+| `client.maglev.table_size` | Maglev table size. |
+| `client.contiguous_block_affinity.*` | Contiguous block affinity options. |
+| `client.batch_topk_affinity.*` | Batch top-k affinity options. |
 
 When `view.config_path` is set, the loaded view is the ASU membership used by
 `KvClient`. Every ASU id in that view must have a matching `transport.asu_ids`
@@ -245,14 +219,16 @@ endpoint information such as `asu_info.<id>`. If `view.config_path` is omitted
 and `view_service_addrs` is empty, the default view is derived from
 `transport.asu_ids`.
 
+Additional current fields: `client.max_inflight_tasks` is submission queue capacity; `client.asu_shared_provider` selects independent (0) or shared (1) providers; `client.use_batch_io_for_single_key` selects batch protocol for single-entry IO. `transport.aicpu_hcomm_protocol` selects `ubg` or `ubc_ctp`; `transport.aicpu_local_eid.<device_id>` sets the local UBG EID, while `transport.aicpu_local_ip.<device_id>` sets the UBC_CTP address. `transport.timeout` is milliseconds. `transport.kv_ns_id` is the SQE namespace, not a Router selector; `transport.sc` is the SQE SC flag. Only Ring Hash and Maglev are in the documented supported Router scope.
+
 ### kv-test-only fields
 
 These fields are parsed by `kv-test` itself:
 
 | Field | Description |
 | --- | --- |
-| `asu.client_library_path` | Optional `libasu_client.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_CLIENT_LIB` is also accepted. |
-| `asu.transport_library_path` | Optional `libasu_transport.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_TRANSPORT_LIB` is also accepted. |
+| `asu.client_library_path` | Optional `libkv_client.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_CLIENT_LIB` is also accepted. |
+| `asu.transport_library_path` | Optional `libkv_transport.so` path used by kv-test's runtime proxy. The environment variable `KV_TEST_ASU_TRANSPORT_LIB` is also accepted. |
 | `fake_backend.path` | FAKE provider storage root. Defaults to `./kv-test-fake-backend-store`. |
 | `fake_backend.latency_us` | Mock backend completion delay in microseconds. Default is `1000`. |
 | `fake_backend.worker_threads` | Number of FAKE provider IO workers. Default is `4`. |
@@ -340,17 +316,17 @@ means delete failed.
 FakeBackend smoke scripts live under:
 
 ```text
-ucm/transport/kv/kv-test/scripts/
+kv_semantics/kv_test/scripts/
 ```
 
 They can be run after `kv-test` is built and discoverable in `PATH`, or by
 setting `KV_TEST_BIN` to the executable path:
 
 ```bash
-export KV_TEST_BIN=./build-kv-test/ucm/transport/kv/kv-test/kv-test
-bash ucm/transport/kv/kv-test/scripts/test_fake_backend_single_asu.sh
-bash ucm/transport/kv/kv-test/scripts/test_fake_backend_multi_asu.sh
-bash ucm/transport/kv/kv-test/scripts/test_fake_backend_protocol_results.sh
+export KV_TEST_BIN=./build-kv-test/kv_semantics/kv_test/kv-test
+bash kv_semantics/kv_test/scripts/test_fake_backend_single_asu.sh
+bash kv_semantics/kv_test/scripts/test_fake_backend_multi_asu.sh
+bash kv_semantics/kv_test/scripts/test_fake_backend_protocol_results.sh
 ```
 
 Each script keeps its generated config, command logs, fake store, trace files,
@@ -367,7 +343,7 @@ Set `KV_TEST_SCRIPT_LOG_DIR` to place these artifacts elsewhere.
 ### connect
 
 ```bash
-kv-test connect --configpath ./ucm/transport/kv/kv-test/kv_test.conf
+kv-test connect --configpath ./kv_semantics/kv_test/kv_test_aicpu.conf
 ```
 
 The tool loads config, creates the ASU client, initializes it, opens the output
@@ -376,7 +352,7 @@ directory, writes a summary, shuts the client down, and exits.
 ### config check
 
 ```bash
-kv-test config check --configpath ./ucm/transport/kv/kv-test/kv_test.conf
+kv-test config check --configpath ./kv_semantics/kv_test/kv_test_aicpu.conf
 ```
 
 The command validates config loading and fixed kv-test behavior constraints. It
@@ -494,6 +470,13 @@ With `--progress`, bench prints one measured progress line per second instead
 of rewriting a terminal line. The final summary and report output are still
 written after the run.
 
+When the standalone metrics endpoint is enabled, bench also exports
+`kv:kv_test_bench_store_bytes_total` and
+`kv:kv_test_bench_retrieve_bytes_total`. These counters include payload bytes
+only for operations that complete successfully during the measured phase;
+warmup and failed operations are excluded. The `kv-client Metrics` Grafana
+dashboard derives aggregate and per-instance bandwidth from their rates.
+
 ## Output
 
 For commands other than `config check`, the result writer creates:
@@ -573,7 +556,7 @@ so they do not overlap the kv-test layer's exit codes.
 ## Examples
 
 ```bash
-export KV_TEST_CONFIG=./ucm/transport/kv/kv-test/kv_test.conf
+export KV_TEST_CONFIG=./kv_semantics/kv_test/kv_test_aicpu.conf
 
 kv-test config check
 kv-test connect
