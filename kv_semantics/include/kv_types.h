@@ -206,6 +206,8 @@ struct TransportConfig {
 enum class SharedProviderMode : std::uint8_t { INDEPENDENT = 0, SHARED = 1 };
 
 struct KvClientConfig {
+    static Status LoadFromFile(const std::string& configPath, KvClientConfig& config);
+
     std::string clientId;
     std::vector<std::string> viewServiceAddrs;
 
@@ -214,6 +216,8 @@ struct KvClientConfig {
     std::uint32_t maxInflightTasks{1024};
     std::uint64_t defaultWaitTimeoutMs{100};
     std::uint64_t timeoutMs{100};
+    // Keep single-key requests on the currently supported batch IO path by default.
+    bool useBatchIoForSingleKey{true};
     SharedProviderMode sharedProviderMode{SharedProviderMode::INDEPENDENT};
     std::unordered_map<std::string, std::string> attrs;
 };

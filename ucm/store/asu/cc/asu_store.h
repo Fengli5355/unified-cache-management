@@ -30,6 +30,7 @@ struct Config {
     std::uint64_t queryTimeoutMs{500};
     std::uint64_t maxErrorCount{2};
     std::uint64_t clientMaxInflightTasks{1024};
+    bool useBatchIoForSingleKey{true};
     std::uint64_t transportMaxInflightTasks{1024};
     std::uint64_t completionPollSpinLimit{16};
     std::uint64_t maxInflightBytes{1ULL << 30};
