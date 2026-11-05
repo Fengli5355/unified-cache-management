@@ -559,19 +559,27 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         std::uint64_t windowErrors = 0;
         double windowLatencyUs = 0.0;
         std::uint64_t currentSecond = 1;
+        auto windowStartedAt = phaseStart;
 
         auto emitProgressSample = [&](std::uint64_t operationsPerSec) {
             BenchRealtimeSample sample;
             sample.timestampSec = currentSecond;
             sample.op = bench.op;
-            sample.bandwidthBytesPerSec = static_cast<double>(windowBytes);
-            sample.iops = static_cast<double>(windowEntryCount);
+            const auto sampleAt = Clock::now();
+            const double windowSeconds = std::chrono::duration<double>(sampleAt - windowStartedAt).count();
+            sample.bandwidthBytesPerSec = windowSeconds > 0.0 ? windowBytes / windowSeconds : 0.0;
+            sample.iops = windowSeconds > 0.0 ? windowEntryCount / windowSeconds : 0.0;
             sample.avgLatencyUs = windowOperationCount == 0
                                       ? 0.0
                                       : windowLatencyUs / static_cast<double>(windowOperationCount);
             sample.errorCount = windowErrors;
             result.benchMetrics.realtimeSamples.emplace_back(sample);
-            if (options.progress) { PrintProgressSample(sample, operationsPerSec); }
+            if (options.progress) {
+                PrintProgressSample(sample, windowSeconds > 0.0
+                                                ? static_cast<std::uint64_t>(operationsPerSec / windowSeconds)
+                                                : 0);
+            }
+            windowStartedAt = sampleAt;
         };
 
         auto recordOutcome = [&](const OperationOutcome& outcome) {
