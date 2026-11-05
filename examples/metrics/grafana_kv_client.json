@@ -33,11 +33,11 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Aggregate successful kv-test bench payload bandwidth. Warmup and failed operations are excluded.",
+      "description": "Latest scrape-to-scrape successful payload bandwidth (irate). Requires two samples; scrape and aggregation intervals limit resolution. Warmup and failures excluded.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "orange", "mode": "fixed"}, "decimals": 2, "unit": "Bps"}, "overrides": []},
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "text": {"valueSize": 32}, "textMode": "auto", "wideLayout": true},
-      "targets": [{"expr": "(sum(rate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval])) or vector(0)) + (sum(rate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval])) or vector(0))", "refId": "A"}],
+      "targets": [{"expr": "(sum(irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval])) or vector(0)) + (sum(irate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval])) or vector(0))", "refId": "A", "instant": true, "range": false}],
       "title": "kv-test Bench Bandwidth",
       "type": "stat"
     },
@@ -371,33 +371,33 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Successful measured-phase payload bandwidth across all kv-test instances. Total is store plus retrieve; warmup and failed operations are excluded.",
+      "description": "Latest scrape-to-scrape measured-phase payload bandwidth (irate; requires two samples) across all kv-test instances. Total is store plus retrieve; warmup and failed operations are excluded.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 8, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "decimals": 2, "unit": "Bps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 71},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
-        {"expr": "(sum(rate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval])) or vector(0)) + (sum(rate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval])) or vector(0))", "legendFormat": "total", "refId": "A"},
-        {"expr": "sum(rate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval]))", "legendFormat": "store", "refId": "B"},
-        {"expr": "sum(rate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval]))", "legendFormat": "retrieve", "refId": "C"}
+        {"expr": "(sum(irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval])) or vector(0)) + (sum(irate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval])) or vector(0))", "legendFormat": "total", "refId": "A"},
+        {"expr": "sum(irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval]))", "legendFormat": "store", "refId": "B"},
+        {"expr": "sum(irate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval]))", "legendFormat": "retrieve", "refId": "C"}
       ],
       "title": "Aggregate Successful Bandwidth",
       "type": "timeseries"
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Successful measured-phase payload bandwidth split by Prometheus target and kv-test worker_id.",
+      "description": "Latest scrape-to-scrape measured-phase payload bandwidth (irate; requires two samples), split by target and worker_id.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 8, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "decimals": 2, "unit": "Bps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 71},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
-        {"expr": "sum by (instance, worker_id) (rate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval]))", "legendFormat": "{{worker_id}} ({{instance}}) store", "refId": "A"},
-        {"expr": "sum by (instance, worker_id) (rate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval]))", "legendFormat": "{{worker_id}} ({{instance}}) retrieve", "refId": "B"}
+        {"expr": "sum by (instance, worker_id) (irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval]))", "legendFormat": "{{worker_id}} ({{instance}}) store", "refId": "A"},
+        {"expr": "sum by (instance, worker_id) (irate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval]))", "legendFormat": "{{worker_id}} ({{instance}}) retrieve", "refId": "B"}
       ],
       "title": "Bandwidth by kv-test Instance",
       "type": "timeseries"
     }
   ],
-  "refresh": "",
+  "refresh": "5s",
   "schemaVersion": 39,
   "tags": ["kv", "kv-client"],
   "templating": {"list": [
