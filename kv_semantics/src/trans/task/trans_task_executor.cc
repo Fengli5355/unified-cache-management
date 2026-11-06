@@ -447,6 +447,11 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 if (const auto status = protocolManager_.UnpackResponse(
                         responseData, ToKvOpcode(subBatchContext.opType), batchNumber, response);
                     !status.ok()) {
+                    KV_ERROR(
+                        "Transport response decode failed task_id={} node_id={} op_type={} "
+                        "cid={} code={} message={}",
+                        task->taskId, config_.nodeId, static_cast<int>(subBatchContext.opType),
+                        completedCid, static_cast<int>(status.code), status.message);
                     completeWithError(status);
                     continue;
                 }
@@ -460,6 +465,22 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 const auto status = subBatchContext.status.ok() || queryResultBufferStatus
                                         ? Status::OK()
                                         : subBatchContext.status;
+                if (!status.ok()) {
+                    KV_ERROR(
+                        "Transport response failed task_id={} node_id={} op_type={} cid={} "
+                        "cqe_status=0x{:x} code={} message={} result_count={} first_result=0x{:x} "
+                        "flag_local_addr=0x{:x} "
+                        "flag_device_addr=0x{:x} task_age_us={}",
+                        task->taskId, config_.nodeId, static_cast<int>(subBatchContext.opType),
+                        completedCid, response.status, static_cast<int>(status.code),
+                        status.message, response.result_buffer.size(),
+                        response.result_buffer.empty() ? 0U : response.result_buffer.front(),
+                        subBatchContext.flagBuffer.local_addr,
+                        subBatchContext.flagBuffer.device_addr,
+                        std::chrono::duration_cast<std::chrono::microseconds>(pollAt -
+                                                                              task->submittedAt)
+                            .count());
+                }
                 if (status.code == StatusCode::CQE_INTERNAL_ERROR ||
                     status.code == StatusCode::CQE_IO_TIMEOUT) {
                     if (status.code == StatusCode::CQE_IO_TIMEOUT) {
