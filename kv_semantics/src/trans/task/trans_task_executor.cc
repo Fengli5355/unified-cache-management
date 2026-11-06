@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -408,7 +408,8 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                     "Transport task completion timeout task_id={} expected_cid={} actual_cid={} "
                     "channel_id={} task_age_us={} timeout_ms={}",
                     task->taskId, subBatchContext.cid, completedCid, channelId,
-                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt - task->submittedAt)
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt -
+                                                                          task->submittedAt)
                         .count(),
                     config_.timeoutMs);
 

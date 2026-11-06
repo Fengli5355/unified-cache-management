@@ -3,7 +3,7 @@
 
 ## 1. Metrics Exported by Default
 
-KVClient and transport metrics use the `kv:` prefix; other metrics in the tables below use `ucm:` by default. The default configuration contains 162 Counters, 37 Gauges, and 133 Histograms.
+KVClient and transport metrics use the `kv:` prefix; other metrics in the tables below use `ucm:` by default. The default configuration contains 164 Counters, 37 Gauges, and 133 Histograms.
 
 See [UCM Health Metrics](health_metrics.md) for Store health metrics and recommended aggregation.
 
@@ -212,7 +212,7 @@ No YuanRong-specific Histograms are exported by default.
 
 ### 1.6 ASU / KV metrics
 
-ASU forwards these 31 KV metrics (17 Counters and 14 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions.
+ASU forwards these 33 KV metrics (19 Counters and 14 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions.
 
 Load/Store metrics combine single and batch protocols: requests count API calls, entries count input entries (including failed submission attempts), and errors count submission failures only, excluding asynchronous execution failures. The former `kv_client_batch_*` series are removed; upgrade dashboards and collection configs together. Historical series are not migrated.
 
@@ -294,7 +294,7 @@ For custom deployment catalogs, synchronize the KV definitions and run `python k
 
 ### 1.7 Native AsuStore metrics
 
-These 20 metrics (16 Counters and 4 Histograms) use native UCM `UpdateStats()` at the AsuStore interface, independently of the 31 KV metrics above. The existing store-level `enable_metrics` switch controls this instance's `asu_*` observations; its shared KV backend installation behavior is unchanged. Registration and export still use the outer UCM configuration; custom catalogs must include the desired definitions.
+These 20 metrics (16 Counters and 4 Histograms) use native UCM `UpdateStats()` at the AsuStore interface, independently of the 33 KV metrics above. The existing store-level `enable_metrics` switch controls this instance's `asu_*` observations; its shared KV backend installation behavior is unchanged. Registration and export still use the outer UCM configuration; custom catalogs must include the desired definitions.
 
 The three lookup methods share call/error counts and duration. Ordinary lookup counts hits in the returned vector; prefix lookup counts the number of contiguous hit blocks (returned index + 1). Compute their hit ratios separately. Error returns do not contribute queried or hit blocks; timeout fallbacks contribute queried blocks with zero hits. Reverse lookup reports call results and duration only, without interpreting its returned position as a hit count.
 

@@ -114,7 +114,7 @@ Supported commands:
 | `batch-retrieve` | Retrieves all selected entries in one ASU client call. |
 | `power-cycle prepare` | Same execution path as `batch-store`/store-like commands. |
 | `power-cycle verify` | Same execution path as retrieve-like commands and always performs value consistency checking. |
-| `bench` | Runs an asynchronous, interval-driven benchmark for `store`, `retrieve`, `batch-store`, `batch-retrieve`, or `mix`. |
+| `bench` | Runs a synchronous, interval-paced benchmark for `store`, `retrieve`, `batch-store`, `batch-retrieve`, or `mix`. |
 
 ## Common options
 

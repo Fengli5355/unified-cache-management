@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "bench_runner.h"
 #include <algorithm>
 #include <chrono>
@@ -426,8 +427,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     const auto allocationPolicy = AllocationPolicyForConfig(config);
     const auto logicalDeviceId = ResolvePayloadDeviceId(config);
     BenchBufferPool bufferPool;
-    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation,
-                                  1, bufferPool);
+    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation, 1, bufferPool);
     if (!status.Ok()) { return status; }
     if (useDeviceBuffers &&
         (bench.op == BenchOpType::STORE || bench.op == BenchOpType::BATCH_STORE)) {
@@ -473,7 +473,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             sample.timestampSec = currentSecond;
             sample.op = bench.op;
             const auto sampleAt = Clock::now();
-            const double windowSeconds = std::chrono::duration<double>(sampleAt - windowStartedAt).count();
+            const double windowSeconds =
+                std::chrono::duration<double>(sampleAt - windowStartedAt).count();
             sample.bandwidthBytesPerSec = windowSeconds > 0.0 ? windowBytes / windowSeconds : 0.0;
             sample.iops = windowSeconds > 0.0 ? windowEntryCount / windowSeconds : 0.0;
             sample.avgLatencyUs = windowOperationCount == 0
@@ -482,9 +483,10 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             sample.errorCount = windowErrors;
             result.benchMetrics.realtimeSamples.emplace_back(sample);
             if (options.progress) {
-                PrintProgressSample(sample, windowSeconds > 0.0
-                                                ? static_cast<std::uint64_t>(operationsPerSec / windowSeconds)
-                                                : 0);
+                PrintProgressSample(
+                    sample, windowSeconds > 0.0
+                                ? static_cast<std::uint64_t>(operationsPerSec / windowSeconds)
+                                : 0);
             }
             windowStartedAt = sampleAt;
         };
