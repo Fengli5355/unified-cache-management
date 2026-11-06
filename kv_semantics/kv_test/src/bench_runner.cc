@@ -39,6 +39,7 @@ struct OperationOutcome {
     std::size_t entryCount{0};
     std::uint64_t bytes{0};
     bool isRead{false};
+    kv::TaskResult taskResult;
 };
 
 using BenchBufferPool = std::vector<BenchBufferSlot>;
@@ -364,6 +365,7 @@ OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& 
 
     OperationOutcome outcome;
     outcome.status = opStatus;
+    outcome.taskResult = std::move(operationResult.taskResult);
     outcome.latencyUs =
         std::chrono::duration<double, std::micro>(operationEnd - operationStart).count();
     outcome.entryCount = entryCount;
@@ -453,8 +455,20 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     result.benchMetrics.warmupSec = bench.warmupSec;
     result.benchMetrics.durationSec = bench.durationSec;
 
+    bool completionUncertain = false;
+    const auto cleanupBuffers = [&]() {
+        if (completionUncertain) {
+            for (auto& slot : bufferPool) {
+                clientRunner.RetainBuffersUntilShutdown(std::move(slot.buffers));
+            }
+            return Status::Success();
+        }
+        return UnregisterBenchBuffers(clientRunner, bufferPool);
+    };
+
     auto runPhase = [&](std::uint64_t durationSec, std::uint64_t ioCount,
                         bool collectStats) -> Status {
+        Status phaseStatus = Status::Success();
         const auto phaseStart = Clock::now();
         const auto phaseEnd = phaseStart + std::chrono::seconds(durationSec);
         auto nextSubmit = phaseStart;
@@ -557,14 +571,27 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             auto submitStatus = SubmitBenchOperation(
                 bench.op, config, clientRunner, bufferSlot, begin, currentEntryCount,
                 currentOperationIndex, keyPrefix, useDeviceBuffers, taskId);
-            if (!submitStatus.Ok()) { return submitStatus; }
+            if (!submitStatus.Ok()) {
+                phaseStatus = submitStatus;
+                if (collectStats) {
+                    ++result.benchMetrics.errorCount;
+                    ++windowErrors;
+                    advanceProgressWindow();
+                }
+                break;
+            }
 
             const auto outcome = WaitBenchOperation(config, clientRunner, taskId, operationStart,
                                                     currentEntryCount, isRead);
             recordOutcome(outcome);
             // A timeout does not prove that the previous request has stopped remotely.
             // Stop rather than submit another batch with an unresolved completion.
-            if (!outcome.status.Ok()) { return outcome.status; }
+            if (!outcome.status.Ok()) {
+                completionUncertain = true;
+                result.taskResult = outcome.taskResult;
+                phaseStatus = outcome.status;
+                break;
+            }
             // Pace from this submission, never catch up missed intervals in a burst.
             nextSubmit = operationStart + ioInterval;
         }
@@ -573,13 +600,14 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             emitProgressSample(windowOperationCount);
         }
 
-        return Status::Success();
+        return phaseStatus;
     };
 
     if (bench.warmupSec != 0) {
         status = runPhase(bench.warmupSec, 0, false);
         if (!status.Ok()) {
-            (void)UnregisterBenchBuffers(clientRunner, bufferPool);
+            (void)cleanupBuffers();
+            result.status = status;
             return status;
         }
     }
@@ -587,9 +615,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     const auto measureStart = Clock::now();
     status = runPhase(bench.durationSec, bench.ioCount, true);
     const auto measureEnd = Clock::now();
-    auto cleanupStatus = UnregisterBenchBuffers(clientRunner, bufferPool);
+    auto cleanupStatus = cleanupBuffers();
     if (status.Ok() && !cleanupStatus.Ok()) { status = cleanupStatus; }
-    if (!status.Ok()) { return status; }
 
     result.benchMetrics.elapsedSec =
         std::chrono::duration<double>(measureEnd - measureStart).count();
@@ -604,8 +631,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             result.benchMetrics.elapsedSec;
     }
     result.benchMetrics.latency = BuildLatencyStats(measuredLatenciesUs);
-    result.taskResult = BuildEmptyTaskResult();
-    result.status = Status::Success();
+    if (status.Ok()) { result.taskResult = BuildEmptyTaskResult(); }
+    result.status = status;
     return result.status;
 }
 

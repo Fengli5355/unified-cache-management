@@ -599,6 +599,11 @@ Requirements:
 The benchmark runner submits one batch and waits for its CQE before submitting
 another batch. It reuses one buffer slot without growing the pool. A submission
 or completion error ends the run; no further batches are submitted.
+On a Wait failure, payload buffers and their registrations are retained by the
+client runner until Client shutdown, rather than being released while IO may
+still be in flight. Failed measured runs retain successful-operation totals,
+elapsed time, bandwidth and latency summaries, and the final progress window.
+Warmup results remain excluded from measured statistics.
 
 `bench.io_interval_us` is the minimum interval between submission starts. If a
 batch completes sooner, bench waits for the remaining interval. If it completes

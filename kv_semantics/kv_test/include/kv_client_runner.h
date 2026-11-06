@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #pragma once
 
 #include <memory>
@@ -17,6 +18,8 @@ public:
 
     Status RegisterBuffers(BufferSet& buffers);
     Status UnregisterBuffers(const BufferSet& buffers);
+    // Keeps possibly in-flight payloads registered and alive until client shutdown.
+    void RetainBuffersUntilShutdown(BufferSet buffers);
 
     // SINGLE_ENTRY_PER_CALL maps single Store/Retrieve to one KvClient call per entry.
     // ALL_ENTRIES_IN_ONE_CALL maps batch commands to one KvClient call with all entries.
@@ -33,6 +36,8 @@ public:
                  CommandResult& result);
 
 private:
+    // Destroy the client before releasing retained payloads, including on shutdown failure.
+    std::vector<BufferSet> retainedBuffers_;
     std::unique_ptr<kv::KvClient> client_;
 };
 

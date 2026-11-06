@@ -148,7 +148,11 @@ Status SubmitEntriesOneByOne(kv::KvClient& client, const std::vector<kv::KVBuffe
 
 KvClientRunner::KvClientRunner(std::unique_ptr<kv::KvClient> client) : client_(std::move(client)) {}
 
-KvClientRunner::~KvClientRunner() = default;
+KvClientRunner::~KvClientRunner()
+{
+    if (!retainedBuffers_.empty()) { (void)Shutdown(); }
+    client_.reset();
+}
 
 Status KvClientRunner::Init(const KvTestConfig& config)
 {
@@ -163,7 +167,13 @@ Status KvClientRunner::Shutdown()
     if (client_ == nullptr) { return Status::Success(); }
 
     auto status = client_->Shutdown();
+    if (status.ok()) { retainedBuffers_.clear(); }
     return ToKvTestStatus(status, "asu client shutdown");
+}
+
+void KvClientRunner::RetainBuffersUntilShutdown(BufferSet buffers)
+{
+    retainedBuffers_.emplace_back(std::move(buffers));
 }
 
 Status KvClientRunner::RegisterBuffers(BufferSet& buffers)
