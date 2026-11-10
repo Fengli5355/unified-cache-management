@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -388,13 +388,30 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         }
         if (task->subBatchContexts->empty()) { return false; }
 
-        if (std::chrono::steady_clock::now() >= task->deadline) {
+        const auto pollAt = std::chrono::steady_clock::now();
+        if (pollAt >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
                 Status::Error(StatusCode::TIMEOUT, "transport task execution timeout");
             std::fill(task->entryStatus.begin(), task->entryStatus.end(), timeoutStatus);
             for (auto& subBatchContext : *task->subBatchContexts) {
                 if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
+
+                std::uint16_t completedCid = 0;
+                const void* responseData =
+                    reinterpret_cast<void*>(subBatchContext.flagBuffer.local_addr);
+                (void)protocolManager_.PollResponseCid(responseData, completedCid);
+                const auto channelId = subBatchContext.channel == nullptr
+                                           ? 0
+                                           : subBatchContext.channel->GetChannelId();
+                KV_ERROR(
+                    "Transport task completion timeout task_id={} expected_cid={} actual_cid={} "
+                    "channel_id={} task_age_us={} timeout_ms={}",
+                    task->taskId, subBatchContext.cid, completedCid, channelId,
+                    std::chrono::duration_cast<std::chrono::microseconds>(pollAt -
+                                                                          task->submittedAt)
+                        .count(),
+                    config_.timeoutMs);
 
                 std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                           timeoutStatus);
@@ -430,6 +447,11 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 if (const auto status = protocolManager_.UnpackResponse(
                         responseData, ToKvOpcode(subBatchContext.opType), batchNumber, response);
                     !status.ok()) {
+                    KV_ERROR(
+                        "Transport response decode failed task_id={} node_id={} op_type={} "
+                        "cid={} code={} message={}",
+                        task->taskId, config_.nodeId, static_cast<int>(subBatchContext.opType),
+                        completedCid, static_cast<int>(status.code), status.message);
                     completeWithError(status);
                     continue;
                 }
@@ -443,6 +465,22 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 const auto status = subBatchContext.status.ok() || queryResultBufferStatus
                                         ? Status::OK()
                                         : subBatchContext.status;
+                if (!status.ok()) {
+                    KV_ERROR(
+                        "Transport response failed task_id={} node_id={} op_type={} cid={} "
+                        "cqe_status=0x{:x} code={} message={} result_count={} first_result=0x{:x} "
+                        "flag_local_addr=0x{:x} "
+                        "flag_device_addr=0x{:x} task_age_us={}",
+                        task->taskId, config_.nodeId, static_cast<int>(subBatchContext.opType),
+                        completedCid, response.status, static_cast<int>(status.code),
+                        status.message, response.result_buffer.size(),
+                        response.result_buffer.empty() ? 0U : response.result_buffer.front(),
+                        subBatchContext.flagBuffer.local_addr,
+                        subBatchContext.flagBuffer.device_addr,
+                        std::chrono::duration_cast<std::chrono::microseconds>(pollAt -
+                                                                              task->submittedAt)
+                            .count());
+                }
                 if (status.code == StatusCode::CQE_INTERNAL_ERROR ||
                     status.code == StatusCode::CQE_IO_TIMEOUT) {
                     if (status.code == StatusCode::CQE_IO_TIMEOUT) {
