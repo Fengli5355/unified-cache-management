@@ -114,7 +114,7 @@ Supported commands:
 | `batch-retrieve` | Retrieves all selected entries in one ASU client call. |
 | `power-cycle prepare` | Same execution path as `batch-store`/store-like commands. |
 | `power-cycle verify` | Same execution path as retrieve-like commands and always performs value consistency checking. |
-| `bench` | Runs an asynchronous, interval-driven benchmark for `store`, `retrieve`, `batch-store`, `batch-retrieve`, or `mix`. |
+| `bench` | Runs a synchronous, interval-paced benchmark for `store`, `retrieve`, `batch-store`, `batch-retrieve`, or `mix`. |
 
 ## Common options
 
@@ -165,7 +165,7 @@ For `bench`, data generation is separate:
 
 - key prefix defaults to `bench-key-` when `kv.key_prefix` is empty
 - value bytes are filled from `(index + byteIndex + seed) & 0xFF`
-- key count is at least `concurrency * entries_per_operation * 16`
+- key count is at least `entries_per_operation * 16`
 
 ## Config file
 
@@ -359,8 +359,8 @@ These fields are parsed by `kv-test` itself:
 | `kv.count` | Default count for count-based generation. |
 | `limits.memory_max_bytes` | Maximum value payload bytes held by kv-test. For normal commands this limits generated value bytes. For `bench`, this limits the reusable buffer pool. Default is 4 GiB. |
 | `bench.io_size` | Bench value size for one key. Must not exceed the protocol 24-bit length limit `0xFFFFFF`. |
-| `bench.io_interval_us` | Interval between asynchronous I/O submissions in microseconds. Must be greater than zero. |
-| `bench.concurrency` | Number of completion waiter threads and reusable benchmark buffer slots. |
+| `bench.io_interval_us` | Minimum interval between batch submission starts in microseconds. Each batch waits for completion before the next submission. Must be greater than zero. |
+| `bench.concurrency` | Retained for configuration compatibility; synchronous bench uses one in-flight batch and reports effective concurrency as 1. |
 | `bench.duration_sec` | Measured benchmark duration. Must be greater than zero. |
 | `bench.warmup_sec` | Warmup duration. |
 | `bench.read_ratio` | Read ratio used by `bench mix`. |
@@ -596,15 +596,21 @@ Requirements:
   zero.
 - For `mix`, `read_ratio + write_ratio` must equal `100`.
 
-The benchmark runner submits one asynchronous task every `bench.io_interval_us`.
-Submission does not wait for the preceding task to complete. Completion waiters
-collect results in the background, and the runner drains all outstanding tasks
-after the final submission.
+The benchmark runner submits one batch and waits for its CQE before submitting
+another batch. It reuses one buffer slot without growing the pool. Submission
+and completion errors are counted and the next batch is submitted. A Client
+Wait timeout allows payload reuse under the Client/Server contract: no remote
+reads or writes for that task occur after Client timeout. No extra polling is required.
+Measured runs with errors return failure while retaining successful-operation
+totals, elapsed time, bandwidth, latency summaries and the final progress window.
+Warmup results remain excluded from measured statistics.
 
-Bench starts with `concurrency` reusable buffer slots. If every slot is still in
-flight when the next interval expires, the pool grows instead of delaying the
-submission. Completed tasks return their slots to the pool. Pool growth remains
-subject to `limits.memory_max_bytes`.
+`bench.io_interval_us` is the minimum interval between submission starts. If a
+batch completes sooner, bench waits for the remaining interval. If it completes
+later, the next batch can start immediately, without catching up missed intervals.
+`bench.concurrency` remains accepted for compatibility but does not enable
+parallel submissions; reported effective concurrency is 1. Launch multiple kv-test
+processes from the caller to generate concurrent load.
 
 With `--progress`, bench prints one measured progress line per second instead
 of rewriting a terminal line. The final summary and report output are still

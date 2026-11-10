@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 add_executable(kv-test
     src/arg_parser.cc
     src/kv_client_runner.cc
@@ -46,6 +47,23 @@ target_link_libraries(kv-test
 
 if(BUILD_UNIT_TESTS)
     include(GoogleTest)
+    add_executable(kv-test-bench.test
+        src/bench_runner.cc
+        src/kv_client_runner.cc
+        src/buffer_allocator.cc
+        src/key_value_generator.cc
+        src/payload_buffer_runtime.cc
+        src/kv_test_config_helpers.cc
+        test/bench_runner_test.cc
+    )
+    target_include_directories(kv-test-bench.test PRIVATE
+        include ../include ../src/trans ../src/common ../src/common/utils
+    )
+    target_link_libraries(kv-test-bench.test PRIVATE
+        kv_client kv_buffer_runtime kv_metrics_standalone gtest_main gtest
+    )
+    gtest_discover_tests(kv-test-bench.test)
+
     add_executable(kv-test-config.test
         src/kv_test_config_helpers.cc
         test/kv_test_config_helpers_test.cc

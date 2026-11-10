@@ -1,23 +1,18 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "bench_runner.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
-#include <deque>
-#include <functional>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <sstream>
-#include <stdexcept>
-#include <system_error>
 #include <thread>
 #include "buffer_allocator.h"
 #include "key_value_generator.h"
+#include "kv_metrics/metrics.h"
 #include "kv_test_config_helpers.h"
 #include "payload_buffer_runtime.h"
 
@@ -42,80 +37,12 @@ struct OperationOutcome {
     Status status;
     double latencyUs{0.0};
     std::size_t entryCount{0};
-    std::size_t bufferSlotIndex{0};
     std::uint64_t bytes{0};
+    bool isRead{false};
+    kv::TaskResult taskResult;
 };
 
 using BenchBufferPool = std::vector<BenchBufferSlot>;
-
-class BenchExecutor {
-public:
-    explicit BenchExecutor(std::size_t workerCount)
-    {
-        workers_.reserve(workerCount);
-        try {
-            for (std::size_t index = 0; index < workerCount; ++index) {
-                workers_.emplace_back(&BenchExecutor::WorkerLoop, this);
-            }
-        } catch (...) {
-            Shutdown();
-            throw;
-        }
-    }
-
-    ~BenchExecutor() { Shutdown(); }
-
-    BenchExecutor(const BenchExecutor&) = delete;
-    BenchExecutor& operator=(const BenchExecutor&) = delete;
-
-    std::future<OperationOutcome> Submit(std::function<OperationOutcome()> handler)
-    {
-        std::packaged_task<OperationOutcome()> task(std::move(handler));
-        auto future = task.get_future();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (stopping_) { throw std::runtime_error("bench executor is stopping"); }
-            tasks_.emplace_back(std::move(task));
-        }
-        workReady_.notify_one();
-        return future;
-    }
-
-private:
-    void Shutdown()
-    {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stopping_ = true;
-        }
-        workReady_.notify_all();
-        for (auto& worker : workers_) {
-            if (worker.joinable()) { worker.join(); }
-        }
-        workers_.clear();
-    }
-
-    void WorkerLoop()
-    {
-        while (true) {
-            std::packaged_task<OperationOutcome()> task;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                workReady_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-                if (stopping_ && tasks_.empty()) { return; }
-                task = std::move(tasks_.front());
-                tasks_.pop_front();
-            }
-            task();
-        }
-    }
-
-    std::mutex mutex_;
-    std::condition_variable workReady_;
-    std::deque<std::packaged_task<OperationOutcome()>> tasks_;
-    std::vector<std::thread> workers_;
-    bool stopping_{false};
-};
 
 std::uint64_t BenchEntryCount(const BenchConfig& bench, BenchOpType op)
 {
@@ -429,7 +356,7 @@ Status SubmitBenchOperation(BenchOpType requestedOp, const KvTestConfig& config,
 OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& clientRunner,
                                     kv::TaskId taskId,
                                     std::chrono::steady_clock::time_point operationStart,
-                                    std::size_t entryCount, std::size_t bufferSlotIndex)
+                                    std::size_t entryCount, bool isRead)
 {
     CommandResult operationResult;
     auto opStatus =
@@ -438,11 +365,12 @@ OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& 
 
     OperationOutcome outcome;
     outcome.status = opStatus;
+    outcome.taskResult = std::move(operationResult.taskResult);
     outcome.latencyUs =
         std::chrono::duration<double, std::micro>(operationEnd - operationStart).count();
     outcome.entryCount = entryCount;
-    outcome.bufferSlotIndex = bufferSlotIndex;
     outcome.bytes = entryCount * config.bench.ioSize;
+    outcome.isRead = isRead;
     return outcome;
 }
 
@@ -484,9 +412,9 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     }
 
     const auto entryCountPerOperation = BenchEntryCount(bench, bench.op);
-    const auto poolEntryCount = entryCountPerOperation * bench.concurrency;
+    const auto poolEntryCount = entryCountPerOperation;
     const auto keyCount = std::max<std::uint64_t>(
-        config.count, std::max<std::uint64_t>(bench.concurrency * entryCountPerOperation * 16,
+        config.count, std::max<std::uint64_t>(entryCountPerOperation * 16,
                                               entryCountPerOperation));
 
     auto status = ValidateBenchBufferConfig(bench, poolEntryCount, config.memoryMaxBytes);
@@ -501,8 +429,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     const auto allocationPolicy = AllocationPolicyForConfig(config);
     const auto logicalDeviceId = ResolvePayloadDeviceId(config);
     BenchBufferPool bufferPool;
-    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation,
-                                  bench.concurrency, bufferPool);
+    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation, 1, bufferPool);
     if (!status.Ok()) { return status; }
     if (useDeviceBuffers &&
         (bench.op == BenchOpType::STORE || bench.op == BenchOpType::BATCH_STORE)) {
@@ -517,15 +444,6 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         return status;
     }
 
-    std::unique_ptr<BenchExecutor> executor;
-    try {
-        executor = std::make_unique<BenchExecutor>(bench.concurrency);
-    } catch (const std::system_error& error) {
-        (void)UnregisterBenchBuffers(clientRunner, bufferPool);
-        return Status::Error(kExitInvalidArgument,
-                             "bench worker creation failed: " + std::string(error.what()));
-    }
-
     using Clock = std::chrono::steady_clock;
     std::vector<double> measuredLatenciesUs;
     std::uint64_t operationIndex = 0;
@@ -533,21 +451,17 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     result.benchMetrics.op = bench.op;
     result.benchMetrics.valueSize = bench.ioSize;
     result.benchMetrics.batchSize = static_cast<std::uint32_t>(entryCountPerOperation);
-    result.benchMetrics.concurrency = bench.concurrency;
+    result.benchMetrics.concurrency = 1;
     result.benchMetrics.warmupSec = bench.warmupSec;
     result.benchMetrics.durationSec = bench.durationSec;
 
     auto runPhase = [&](std::uint64_t durationSec, std::uint64_t ioCount,
                         bool collectStats) -> Status {
+        Status phaseStatus = Status::Success();
         const auto phaseStart = Clock::now();
         const auto phaseEnd = phaseStart + std::chrono::seconds(durationSec);
         auto nextSubmit = phaseStart;
         const auto ioInterval = std::chrono::microseconds(bench.ioIntervalUs);
-        std::deque<std::future<OperationOutcome>> pending;
-        std::deque<std::size_t> availableSlots;
-        for (std::size_t slotIndex = 0; slotIndex < bufferPool.size(); ++slotIndex) {
-            availableSlots.emplace_back(slotIndex);
-        }
         std::uint64_t scheduledEntryCount = 0;
         std::uint64_t windowOperationCount = 0;
         std::uint64_t windowEntryCount = 0;
@@ -555,39 +469,32 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         std::uint64_t windowErrors = 0;
         double windowLatencyUs = 0.0;
         std::uint64_t currentSecond = 1;
+        auto windowStartedAt = phaseStart;
 
         auto emitProgressSample = [&](std::uint64_t operationsPerSec) {
             BenchRealtimeSample sample;
             sample.timestampSec = currentSecond;
             sample.op = bench.op;
-            sample.bandwidthBytesPerSec = static_cast<double>(windowBytes);
-            sample.iops = static_cast<double>(windowEntryCount);
+            const auto sampleAt = Clock::now();
+            const double windowSeconds =
+                std::chrono::duration<double>(sampleAt - windowStartedAt).count();
+            sample.bandwidthBytesPerSec = windowSeconds > 0.0 ? windowBytes / windowSeconds : 0.0;
+            sample.iops = windowSeconds > 0.0 ? windowEntryCount / windowSeconds : 0.0;
             sample.avgLatencyUs = windowOperationCount == 0
                                       ? 0.0
                                       : windowLatencyUs / static_cast<double>(windowOperationCount);
             sample.errorCount = windowErrors;
             result.benchMetrics.realtimeSamples.emplace_back(sample);
-            if (options.progress) { PrintProgressSample(sample, operationsPerSec); }
+            if (options.progress) {
+                PrintProgressSample(
+                    sample, windowSeconds > 0.0
+                                ? static_cast<std::uint64_t>(operationsPerSec / windowSeconds)
+                                : 0);
+            }
+            windowStartedAt = sampleAt;
         };
 
-        auto recordOutcome = [&](const OperationOutcome& outcome) {
-            if (!outcome.status.Ok()) {
-                ++result.benchMetrics.errorCount;
-                if (collectStats) { ++windowErrors; }
-                result.status = outcome.status;
-                return outcome.status;
-            }
-            if (!collectStats) { return Status::Success(); }
-
-            measuredLatenciesUs.push_back(outcome.latencyUs);
-            ++result.benchMetrics.completedOperations;
-            result.benchMetrics.completedEntries += outcome.entryCount;
-            result.benchMetrics.completedBytes += outcome.bytes;
-            ++windowOperationCount;
-            windowEntryCount += outcome.entryCount;
-            windowBytes += outcome.bytes;
-            windowLatencyUs += outcome.latencyUs;
-
+        auto advanceProgressWindow = [&]() {
             const auto elapsedSec =
                 std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - phaseStart)
                     .count() +
@@ -601,24 +508,31 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 windowErrors = 0;
                 windowLatencyUs = 0.0;
             }
-            return Status::Success();
         };
 
-        auto drainPending = [&](bool waitForAll) {
-            Status finalStatus = Status::Success();
-            for (auto iter = pending.begin(); iter != pending.end();) {
-                if (!waitForAll &&
-                    iter->wait_for(std::chrono::microseconds(0)) != std::future_status::ready) {
-                    ++iter;
-                    continue;
+        auto recordOutcome = [&](const OperationOutcome& outcome) {
+            if (!outcome.status.Ok()) {
+                if (collectStats) {
+                    ++result.benchMetrics.errorCount;
+                    ++windowErrors;
+                    advanceProgressWindow();
                 }
-                auto outcome = iter->get();
-                iter = pending.erase(iter);
-                availableSlots.emplace_back(outcome.bufferSlotIndex);
-                auto outcomeStatus = recordOutcome(outcome);
-                if (finalStatus.Ok() && !outcomeStatus.Ok()) { finalStatus = outcomeStatus; }
+                return;
             }
-            return finalStatus;
+            if (!collectStats) { return; }
+
+            measuredLatenciesUs.push_back(outcome.latencyUs);
+            ++result.benchMetrics.completedOperations;
+            result.benchMetrics.completedEntries += outcome.entryCount;
+            result.benchMetrics.completedBytes += outcome.bytes;
+            metrics::UpdateStats(outcome.isRead ? KV_METRIC("kv_test_bench_retrieve_bytes_total")
+                                                : KV_METRIC("kv_test_bench_store_bytes_total"),
+                                 static_cast<double>(outcome.bytes));
+            ++windowOperationCount;
+            windowEntryCount += outcome.entryCount;
+            windowBytes += outcome.bytes;
+            windowLatencyUs += outcome.latencyUs;
+            advanceProgressWindow();
         };
 
         auto shouldContinue = [&]() {
@@ -628,12 +542,6 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         while (shouldContinue()) {
             std::this_thread::sleep_until(nextSubmit);
             if (ioCount == 0 && Clock::now() >= phaseEnd) { break; }
-
-            auto drainStatus = drainPending(false);
-            if (!drainStatus.Ok()) {
-                (void)drainPending(true);
-                return drainStatus;
-            }
 
             const auto begin =
                 static_cast<std::size_t>((operationIndex * entryCountPerOperation) % keyCount);
@@ -645,94 +553,51 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                           remainingEntryCount}));
             scheduledEntryCount += currentEntryCount;
             const auto currentOperationIndex = operationIndex++;
-            if (availableSlots.empty()) {
-                const auto newPoolEntryCount =
-                    entryCountPerOperation * static_cast<std::uint64_t>(bufferPool.size() + 1);
-                auto growStatus =
-                    ValidateBenchBufferConfig(bench, newPoolEntryCount, config.memoryMaxBytes);
-                if (!growStatus.Ok()) {
-                    (void)drainPending(true);
-                    return growStatus;
-                }
-
-                BenchBufferPool newSlot;
-                growStatus = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation,
-                                                  1, newSlot);
-                if (growStatus.Ok() && useDeviceBuffers &&
-                    (bench.op == BenchOpType::STORE || bench.op == BenchOpType::BATCH_STORE)) {
-                    growStatus = SyncStoreBenchDeviceBuffers(
-                        config, newSlot, static_cast<std::size_t>(entryCountPerOperation));
-                }
-                if (growStatus.Ok()) {
-                    growStatus = RegisterBenchBuffers(clientRunner, newSlot, entryCountPerOperation,
-                                                      keyPrefix, useDeviceBuffers, allocationPolicy,
-                                                      logicalDeviceId);
-                }
-                if (!growStatus.Ok()) {
-                    (void)UnregisterBenchBuffers(clientRunner, newSlot);
-                    (void)drainPending(true);
-                    return growStatus;
-                }
-                bufferPool.emplace_back(std::move(newSlot.front()));
-                availableSlots.emplace_back(bufferPool.size() - 1);
-            }
-            const auto bufferSlotIndex = availableSlots.front();
-            availableSlots.pop_front();
-            auto& bufferSlot = bufferPool[bufferSlotIndex];
+            const bool isRead = IsBenchReadOperation(bench.op, currentOperationIndex, config.bench);
+            auto& bufferSlot = bufferPool.front();
             kv::TaskId taskId{kv::kInvalidTaskId};
             const auto operationStart = Clock::now();
             auto submitStatus = SubmitBenchOperation(
                 bench.op, config, clientRunner, bufferSlot, begin, currentEntryCount,
                 currentOperationIndex, keyPrefix, useDeviceBuffers, taskId);
             if (!submitStatus.Ok()) {
-                availableSlots.emplace_back(bufferSlotIndex);
-                (void)drainPending(true);
-                return submitStatus;
+                phaseStatus = submitStatus;
+                if (collectStats) {
+                    ++result.benchMetrics.errorCount;
+                    ++windowErrors;
+                    advanceProgressWindow();
+                }
+                nextSubmit = operationStart + ioInterval;
+                continue;
             }
 
-            try {
-                pending.emplace_back(executor->Submit([&, taskId, operationStart, currentEntryCount,
-                                                       bufferSlotIndex]() -> OperationOutcome {
-                    return WaitBenchOperation(config, clientRunner, taskId, operationStart,
-                                              currentEntryCount, bufferSlotIndex);
-                }));
-            } catch (const std::exception& error) {
-                (void)WaitBenchOperation(config, clientRunner, taskId, operationStart,
-                                         currentEntryCount, bufferSlotIndex);
-                availableSlots.emplace_back(bufferSlotIndex);
-                (void)drainPending(true);
-                return Status::Error(kExitInvalidArgument, "bench completion submission failed: " +
-                                                               std::string(error.what()));
+            const auto outcome = WaitBenchOperation(config, clientRunner, taskId, operationStart,
+                                                    currentEntryCount, isRead);
+            recordOutcome(outcome);
+            if (!outcome.status.Ok()) {
+                result.taskResult = outcome.taskResult;
+                phaseStatus = outcome.status;
             }
-            nextSubmit += ioInterval;
+            // Pace from this submission, never catch up missed intervals in a burst.
+            nextSubmit = operationStart + ioInterval;
         }
-
-        auto drainStatus = drainPending(true);
-        if (!drainStatus.Ok()) { return drainStatus; }
 
         if (collectStats && (windowOperationCount != 0 || windowErrors != 0)) {
             emitProgressSample(windowOperationCount);
         }
 
-        return Status::Success();
+        return phaseStatus;
     };
 
     if (bench.warmupSec != 0) {
-        status = runPhase(bench.warmupSec, 0, false);
-        if (!status.Ok()) {
-            executor.reset();
-            (void)UnregisterBenchBuffers(clientRunner, bufferPool);
-            return status;
-        }
+        (void)runPhase(bench.warmupSec, 0, false);
     }
 
     const auto measureStart = Clock::now();
     status = runPhase(bench.durationSec, bench.ioCount, true);
     const auto measureEnd = Clock::now();
-    executor.reset();
     auto cleanupStatus = UnregisterBenchBuffers(clientRunner, bufferPool);
     if (status.Ok() && !cleanupStatus.Ok()) { status = cleanupStatus; }
-    if (!status.Ok()) { return status; }
 
     result.benchMetrics.elapsedSec =
         std::chrono::duration<double>(measureEnd - measureStart).count();
@@ -747,8 +612,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             result.benchMetrics.elapsedSec;
     }
     result.benchMetrics.latency = BuildLatencyStats(measuredLatenciesUs);
-    result.taskResult = BuildEmptyTaskResult();
-    result.status = Status::Success();
+    if (status.Ok()) { result.taskResult = BuildEmptyTaskResult(); }
+    result.status = status;
     return result.status;
 }
 

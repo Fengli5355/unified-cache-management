@@ -1,4 +1,4 @@
-﻿// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "kv_client_runner.h"
 #include <algorithm>
 #include <unordered_set>
