@@ -301,10 +301,13 @@ public:
         config_ = std::move(config);
         client_ = CreateClient(config_);
 
-        auto asuConfig = BuildKvClientConfig(config_);
-        auto asuStatus = config_.configPath.empty()
-                             ? kv::Status::OK()
-                             : kv::KvClientConfig::LoadFromFile(config_.configPath, asuConfig);
+        kv::KvClientConfig asuConfig;
+        auto asuStatus = kv::Status::OK();
+        if (config_.configPath.empty()) {
+            asuConfig = BuildKvClientConfig(config_);
+        } else {
+            asuStatus = kv::KvClientConfig::LoadFromFile(config_.configPath, asuConfig);
+        }
         if (asuStatus.ok()) { asuStatus = client_->Init(asuConfig); }
         if (!asuStatus.ok()) {
             UC_ERROR("Failed to init ASU client: {}.", asuStatus.message);
