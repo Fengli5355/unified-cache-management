@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "trans_task_manager.h"
 #include <chrono>
 #include <utility>
@@ -77,10 +78,42 @@ void TransportTaskManager::NotifyCompletion(const TransportTaskPtr& task)
                       : 0.0                                                    },
     };
     metrics::UpdateStats(updates, sendReturned ? std::size_t{3} : std::size_t{1});
+    if (metrics::IsEnabled()) {
+        std::lock_guard<std::mutex> lock(task->mutex);
+        if (sendReturned && task->firstPollAt != std::chrono::steady_clock::time_point{}) {
+            metrics::UpdateStats(
+                KV_METRIC("kv_transport_completion_first_poll_duration_seconds"),
+                std::chrono::duration<double>(task->firstPollAt - task->sendCompletedAt).count());
+            const metrics::MetricUpdate pollUpdates[] = {
+                {KV_METRIC("kv_transport_completion_poll_gap_seconds"),       task->maxPollGapSeconds},
+                {KV_METRIC("kv_transport_completion_poll_lock_wait_seconds"),
+                 task->pollLockWaitSeconds                                                           },
+            };
+            metrics::UpdateStats(pollUpdates, std::size(pollUpdates));
+        }
+        // Partial observations on timeout are not a complete response-wait sample.
+        if (sendReturned && !task->subBatchContexts->empty() &&
+            task->responsesObserved == task->subBatchContexts->size()) {
+            const metrics::MetricUpdate responseUpdates[] = {
+                {KV_METRIC("kv_transport_completion_response_wait_seconds"),
+                 std::chrono::duration<double>(task->lastResponseObservedAt - task->sendCompletedAt)
+                     .count()                },
+                {KV_METRIC("kv_transport_completion_response_process_seconds"),
+                 task->responseProcessSeconds},
+            };
+            metrics::UpdateStats(responseUpdates, std::size(responseUpdates));
+        }
+    }
+    const auto notifyStartedAt =
+        sendReturned ? metrics::StartMetricTimer() : metrics::MetricTimer{};
     TaskResult result;
     BuildResult(*task, result);
     (void)task->NotifyCompletion(std::move(result));
     (void)Remove(task->taskId);
+    if (const auto seconds = metrics::ElapsedSeconds(notifyStartedAt)) {
+        metrics::UpdateStats(KV_METRIC("kv_transport_completion_notify_duration_seconds"),
+                             *seconds);
+    }
 }
 
 void TransportTaskManager::BuildResult(const TransportTask& task, TaskResult& result)

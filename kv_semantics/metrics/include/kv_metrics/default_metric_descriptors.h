@@ -46,6 +46,12 @@ inline std::vector<MetricDescriptor> DefaultKvMetricDescriptors()
         {"kv_transport_node_task_send_duration_seconds", MetricType::HISTOGRAM, "KV transport send duration by node", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},
         {"kv_transport_node_task_completion_duration_seconds", MetricType::HISTOGRAM, "KV transport completion duration by node", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},
         {"kv_transport_task_e2e_duration_seconds", MetricType::HISTOGRAM, "KV transport task end-to-end duration from submit to completion", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},
+        {"kv_transport_completion_first_poll_duration_seconds", MetricType::HISTOGRAM, "Send return to first eligible completion poll; includes worker wakeup and lock wait", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
+        {"kv_transport_completion_poll_gap_seconds", MetricType::HISTOGRAM, "Maximum interval between eligible polls within each task; zero for a single poll", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
+        {"kv_transport_completion_poll_lock_wait_seconds", MetricType::HISTOGRAM, "Accumulated task mutex acquisition time across eligible completion polls", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
+        {"kv_transport_completion_response_wait_seconds", MetricType::HISTOGRAM, "Send return to observing the last matching response CID; includes remote, return path and host polling delay, not pure server time", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
+        {"kv_transport_completion_response_process_seconds", MetricType::HISTOGRAM, "Accumulated response decode, status handling and resource release duration per task", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
+        {"kv_transport_completion_notify_duration_seconds", MetricType::HISTOGRAM, "Result construction, completion callback and task removal duration after transport completion", {1e-06, 5e-06, 1e-05, 2.5e-05, 5e-05, 0.0001, 0.0002, 0.0003, 0.0005, 0.00075, 0.001, 0.002, 0.005, 0.01, 0.1, 1.0}},
     };
     // clang-format on
 }

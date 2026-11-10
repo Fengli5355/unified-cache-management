@@ -129,7 +129,7 @@ public:
             recordedUpdates[recordedCount++] = updates[index];
         }
     }
-    std::array<MetricUpdate, 4> recordedUpdates{};
+    std::array<MetricUpdate, 32> recordedUpdates{};
     std::size_t recordedCount{0};
 };
 
@@ -424,6 +424,83 @@ TEST(TransportTaskMetricsTest, RecordsSubmitToCompletion)
     EXPECT_EQ(backend->recordedUpdates[0].metric->Name(), "kv_transport_task_e2e_duration_seconds");
     EXPECT_GT(backend->recordedUpdates[0].value, 0.004);
     Shutdown();
+}
+
+TEST(TransportTaskMetricsTest, PollDiagnosticsDoNotTreatMissingCidAsAResponse)
+{
+    Shutdown();
+    auto backend = std::make_shared<RecordingKvMetricsBackend>();
+    ASSERT_TRUE(InstallBackend(backend));
+    const ::kv::TransportConfig config;
+    const std::shared_ptr<::kv::TransProvider> provider;
+    const std::unique_ptr<::kv::ConnectionManager> connectionManager;
+    ::kv::TransportTaskExecutor executor(config, provider, connectionManager);
+    auto task = std::make_shared<::kv::TransportTask>();
+    task->state.store(::kv::TransportTaskState::INFLIGHT);
+    task->sendCompletedAt = std::chrono::steady_clock::now();
+    task->sendReturned.store(true);
+    std::array<std::uint32_t, 16> emptyResponse{};
+    task->subBatchContexts->resize(1);
+    auto& batch = task->subBatchContexts->front();
+    batch.cid = 1;
+    batch.flagBuffer.local_addr = reinterpret_cast<std::uintptr_t>(emptyResponse.data());
+    EXPECT_FALSE(executor.Poll(task));
+    EXPECT_NE(task->firstPollAt, std::chrono::steady_clock::time_point{});
+    EXPECT_EQ(task->maxPollGapSeconds, 0.0);
+    // Supply a deterministic previous timestamp rather than relying on scheduler timing.
+    task->lastPollAt -= std::chrono::milliseconds(2);
+    EXPECT_FALSE(executor.Poll(task));
+    EXPECT_GE(task->maxPollGapSeconds, 0.002);
+    EXPECT_EQ(task->responsesObserved, 0U);
+    EXPECT_EQ(task->responseProcessSeconds, 0.0);
+    Shutdown();
+}
+
+TEST(TransportTaskMetricsTest, CompletionDiagnosticsExcludePartialResponseWait)
+{
+    for (const bool allResponsesObserved : {false, true}) {
+        Shutdown();
+        auto backend = std::make_shared<RecordingKvMetricsBackend>();
+        ASSERT_TRUE(InstallBackend(backend));
+        auto task = std::make_shared<::kv::TransportTask>();
+        const auto now = std::chrono::steady_clock::now();
+        task->submittedAt = now - std::chrono::milliseconds(10);
+        task->sendCompletedAt = now - std::chrono::milliseconds(8);
+        task->sendReturned.store(true);
+        task->firstPollAt = now - std::chrono::milliseconds(7);
+        task->lastResponseObservedAt = now - std::chrono::milliseconds(2);
+        task->maxPollGapSeconds = 0.002;
+        task->pollLockWaitSeconds = 0.0003;
+        task->responseProcessSeconds = 0.0004;
+        task->subBatchContexts->resize(2);
+        task->responsesObserved = allResponsesObserved ? 2 : 1;
+        ::kv::TransportTaskManager manager;
+        manager.NotifyCompletion(task);
+
+        auto findValue = [&](const char* name) -> std::optional<double> {
+            for (std::size_t index = 0; index < backend->recordedCount; ++index) {
+                if (backend->recordedUpdates[index].metric->Name() == name) {
+                    return backend->recordedUpdates[index].value;
+                }
+            }
+            return std::nullopt;
+        };
+        const auto firstPoll = findValue("kv_transport_completion_first_poll_duration_seconds");
+        ASSERT_TRUE(firstPoll);
+        EXPECT_NEAR(*firstPoll, 0.001, 1e-9);
+        EXPECT_EQ(findValue("kv_transport_completion_poll_gap_seconds"), 0.002);
+        EXPECT_EQ(findValue("kv_transport_completion_poll_lock_wait_seconds"), 0.0003);
+        const auto wait = findValue("kv_transport_completion_response_wait_seconds");
+        const auto process = findValue("kv_transport_completion_response_process_seconds");
+        EXPECT_EQ(wait.has_value(), allResponsesObserved);
+        EXPECT_EQ(process.has_value(), allResponsesObserved);
+        if (wait && process) {
+            EXPECT_NEAR(*wait, 0.006, 1e-9);
+            EXPECT_EQ(*process, 0.0004);
+        }
+        EXPECT_TRUE(findValue("kv_transport_completion_notify_duration_seconds"));
+        Shutdown();
+    }
 }
 
 TEST(TransportTaskMetricsTest, PreSendFailureDoesNotRecordSendCompletion)

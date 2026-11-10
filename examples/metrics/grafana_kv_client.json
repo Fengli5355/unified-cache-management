@@ -168,7 +168,379 @@
     },
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
+      },
+      "panels": [],
+      "title": "Completion Diagnostics - Per Instance",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Send return to the first eligible Poll. High values suggest worker wakeup, scheduling or lock delay. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 26
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_first_poll_duration_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_first_poll_duration_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_first_poll_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - First Poll Delay",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Maximum time between eligible polls within a task. Zero means only one eligible poll. P99 is across task maxima, not across individual poll intervals. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 26
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_gap_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_gap_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_gap_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - Maximum Poll Gap per Task",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Total task mutex acquisition time across eligible polls in each task. This is cumulative, not per-lock latency. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 26
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_lock_wait_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_lock_wait_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_poll_lock_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - Accumulated Poll Lock Wait",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Send return to observing the last matching response CID. Includes remote execution, return path and host polling delay; this is not pure server latency. Partial timeout responses are excluded. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 35
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_wait_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_wait_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_wait_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - Response Observation Wait",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Accumulated decode, status handling and resource release time per task with all responses observed. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 35
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_process_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_process_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_response_process_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - Response Processing",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Result construction, completion callback and task removal. This happens after the existing transport completion timestamp. Average and P99 are grouped by scrape instance and available engine/worker labels. Diagnostics overlap and must not be stacked or added together. No data means no observations, not zero latency. Use distinct scrape instances for separate kv-test processes.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "decimals": 3,
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 35
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_notify_duration_seconds_sum[$__rate_interval])) / (sum by (job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_notify_duration_seconds_count[$__rate_interval])) > 0)",
+          "legendFormat": "Avg {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank) (rate(${metric_prefix:raw}kv_transport_completion_notify_duration_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{job}} / {{instance}} / {{engine}} / {{worker_rank}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Completion - Completion Notification",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 45},
       "panels": [],
       "title": "③ Transport Latency Details",
       "type": "row"
@@ -177,7 +549,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 26},
+      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 46},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "sum by (job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_send_duration_seconds_sum{node_id!=\"\"}[$__rate_interval])) / (sum by (job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_send_duration_seconds_count{node_id!=\"\"}[$__rate_interval])) > 0)", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -192,7 +564,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 26},
+      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 46},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le, job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_send_duration_seconds_bucket{node_id!=\"\"}[$__rate_interval])))", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -207,7 +579,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 26},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 46},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_send_duration_seconds_bucket{node_id!=\"\"}[$__rate_interval])))", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -222,7 +594,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 36},
+      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 56},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "sum by (job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_completion_duration_seconds_sum{node_id!=\"\"}[$__rate_interval])) / (sum by (job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_completion_duration_seconds_count{node_id!=\"\"}[$__rate_interval])) > 0)", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -237,7 +609,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 36},
+      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 56},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le, job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_completion_duration_seconds_bucket{node_id!=\"\"}[$__rate_interval])))", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -252,7 +624,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "TransportTask latency grouped by available job, instance, engine, worker_rank and node_id labels. Missing labels do not exclude samples. Worker rank is not a transport node ID.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": [{"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, node ${__field.labels.node_id}"}]}, {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, worker ${__field.labels.worker_rank}"}]}, {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}"}]}, {"matcher": {"id": "byFrameRefID", "options": "D"}, "properties": [{"id": "displayName", "value": "${__field.labels.job}, ${__field.labels.worker_rank}"}]}]},
-      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 36},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 56},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.99, sum by (le, job, instance, engine, worker_rank, node_id) (rate(${metric_prefix:raw}kv_transport_node_task_completion_duration_seconds_bucket{node_id!=\"\"}[$__rate_interval])))", "legendFormat": "{{job}}, node {{node_id}}", "refId": "A"},
@@ -265,7 +637,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 46},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 66},
       "panels": [],
       "title": "④ End-to-End",
       "type": "row"
@@ -274,7 +646,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Average end-to-end latency for ClientTask and TransportTask.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": []},
-      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 47},
+      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 67},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "sum(rate(${metric_prefix:raw}kv_transport_task_e2e_duration_seconds_sum[$__rate_interval])) / clamp_min(sum(rate(${metric_prefix:raw}kv_transport_task_e2e_duration_seconds_count[$__rate_interval])), 1e-12)", "legendFormat": "TransportTask: submit → completed", "refId": "A"},
@@ -287,7 +659,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "P50 end-to-end latency for ClientTask and TransportTask.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": []},
-      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 47},
+      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 67},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum by (le) (rate(${metric_prefix:raw}kv_transport_task_e2e_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "TransportTask: submit → completed", "refId": "A"},
@@ -300,7 +672,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "P99 end-to-end latency for ClientTask and TransportTask.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 6, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": []},
-      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 47},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 67},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "histogram_quantile(0.99, sum by (le) (rate(${metric_prefix:raw}kv_transport_task_e2e_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "TransportTask: submit → completed", "refId": "A"},
@@ -311,7 +683,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 57},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 77},
       "panels": [],
       "title": "⑤ Error Rates",
       "type": "row"
@@ -320,7 +692,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Client task final error rate.",
       "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.001}, {"color": "red", "value": 0.01}]}, "unit": "percentunit"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 58},
+      "gridPos": {"h": 4, "w": 8, "x": 0, "y": 78},
       "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
       "targets": [{"expr": "sum(rate(${metric_prefix:raw}kv_client_wait_errors_total[$__rate_interval])) / clamp_min(sum(rate(${metric_prefix:raw}kv_client_wait_requests_total[$__rate_interval])), 1e-12)", "refId": "A"}],
       "title": "Final Error Rate",
@@ -330,7 +702,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Transport error events.",
       "fieldConfig": {"defaults": {"decimals": 0, "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 4, "w": 16, "x": 8, "y": 58},
+      "gridPos": {"h": 4, "w": 16, "x": 8, "y": 78},
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "text": {"titleSize": 16, "valueSize": 28}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
         {"expr": "sum(increase(${metric_prefix:raw}kv_transport_task_completion_timeouts_total[$__range]))", "legendFormat": "completion deadline timeout", "refId": "A"},
@@ -344,7 +716,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Submission failures (including single and batch Load/Store) and asynchronous final task error rates. Missing error series are treated as zero only when matching request-rate data exists. Operations with no requests in the rate window remain without data.",
       "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 62},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 82},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "(sum(rate(${metric_prefix:raw}kv_client_store_errors_total[$__rate_interval])) or (0 * sum(rate(${metric_prefix:raw}kv_client_store_requests_total[$__rate_interval])))) / (sum(rate(${metric_prefix:raw}kv_client_store_requests_total[$__rate_interval])) > 0)", "legendFormat": "store submit", "refId": "A"},
@@ -358,7 +730,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 70},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 90},
       "panels": [],
       "title": "⑥ kv-test Bench Bandwidth",
       "type": "row"
@@ -367,7 +739,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Latest scrape-to-scrape measured-phase payload bandwidth (irate; requires two samples) across all kv-test instances. Total is store plus retrieve; warmup and failed operations are excluded.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 8, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "decimals": 2, "unit": "Bps"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 71},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 91},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "(sum(irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval])) or vector(0)) + (sum(irate(${metric_prefix:raw}kv_test_bench_retrieve_bytes_total[$__rate_interval])) or vector(0))", "legendFormat": "total", "refId": "A"},
@@ -381,7 +753,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Latest scrape-to-scrape measured-phase payload bandwidth (irate; requires two samples), split by target and worker_id.",
       "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "fillOpacity": 8, "gradientMode": "opacity", "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "decimals": 2, "unit": "Bps"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 71},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 91},
       "options": {"legend": {"calcs": ["min", "mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
       "targets": [
         {"expr": "sum by (instance, worker_id) (irate(${metric_prefix:raw}kv_test_bench_store_bytes_total[$__rate_interval]))", "legendFormat": "{{worker_id}} ({{instance}}) store", "refId": "A"},
@@ -403,5 +775,5 @@
   "timezone": "browser",
   "title": "KV Client Metrics",
   "uid": "kv-client-metrics",
-  "version": 9
+  "version": 10
 }

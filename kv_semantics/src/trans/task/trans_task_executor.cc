@@ -380,6 +380,7 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
 {
     if (!task) { return false; }
 
+    const auto lockStartedAt = metrics::StartMetricTimer();
     bool done = false;
     {
         std::lock_guard<std::mutex> lock(task->mutex);
@@ -389,6 +390,18 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
         if (task->subBatchContexts->empty()) { return false; }
 
         const auto pollAt = std::chrono::steady_clock::now();
+        if (lockStartedAt) {
+            task->pollLockWaitSeconds +=
+                std::chrono::duration<double>(pollAt - *lockStartedAt).count();
+            if (task->firstPollAt == std::chrono::steady_clock::time_point{}) {
+                task->firstPollAt = pollAt;
+            } else {
+                task->maxPollGapSeconds =
+                    std::max(task->maxPollGapSeconds,
+                             std::chrono::duration<double>(pollAt - task->lastPollAt).count());
+            }
+            task->lastPollAt = pollAt;
+        }
         if (pollAt >= task->deadline) {
             metrics::UpdateStats(KV_METRIC("kv_transport_task_completion_timeouts_total"), 1.0);
             const auto timeoutStatus =
@@ -441,6 +454,17 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                 }
                 if (completedCid == 0 || completedCid != subBatchContext.cid) { continue; }
 
+                const auto responseObservedAt = metrics::StartMetricTimer();
+                if (responseObservedAt) {
+                    task->lastResponseObservedAt = *responseObservedAt;
+                    ++task->responsesObserved;
+                }
+                auto recordResponseProcessing = [&]() {
+                    if (const auto seconds = metrics::ElapsedSeconds(responseObservedAt)) {
+                        task->responseProcessSeconds += *seconds;
+                    }
+                };
+
                 KvResponse response;
                 const auto batchNumber =
                     static_cast<std::uint16_t>(subBatchContext.entryStatus.size());
@@ -453,6 +477,7 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                         task->taskId, config_.nodeId, static_cast<int>(subBatchContext.opType),
                         completedCid, static_cast<int>(status.code), status.message);
                     completeWithError(status);
+                    recordResponseProcessing();
                     continue;
                 }
 
@@ -491,6 +516,7 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
                     connManager_->ReportSuccess(subBatchContext.channel);
                 }
                 CompleteSubBatch(*task, subBatchContext, status);
+                recordResponseProcessing();
             }
             task->TryFinalizeFromSubBatches();
         }

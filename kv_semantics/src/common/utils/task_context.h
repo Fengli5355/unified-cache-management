@@ -108,6 +108,15 @@ struct TransportTask {
     std::atomic<bool> sendReturned{false};
     metrics::CachedMetric* asuCompletionMetric{nullptr};
 
+    // Completion diagnostics are accumulated under mutex and exported once per task.
+    std::chrono::steady_clock::time_point firstPollAt{};
+    std::chrono::steady_clock::time_point lastPollAt{};
+    std::chrono::steady_clock::time_point lastResponseObservedAt{};
+    double maxPollGapSeconds{0.0};
+    double pollLockWaitSeconds{0.0};
+    double responseProcessSeconds{0.0};
+    std::size_t responsesObserved{0};
+
     std::atomic<TransportTaskState> state{TransportTaskState::PENDING};
     Status finalStatus{Status::OK()};
 

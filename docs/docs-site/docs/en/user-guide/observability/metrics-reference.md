@@ -253,7 +253,7 @@ For slow loads, inspect queuing, batch-get, backend waits and H2D. For slow save
 
 ### 1.6 ASU / KV metrics
 
-ASU forwards these 33 KV metrics (19 Counters and 14 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions.
+ASU forwards these 39 KV metrics (19 Counters and 20 Histograms) into the UCM collector. KV names below use the `kv:` prefix. Submission counts describe KV API calls and entries, not unique inference requests or successful asynchronous completions.
 
 Load/Store metrics combine single and batch protocols: requests count API calls, entries count input entries (including failed submission attempts), and errors count submission failures only, excluding asynchronous execution failures. The former `kv_client_batch_*` series are removed; upgrade dashboards and collection configs together. Historical series are not migrated.
 
@@ -314,6 +314,12 @@ The adapter uses the existing UCM `UpdateStats()` API. Samples are silently skip
 | `kv:kv_transport_task_send_duration_seconds` | seconds | KV transport duration until Send returns |
 | `kv:kv_transport_task_send_call_duration_seconds` | seconds | KV transport provider Send call duration |
 | `kv:kv_transport_task_completion_duration_seconds` | seconds | KV transport completion duration after Send |
+| `kv:kv_transport_completion_first_poll_duration_seconds` | seconds | Send return to first eligible completion poll; includes worker wakeup and lock wait |
+| `kv:kv_transport_completion_poll_gap_seconds` | seconds | Maximum interval between eligible polls within each task; zero for a single poll |
+| `kv:kv_transport_completion_poll_lock_wait_seconds` | seconds | Accumulated task mutex acquisition time across eligible completion polls |
+| `kv:kv_transport_completion_response_wait_seconds` | seconds | Send return to observing the last matching response CID; includes remote, return path and host polling delay, not pure server time |
+| `kv:kv_transport_completion_response_process_seconds` | seconds | Accumulated response decode, status handling and resource release duration per task |
+| `kv:kv_transport_completion_notify_duration_seconds` | seconds | Result construction, completion callback and task removal duration after transport completion |
 | `kv:kv_transport_node_task_send_duration_seconds` | seconds | KV transport node task send duration; standalone labels by node_id, UCM aggregates across nodes |
 | `kv:kv_transport_node_task_completion_duration_seconds` | seconds | KV transport node task completion duration; standalone labels by node_id, UCM aggregates across nodes |
 | `kv:kv_transport_task_e2e_duration_seconds` | seconds | KV transport task end-to-end duration from submit to completion |
@@ -322,7 +328,7 @@ For definition synchronization and custom catalog validation, see [metrics devel
 
 ### 1.7 Native AsuStore metrics
 
-These 20 metrics (16 Counters and 4 Histograms) use native UCM `UpdateStats()` at the AsuStore interface, independently of the 33 KV metrics above. The existing store-level `enable_metrics` switch controls this instance's `asu_*` observations; its shared KV backend installation behavior is unchanged. Registration and export still use the outer UCM configuration; custom catalogs must include the desired definitions.
+These 20 metrics (16 Counters and 4 Histograms) use native UCM `UpdateStats()` at the AsuStore interface, independently of the 39 KV metrics above. The existing store-level `enable_metrics` switch controls this instance's `asu_*` observations; its shared KV backend installation behavior is unchanged. Registration and export still use the outer UCM configuration; custom catalogs must include the desired definitions.
 
 The three lookup methods share call/error counts and duration. Ordinary lookup counts hits in the returned vector; prefix lookup counts the number of contiguous hit blocks (returned index + 1). Compute their hit ratios separately. Error returns do not contribute queried or hit blocks; timeout fallbacks contribute queried blocks with zero hits. Reverse lookup reports call results and duration only, without interpreting its returned position as a hit count.
 
