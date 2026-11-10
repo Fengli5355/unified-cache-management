@@ -1,4 +1,5 @@
-﻿#include "kv_test_config_loader.h"
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+#include "kv_test_config_loader.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -224,6 +225,8 @@ Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& con
 
         GetUint64Any(values, {"limits.memory_max_bytes"}, config.memoryMaxBytes);
 
+        GetStringAny(values, {"bench.execution_mode"}, config.bench.executionMode);
+        GetStringAny(values, {"bench.key_mode"}, config.bench.keyMode);
         GetUint64Any(values, {"bench.io_size"}, config.bench.ioSize);
         GetUint64Any(values, {"bench.io_interval_us"}, config.bench.ioIntervalUs);
         GetUint32Any(values, {"bench.concurrency"}, config.bench.concurrency);
@@ -294,6 +297,9 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
     }
     if (!options.outputPath.empty()) { config.output.path = options.outputPath; }
 
+    if (options.ioIntervalUs != 0) { config.bench.ioIntervalUs = options.ioIntervalUs; }
+    if (!options.executionMode.empty()) { config.bench.executionMode = options.executionMode; }
+    if (!options.keyMode.empty()) { config.bench.keyMode = options.keyMode; }
     if (options.benchOp != BenchOpType::UNKNOWN) { config.bench.op = options.benchOp; }
     if (options.concurrency != 0) { config.bench.concurrency = options.concurrency; }
     if (options.durationSec != 0) {

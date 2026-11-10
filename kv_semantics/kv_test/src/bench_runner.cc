@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -28,6 +29,7 @@ std::string FormatMiBPerSec(double bytesPerSec)
 namespace {
 
 constexpr int kExitInvalidArgument = 1;
+constexpr int kExitAsuStatusBase = 100;
 
 struct BenchBufferSlot {
     BufferSet buffers;
@@ -276,7 +278,7 @@ Status PrepareBenchBuffers(BenchBufferSlot& slot, std::uint64_t begin, std::size
 
 Status BindRegisteredBuffers(BufferSet& buffers)
 {
-    if (buffers.registeredRegions.size() != buffers.regions.size()) {
+    if (buffers.registeredRegions.size() < buffers.regions.size()) {
         return Status::Error(kExitInvalidArgument,
                              "registered buffer result count does not match region count");
     }
@@ -356,11 +358,13 @@ Status SubmitBenchOperation(BenchOpType requestedOp, const KvTestConfig& config,
 OperationOutcome WaitBenchOperation(const KvTestConfig& config, KvClientRunner& clientRunner,
                                     kv::TaskId taskId,
                                     std::chrono::steady_clock::time_point operationStart,
-                                    std::size_t entryCount, bool isRead)
+                                    std::size_t entryCount, bool isRead,
+                                    std::uint64_t waitTimeoutMs = 0)
 {
     CommandResult operationResult;
     auto opStatus =
-        clientRunner.Wait(taskId, config.asuClientConfig.defaultWaitTimeoutMs, operationResult);
+        clientRunner.Wait(taskId, waitTimeoutMs == 0 ? config.asuClientConfig.defaultWaitTimeoutMs
+                                                   : waitTimeoutMs, operationResult);
     const auto operationEnd = std::chrono::steady_clock::now();
 
     OperationOutcome outcome;
@@ -412,7 +416,26 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     }
 
     const auto entryCountPerOperation = BenchEntryCount(bench, bench.op);
-    const auto poolEntryCount = entryCountPerOperation;
+    if (bench.executionMode != "sync" && bench.executionMode != "async") {
+        return Status::Error(kExitInvalidArgument, "bench execution_mode must be sync or async");
+    }
+    if (bench.keyMode != "cycle" && bench.keyMode != "unique") {
+        return Status::Error(kExitInvalidArgument, "bench key_mode must be cycle or unique");
+    }
+    const bool asynchronous = bench.executionMode == "async";
+    const auto timeoutMs = config.asuClientConfig.defaultWaitTimeoutMs;
+    if (timeoutMs == 0 || timeoutMs > static_cast<std::uint64_t>(
+            std::numeric_limits<std::chrono::microseconds::rep>::max()) / 1000) {
+        return Status::Error(kExitInvalidArgument, "bench timeout must be positive and representable");
+    }
+    const auto timeoutUs = timeoutMs * 1000;
+    const auto baseSlots = timeoutUs / bench.ioIntervalUs + (timeoutUs % bench.ioIntervalUs != 0);
+    const auto slotCount = asynchronous ? baseSlots + baseSlots / 10 + (baseSlots % 10 != 0) : 1;
+    if (slotCount > std::numeric_limits<std::uint32_t>::max() ||
+        entryCountPerOperation > std::numeric_limits<std::uint64_t>::max() / slotCount) {
+        return Status::Error(kExitInvalidArgument, "bench in-flight buffer count exceeds supported range");
+    }
+    const auto poolEntryCount = entryCountPerOperation * slotCount;
     const auto keyCount = std::max<std::uint64_t>(
         config.count, std::max<std::uint64_t>(entryCountPerOperation * 16,
                                               entryCountPerOperation));
@@ -429,7 +452,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     const auto allocationPolicy = AllocationPolicyForConfig(config);
     const auto logicalDeviceId = ResolvePayloadDeviceId(config);
     BenchBufferPool bufferPool;
-    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation, 1, bufferPool);
+    status = BuildBenchBufferPool(config, useDeviceBuffers, entryCountPerOperation,
+                                  static_cast<std::size_t>(slotCount), bufferPool);
     if (!status.Ok()) { return status; }
     if (useDeviceBuffers &&
         (bench.op == BenchOpType::STORE || bench.op == BenchOpType::BATCH_STORE)) {
@@ -447,11 +471,12 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     using Clock = std::chrono::steady_clock;
     std::vector<double> measuredLatenciesUs;
     std::uint64_t operationIndex = 0;
+    std::uint64_t nextUniqueKey = 0;
     result = CommandResult{};
     result.benchMetrics.op = bench.op;
     result.benchMetrics.valueSize = bench.ioSize;
     result.benchMetrics.batchSize = static_cast<std::uint32_t>(entryCountPerOperation);
-    result.benchMetrics.concurrency = 1;
+    result.benchMetrics.concurrency = static_cast<std::uint32_t>(slotCount);
     result.benchMetrics.warmupSec = bench.warmupSec;
     result.benchMetrics.durationSec = bench.durationSec;
 
@@ -535,51 +560,107 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
             advanceProgressWindow();
         };
 
+        bool stopSubmitting = false;
         auto shouldContinue = [&]() {
+            if (stopSubmitting) { return false; }
             return ioCount == 0 ? Clock::now() < phaseEnd : scheduledEntryCount < ioCount;
         };
 
-        while (shouldContinue()) {
-            std::this_thread::sleep_until(nextSubmit);
-            if (ioCount == 0 && Clock::now() >= phaseEnd) { break; }
-
-            const auto begin =
-                static_cast<std::size_t>((operationIndex * entryCountPerOperation) % keyCount);
-            const auto available = keyCount - begin;
-            const auto remainingEntryCount =
-                ioCount == 0 ? entryCountPerOperation : ioCount - scheduledEntryCount;
-            const auto currentEntryCount = static_cast<std::size_t>(
-                std::min({entryCountPerOperation, static_cast<std::uint64_t>(available),
-                          remainingEntryCount}));
-            scheduledEntryCount += currentEntryCount;
-            const auto currentOperationIndex = operationIndex++;
-            const bool isRead = IsBenchReadOperation(bench.op, currentOperationIndex, config.bench);
-            auto& bufferSlot = bufferPool.front();
-            kv::TaskId taskId{kv::kInvalidTaskId};
-            const auto operationStart = Clock::now();
-            auto submitStatus = SubmitBenchOperation(
-                bench.op, config, clientRunner, bufferSlot, begin, currentEntryCount,
-                currentOperationIndex, keyPrefix, useDeviceBuffers, taskId);
-            if (!submitStatus.Ok()) {
-                phaseStatus = submitStatus;
-                if (collectStats) {
-                    ++result.benchMetrics.errorCount;
-                    ++windowErrors;
-                    advanceProgressWindow();
-                }
-                nextSubmit = operationStart + ioInterval;
-                continue;
+        struct PendingOperation {
+            kv::TaskId taskId;
+            Clock::time_point startedAt;
+            std::size_t entryCount;
+            std::size_t slot;
+            bool isRead;
+        };
+        std::vector<PendingOperation> pending;
+        std::deque<std::size_t> availableSlots;
+        for (std::size_t slot = 0; slot < bufferPool.size(); ++slot) {
+            availableSlots.push_back(slot);
+        }
+        const auto timeout = std::chrono::microseconds(timeoutUs);
+        const auto finish = [&](const PendingOperation& operation, bool expired) {
+            // Expired requests are consumed once. The Client/Server timeout contract
+            // permits immediate slot reuse; never poll an expired task again.
+            auto outcome = WaitBenchOperation(config, clientRunner, operation.taskId,
+                operation.startedAt, operation.entryCount, operation.isRead, expired ? 1 : timeoutMs);
+            if (expired) {
+                outcome.taskResult.status = kv::Status::Error(kv::StatusCode::TIMEOUT,
+                                                              "bench request deadline exceeded");
+                outcome.taskResult.entryStatus.assign(operation.entryCount, outcome.taskResult.status);
+                outcome.status = Status::Error(kExitAsuStatusBase + static_cast<int>(kv::StatusCode::TIMEOUT),
+                                               outcome.taskResult.status.message);
             }
-
-            const auto outcome = WaitBenchOperation(config, clientRunner, taskId, operationStart,
-                                                    currentEntryCount, isRead);
             recordOutcome(outcome);
             if (!outcome.status.Ok()) {
                 result.taskResult = outcome.taskResult;
                 phaseStatus = outcome.status;
             }
-            // Pace from this submission, never catch up missed intervals in a burst.
-            nextSubmit = operationStart + ioInterval;
+            availableSlots.push_back(operation.slot);
+        };
+
+        while (shouldContinue() || !pending.empty()) {
+            for (auto it = pending.begin(); it != pending.end();) {
+                const bool completed = clientRunner.Check(it->taskId);
+                const bool expired = !completed && Clock::now() - it->startedAt >= timeout;
+                if (expired || completed) {
+                    finish(*it, expired);
+                    it = pending.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (!shouldContinue()) {
+                if (pending.empty()) { break; }
+            } else if (!availableSlots.empty() && Clock::now() >= nextSubmit) {
+                const auto begin = bench.keyMode == "unique" ? nextUniqueKey
+                    : (operationIndex * entryCountPerOperation) % keyCount;
+                const auto available = bench.keyMode == "unique"
+                    ? std::numeric_limits<std::uint64_t>::max() - begin : keyCount - begin;
+                const auto remaining = ioCount == 0 ? entryCountPerOperation : ioCount - scheduledEntryCount;
+                const auto currentEntryCount = static_cast<std::size_t>(
+                    std::min({entryCountPerOperation, available, remaining}));
+                if (currentEntryCount == 0) {
+                    phaseStatus = Status::Error(kExitInvalidArgument, "bench unique key range exhausted");
+                    // Drain outstanding requests before releasing registered buffers.
+                    stopSubmitting = true;
+                    continue;
+                }
+                scheduledEntryCount += currentEntryCount;
+                if (bench.keyMode == "unique") { nextUniqueKey += currentEntryCount; }
+                const auto currentOperationIndex = operationIndex++;
+                const bool isRead = IsBenchReadOperation(bench.op, currentOperationIndex, bench);
+                const auto slot = availableSlots.front();
+                availableSlots.pop_front();
+                kv::TaskId taskId{kv::kInvalidTaskId};
+                const auto operationStart = Clock::now();
+                const auto submitStatus = SubmitBenchOperation(bench.op, config, clientRunner,
+                    bufferPool[slot], begin, currentEntryCount, currentOperationIndex,
+                    keyPrefix, useDeviceBuffers, taskId);
+                // Preserve a minimum interval; never catch up missed slots in a burst.
+                nextSubmit = operationStart + ioInterval;
+                if (!submitStatus.Ok()) {
+                    phaseStatus = submitStatus;
+                    availableSlots.push_back(slot);
+                    if (collectStats) {
+                        ++result.benchMetrics.errorCount;
+                        ++windowErrors;
+                        advanceProgressWindow();
+                    }
+                } else if (asynchronous) {
+                    pending.push_back({taskId, operationStart, currentEntryCount, slot, isRead});
+                } else {
+                    finish({taskId, operationStart, currentEntryCount, slot, isRead}, false);
+                }
+                continue;
+            }
+            auto wakeAt = pending.empty() ? nextSubmit
+                                          : Clock::now() + std::chrono::microseconds(100);
+            if (shouldContinue() && !availableSlots.empty()) { wakeAt = std::min(wakeAt, nextSubmit); }
+            for (const auto& operation : pending) {
+                wakeAt = std::min(wakeAt, operation.startedAt + timeout);
+            }
+            std::this_thread::sleep_until(wakeAt);
         }
 
         if (collectStats && (windowOperationCount != 0 || windowErrors != 0)) {

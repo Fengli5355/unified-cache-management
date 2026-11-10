@@ -27,6 +27,7 @@ public:
                     CommandResult& result);
     Status StoreAsync(const BufferSet& buffers, SubmitMode submitMode, kv::TaskId& taskId);
     Status RetrieveAsync(const BufferSet& buffers, SubmitMode submitMode, kv::TaskId& taskId);
+    bool Check(kv::TaskId taskId);
     Status Wait(kv::TaskId taskId, std::uint64_t timeoutMs, CommandResult& result);
     Status Delete(const std::vector<kv::CacheKey>& keys, std::uint64_t timeoutMs,
                   CommandResult& result);

@@ -1,4 +1,5 @@
-﻿#include "result_writer.h"
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+#include "result_writer.h"
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
@@ -192,6 +193,8 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
         return Status::Error(kExitInvalidArgument, "ResultWriter is not open");
     }
 
+    const auto effectiveConcurrency = options.command == CommandType::BENCH
+        ? result.benchMetrics.concurrency : options.concurrency;
     const auto commandName = CommandTypeName(options.command);
     const auto opName =
         options.command == CommandType::BENCH ? BenchOpTypeName(options.benchOp) : commandName;
@@ -213,9 +216,11 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "configpath: " << options.configPath << '\n'
              << "key_count: " << keyCount << '\n'
              << "value_size: " << options.valueSize << '\n'
+             << "execution_mode: " << options.executionMode << '\n'
+             << "key_mode: " << options.keyMode << '\n'
              << "io_interval_us: " << options.ioIntervalUs << '\n'
              << "batch_size: " << options.batchSize << '\n'
-             << "concurrency: " << options.concurrency << '\n'
+             << "concurrency: " << effectiveConcurrency << '\n'
              << "duration_sec: " << options.durationSec << '\n'
              << "io_count: " << options.ioCount << '\n'
              << "asu_status_code: " << asuStatusCode << '\n';
@@ -248,9 +253,11 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "    \"op\": " << JsonString(opName) << ",\n"
              << "    \"key_count\": " << keyCount << ",\n"
              << "    \"value_size\": " << options.valueSize << ",\n"
+             << "    \"execution_mode\": " << JsonString(options.executionMode) << ",\n"
+             << "    \"key_mode\": " << JsonString(options.keyMode) << ",\n"
              << "    \"io_interval_us\": " << options.ioIntervalUs << ",\n"
              << "    \"batch_size\": " << options.batchSize << ",\n"
-             << "    \"concurrency\": " << options.concurrency << ",\n"
+             << "    \"concurrency\": " << effectiveConcurrency << ",\n"
              << "    \"duration_sec\": " << options.durationSec << ",\n"
              << "    \"io_count\": " << options.ioCount << "\n"
              << "  },\n";
@@ -350,6 +357,8 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
 
 Status ResultWriter::WriteHtmlReport(const CommandOptions& options, const CommandResult& result)
 {
+    const auto effectiveConcurrency = options.command == CommandType::BENCH
+        ? result.benchMetrics.concurrency : options.concurrency;
     const auto commandName = CommandTypeName(options.command);
     const auto opName = options.command == CommandType::BENCH
                             ? BenchOpTypeName(result.benchMetrics.op)
@@ -400,9 +409,11 @@ Status ResultWriter::WriteHtmlReport(const CommandOptions& options, const Comman
              << "<tr><th>Command</th><td>" << HtmlEscape(commandName) << "</td></tr>"
              << "<tr><th>Operation</th><td>" << HtmlEscape(opName) << "</td></tr>"
              << "<tr><th>Value size</th><td>" << options.valueSize << "</td></tr>"
+             << "<tr><th>Execution mode</th><td>" << HtmlEscape(options.executionMode) << "</td></tr>"
+             << "<tr><th>Key mode</th><td>" << HtmlEscape(options.keyMode) << "</td></tr>"
              << "<tr><th>IO interval us</th><td>" << options.ioIntervalUs << "</td></tr>"
              << "<tr><th>Batch size</th><td>" << options.batchSize << "</td></tr>"
-             << "<tr><th>Concurrency</th><td>" << options.concurrency << "</td></tr>"
+             << "<tr><th>Concurrency</th><td>" << effectiveConcurrency << "</td></tr>"
              << "<tr><th>Duration sec</th><td>" << options.durationSec << "</td></tr>"
              << "<tr><th>IO count</th><td>" << options.ioCount << "</td></tr>"
              << "</tbody></table></section>";

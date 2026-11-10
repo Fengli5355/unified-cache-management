@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "kv_test_app.h"
 #include <algorithm>
 #include <filesystem>
@@ -99,6 +100,8 @@ CommandOptions BuildEffectiveOptions(const CommandOptions& options, const KvTest
     effective.valueSize = options.command == CommandType::BENCH
                               ? config.bench.ioSize
                               : EffectiveValueSize(options, config);
+    effective.executionMode = config.bench.executionMode;
+    effective.keyMode = config.bench.keyMode;
     effective.ioIntervalUs = config.bench.ioIntervalUs;
     effective.keyPrefix = EffectiveKeyPrefix(options, config);
     effective.batchSize = config.bench.batchSize;
@@ -217,6 +220,7 @@ void PrintGeneralHelp()
         << "  --output <path>          Override output.path.\n"
         << "\n"
         << "Bench options:\n"
+        << "  --execution-mode <sync|async>, --key-mode <cycle|unique>, --io-interval-us <us>,\n"
         << "  --op <op>, --bench-op <op>, --io-size <bytes>, --concurrency <n>,\n"
         << "  --duration <sec>, --count <n>, --warmup <sec>, --read-ratio <n>,\n"
         << "  --write-ratio <n>,\n"
@@ -285,7 +289,8 @@ void PrintCommandHelp(CommandType command)
             break;
         case CommandType::BENCH:
             std::cout << "Usage: kv-test bench [store|retrieve|batch-store|batch-retrieve|mix] "
-                         "[--io-size <bytes>] [--concurrency <n>] "
+                         "[--execution-mode <sync|async>] [--key-mode <cycle|unique>] "
+                         "[--io-interval-us <us>] [--io-size <bytes>] [--concurrency <n>] "
                          "[--duration <sec>] [--count <n>]\n"
                       << "       kv-test bench --op <op> [--batch-size <n>] [--warmup <sec>] "
                          "[--read-ratio <n>] [--write-ratio <n>] [--progress]\n"
@@ -356,7 +361,8 @@ void PrintBenchSummary(const CommandOptions& options, const CommandResult& resul
     if (options.command != CommandType::BENCH) { return; }
 
     const auto& metrics = result.benchMetrics;
-    std::cout << "bench: op=" << BenchOpTypeName(metrics.op) << "\nelapsed_sec=" << std::fixed
+    std::cout << "bench: mode=" << options.executionMode << " key_mode=" << options.keyMode
+              << " max_inflight=" << metrics.concurrency << " op=" << BenchOpTypeName(metrics.op) << "\nelapsed_sec=" << std::fixed
               << std::setprecision(3) << metrics.elapsedSec
               << "\noperations=" << metrics.completedOperations
               << "\nentries=" << metrics.completedEntries << "\nbytes=" << metrics.completedBytes

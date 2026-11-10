@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #pragma once
 
 #include <cstdint>
@@ -109,6 +110,8 @@ struct Status {
 struct CommandOptions {
     CommandType command{CommandType::UNKNOWN};
     BenchOpType benchOp{BenchOpType::UNKNOWN};
+    std::string executionMode;
+    std::string keyMode;
     std::string configPath;
     std::vector<std::string> keys;
     std::string keysFile;
@@ -138,6 +141,8 @@ struct CommandOptions {
 };
 
 struct BenchConfig {
+    std::string executionMode{"sync"};
+    std::string keyMode{"cycle"};
     BenchOpType op{BenchOpType::UNKNOWN};
     std::uint64_t ioSize{0};
     std::uint64_t ioIntervalUs{0};

@@ -360,7 +360,9 @@ These fields are parsed by `kv-test` itself:
 | `limits.memory_max_bytes` | Maximum value payload bytes held by kv-test. For normal commands this limits generated value bytes. For `bench`, this limits the reusable buffer pool. Default is 4 GiB. |
 | `bench.io_size` | Bench value size for one key. Must not exceed the protocol 24-bit length limit `0xFFFFFF`. |
 | `bench.io_interval_us` | Minimum interval between batch submission starts in microseconds. Each batch waits for completion before the next submission. Must be greater than zero. |
-| `bench.concurrency` | Retained for configuration compatibility; synchronous bench uses one in-flight batch and reports effective concurrency as 1. |
+| `bench.concurrency` | Retained for compatibility; effective in-flight count is derived from execution mode. |
+| `bench.execution_mode` | `sync` (default) or `async`; CLI: `--execution-mode`. |
+| `bench.key_mode` | `cycle` (default) or `unique`; CLI: `--key-mode`. |
 | `bench.duration_sec` | Measured benchmark duration. Must be greater than zero. |
 | `bench.warmup_sec` | Warmup duration. |
 | `bench.read_ratio` | Read ratio used by `bench mix`. |
@@ -596,21 +598,49 @@ Requirements:
   zero.
 - For `mix`, `read_ratio + write_ratio` must equal `100`.
 
-The benchmark runner submits one batch and waits for its CQE before submitting
-another batch. It reuses one buffer slot without growing the pool. Submission
-and completion errors are counted and the next batch is submitted. A Client
-Wait timeout allows payload reuse under the Client/Server contract: no remote
-reads or writes for that task occur after Client timeout. No extra polling is required.
-Measured runs with errors return failure while retaining successful-operation
-totals, elapsed time, bandwidth, latency summaries and the final progress window.
-Warmup results remain excluded from measured statistics.
+The default `bench.execution_mode=sync` submits one batch and waits for completion
+before submitting the next, using one reusable buffer slot. `bench.io_interval_us`
+is the minimum interval between submission starts: a slow IO delays the next
+submission until completion. Single-key versus batch protocol selection is
+independent of this scheduling mode.
 
-`bench.io_interval_us` is the minimum interval between submission starts. If a
-batch completes sooner, bench waits for the remaining interval. If it completes
-later, the next batch can start immediately, without catching up missed intervals.
-`bench.concurrency` remains accepted for compatibility but does not enable
-parallel submissions; reported effective concurrency is 1. Launch multiple kv-test
-processes from the caller to generate concurrent load.
+Set `bench.execution_mode=async` or `--execution-mode async` to submit at
+`bench.io_interval_us` (CLI: `--io-interval-us`) while earlier requests are
+in flight. The fixed buffer pool is sized before the run:
+
+`base = ceil(wait_timeout_ms * 1000 / io_interval_us)`
+
+`max_inflight = base + ceil(base * 0.10)`
+
+Each slot holds one request's payload (`batch_size * io_size` for batch IO).
+For example, timeout 100 ms and interval 1000 us allocate 110 slots. Pool size
+is checked against `limits.memory_max_bytes`; it never grows during a run.
+Client/transport in-flight limits must also accommodate the intended load.
+The summary reports effective `max_inflight` as concurrency; `bench.concurrency`
+is retained for configuration compatibility and does not size the pool.
+
+The scheduler consumes completed tasks, and consumes expired tasks with a short
+Wait (at most 1 ms) before recording TIMEOUT and returning their slots. Under the
+Client/Server timeout contract no remote reads or writes occur after Client
+timeout. There is no extra Check loop after a timeout. Submission/completion
+errors are counted and subsequent requests continue. Pending requests are
+collected before a phase ends or the registered buffers are released. Real
+submission timing depends on OS scheduling, completion collection and API cost;
+missed intervals are not replayed in a burst.
+
+`bench.key_mode=cycle` (default) retains the existing bounded key range.
+`bench.key_mode=unique` or `--key-mode unique` assigns monotonically increasing
+key indexes across warmup and measurement, including every entry of a batch.
+Only keys change before submission; the slot's allocated value buffer is reused.
+Keys are unique within one run; use a different `--prefix` for different
+processes or runs. Unique reads require the corresponding keys to be populated
+in advance; changing keys does not itself guarantee distinct physical disk
+locations, which are chosen by the storage backend. Prefix plus decimal index
+must fit the KV key length limit.
+
+Measured runs with errors return failure while retaining successful-operation
+statistics and the final progress window. Warmup results are excluded from
+measured statistics.
 
 With `--progress`, bench prints one measured progress line per second instead
 of rewriting a terminal line. The final summary and report output are still

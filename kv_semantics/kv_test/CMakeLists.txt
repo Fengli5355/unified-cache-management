@@ -48,6 +48,7 @@ target_link_libraries(kv-test
 if(BUILD_UNIT_TESTS)
     include(GoogleTest)
     add_executable(kv-test-bench.test
+        src/arg_parser.cc
         src/bench_runner.cc
         src/kv_client_runner.cc
         src/buffer_allocator.cc

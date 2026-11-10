@@ -1,4 +1,5 @@
-﻿#include "arg_parser.h"
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+#include "arg_parser.h"
 #include <cerrno>
 #include <cstdlib>
 #include <limits>
@@ -324,6 +325,28 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             if (options.benchOp == BenchOpType::UNKNOWN) {
                 return Status::Error(kExitInvalidArgument, "unknown bench operation: " + value);
             }
+        } else if (option == "--io-interval-us") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            status = ParseUint64(option, value, options.ioIntervalUs);
+            if (!status.Ok()) { return status; }
+            if (options.ioIntervalUs == 0) {
+                return Status::Error(kExitInvalidArgument, "IO interval must be positive");
+            }
+        } else if (option == "--execution-mode" || option == "--key-mode") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            if (option == "--execution-mode") {
+                if (value != "sync" && value != "async") {
+                    return Status::Error(kExitInvalidArgument, "execution mode must be sync or async");
+                }
+                options.executionMode = value;
+            } else {
+                if (value != "cycle" && value != "unique") {
+                    return Status::Error(kExitInvalidArgument, "key mode must be cycle or unique");
+                }
+                options.keyMode = value;
+            }
         } else if (option == "--concurrency") {
             auto status = requireValue();
             if (!status.Ok()) { return status; }
@@ -375,7 +398,8 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
     }
 
     const bool hasRangePart =
-        !options.keyPrefix.empty() || options.keyStartSet || options.keyEndSet;
+        (options.command != CommandType::BENCH && !options.keyPrefix.empty()) ||
+        options.keyStartSet || options.keyEndSet;
     if (hasRangePart && (options.keyPrefix.empty() || !options.keyStartSet || !options.keyEndSet)) {
         return Status::Error(kExitInvalidArgument,
                              "--prefix, --key-start, and --key-end must be specified together");

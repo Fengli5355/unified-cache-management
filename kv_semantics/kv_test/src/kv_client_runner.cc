@@ -272,6 +272,11 @@ Status KvClientRunner::RetrieveAsync(const BufferSet& buffers, SubmitMode submit
     return SubmitEntriesAsync(*client_, buffers.entries, SubmitLoad, "retrieve", taskId);
 }
 
+bool KvClientRunner::Check(kv::TaskId taskId)
+{
+    return client_ != nullptr && client_->Check(taskId);
+}
+
 Status KvClientRunner::Wait(kv::TaskId taskId, std::uint64_t timeoutMs, CommandResult& result)
 {
     if (client_ == nullptr) { return Status::Error(kExitInvalidArgument, "asu client is null"); }
