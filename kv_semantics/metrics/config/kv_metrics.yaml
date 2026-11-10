@@ -20,6 +20,8 @@ counter:
   - {name: "kv_transport_task_completion_timeouts_total", documentation: "Total KV transport task completion timeouts"}
   - {name: "kv_transport_task_io_timeouts_total", documentation: "Total KV transport sub-batch IO timeouts"}
   - {name: "kv_transport_task_connection_errors_total", documentation: "Total KV transport connection errors"}
+  - {name: "kv_test_bench_store_bytes_total", documentation: "Total successfully completed store payload bytes measured by kv-test bench"}
+  - {name: "kv_test_bench_retrieve_bytes_total", documentation: "Total successfully completed retrieve payload bytes measured by kv-test bench"}
 
 histogram:
   - {name: "kv_client_task_enqueue_duration_seconds", documentation: "KV client API-to-enqueue duration", buckets: [0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]}

@@ -30,6 +30,8 @@ inline std::vector<MetricDescriptor> DefaultKvMetricDescriptors()
         {"kv_transport_task_completion_timeouts_total", MetricType::COUNTER, "Total KV transport task completion timeouts", {}},
         {"kv_transport_task_io_timeouts_total", MetricType::COUNTER, "Total KV transport sub-batch IO timeouts", {}},
         {"kv_transport_task_connection_errors_total", MetricType::COUNTER, "Total KV transport connection errors", {}},
+        {"kv_test_bench_store_bytes_total", MetricType::COUNTER, "Total successfully completed store payload bytes measured by kv-test bench", {}},
+        {"kv_test_bench_retrieve_bytes_total", MetricType::COUNTER, "Total successfully completed retrieve payload bytes measured by kv-test bench", {}},
         {"kv_client_task_enqueue_duration_seconds", MetricType::HISTOGRAM, "KV client API-to-enqueue duration", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},
         {"kv_client_task_queue_duration_seconds", MetricType::HISTOGRAM, "KV client task queue duration", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},
         {"kv_client_task_process_duration_seconds", MetricType::HISTOGRAM, "KV client task processing duration", {1e-05, 5e-05, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0}},

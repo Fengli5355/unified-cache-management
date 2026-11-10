@@ -49,6 +49,8 @@ _COUNTER_METRICS = [
     ("kv_transport_task_completion_timeouts_total", "Total KV transport task completion timeouts", {"prometheus_name": "kv:kv_transport_task_completion_timeouts_total"}),
     ("kv_transport_task_io_timeouts_total", "Total KV transport sub-batch IO timeouts", {"prometheus_name": "kv:kv_transport_task_io_timeouts_total"}),
     ("kv_transport_task_connection_errors_total", "Total KV transport connection errors", {"prometheus_name": "kv:kv_transport_task_connection_errors_total"}),
+    ("kv_test_bench_store_bytes_total", "Total successfully completed store payload bytes measured by kv-test bench", {"prometheus_name": "kv:kv_test_bench_store_bytes_total"}),
+    ("kv_test_bench_retrieve_bytes_total", "Total successfully completed retrieve payload bytes measured by kv-test bench", {"prometheus_name": "kv:kv_test_bench_retrieve_bytes_total"}),
     # END GENERATED KV counter
     (
         "cache_lookup_hit_blocks_total",
