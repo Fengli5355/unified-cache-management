@@ -325,6 +325,14 @@ Status ArgParser::Parse(int argc, char** argv, CommandOptions& options) const
             if (options.benchOp == BenchOpType::UNKNOWN) {
                 return Status::Error(kExitInvalidArgument, "unknown bench operation: " + value);
             }
+        } else if (option == "--cycle-key-count") {
+            auto status = requireValue();
+            if (!status.Ok()) { return status; }
+            status = ParseUint64(option, value, options.cycleKeyCount);
+            if (!status.Ok()) { return status; }
+            if (options.cycleKeyCount == 0) {
+                return Status::Error(kExitInvalidArgument, "cycle key count must be positive");
+            }
         } else if (option == "--io-interval-us") {
             auto status = requireValue();
             if (!status.Ok()) { return status; }

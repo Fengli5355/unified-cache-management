@@ -184,7 +184,7 @@ Status BuildBenchBufferPool(const KvTestConfig& config, bool useDeviceBuffers,
         std::size_t deviceBufferSize = 0;
         for (std::uint64_t index = 0; index < entryCountPerOperation; ++index) {
             auto& value = buffers.ownedBuffers.emplace_back(static_cast<std::size_t>(bench.ioSize));
-            FillStoreValue(value, slotIndex * entryCountPerOperation + index, config.seed);
+            FillStoreValue(value, slotIndex * entryCountPerOperation + index, config.bench.seed);
             if (useDeviceBuffers) {
                 const auto offset = AlignUp(deviceBufferSize, DeviceBufferAlignment());
                 if (offset < deviceBufferSize ||
@@ -436,9 +436,8 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         return Status::Error(kExitInvalidArgument, "bench in-flight buffer count exceeds supported range");
     }
     const auto poolEntryCount = entryCountPerOperation * slotCount;
-    const auto keyCount = std::max<std::uint64_t>(
-        config.count, std::max<std::uint64_t>(entryCountPerOperation * 16,
-                                              entryCountPerOperation));
+    const auto keyCount = bench.cycleKeyCount == 0 ? entryCountPerOperation * 16
+                                                   : bench.cycleKeyCount;
 
     auto status = ValidateBenchBufferConfig(bench, poolEntryCount, config.memoryMaxBytes);
     if (!status.Ok()) { return status; }
@@ -447,7 +446,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
         return Status::Error(kExitInvalidArgument, "bench total IO bytes overflow uint64");
     }
 
-    const std::string keyPrefix = config.keyPrefix.empty() ? "b" : config.keyPrefix;
+    const std::string keyPrefix = bench.keyPrefix.empty() ? "b" : bench.keyPrefix;
     const bool useDeviceBuffers = UsesDevicePayloadBuffers(config);
     const auto allocationPolicy = AllocationPolicyForConfig(config);
     const auto logicalDeviceId = ResolvePayloadDeviceId(config);
@@ -472,6 +471,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
     std::vector<double> measuredLatenciesUs;
     std::uint64_t operationIndex = 0;
     std::uint64_t nextUniqueKey = 0;
+    std::uint64_t nextCycleKey = 0;
     result = CommandResult{};
     result.benchMetrics.op = bench.op;
     result.benchMetrics.valueSize = bench.ioSize;
@@ -614,7 +614,7 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                 if (pending.empty()) { break; }
             } else if (!availableSlots.empty() && Clock::now() >= nextSubmit) {
                 const auto begin = bench.keyMode == "unique" ? nextUniqueKey
-                    : (operationIndex * entryCountPerOperation) % keyCount;
+                    : nextCycleKey;
                 const auto available = bench.keyMode == "unique"
                     ? std::numeric_limits<std::uint64_t>::max() - begin : keyCount - begin;
                 const auto remaining = ioCount == 0 ? entryCountPerOperation : ioCount - scheduledEntryCount;
@@ -627,7 +627,11 @@ Status BenchRunner::Run(const CommandOptions& options, const KvTestConfig& confi
                     continue;
                 }
                 scheduledEntryCount += currentEntryCount;
-                if (bench.keyMode == "unique") { nextUniqueKey += currentEntryCount; }
+                if (bench.keyMode == "unique") {
+                    nextUniqueKey += currentEntryCount;
+                } else {
+                    nextCycleKey = (begin + currentEntryCount) % keyCount;
+                }
                 const auto currentOperationIndex = operationIndex++;
                 const bool isRead = IsBenchReadOperation(bench.op, currentOperationIndex, bench);
                 const auto slot = availableSlots.front();

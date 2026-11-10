@@ -289,7 +289,7 @@ TEST(BenchRunnerTest, AsyncPartialBatchUsesRegisteredSlotPrefix)
 TEST(BenchRunnerTest, ParsesExecutionKeyModeAndIntervalWithBenchPrefix)
 {
     std::vector<std::string> args = {"kv-test", "bench", "store", "--execution-mode",
-        "async", "--key-mode", "unique", "--io-interval-us", "2000", "--prefix", "run1", "--count", "20"};
+        "async", "--key-mode", "unique", "--io-interval-us", "2000", "--prefix", "run1", "--count", "20", "--cycle-key-count", "5"};
     std::vector<char*> argv;
     for (auto& arg : args) { argv.push_back(arg.data()); }
     CommandOptions options;
@@ -298,11 +298,32 @@ TEST(BenchRunnerTest, ParsesExecutionKeyModeAndIntervalWithBenchPrefix)
     EXPECT_EQ(options.keyMode, "unique");
     EXPECT_EQ(options.ioIntervalUs, 2000U);
     EXPECT_EQ(options.ioCount, 20U);
+    EXPECT_EQ(options.cycleKeyCount, 5U);
     EXPECT_EQ(options.keyPrefix, "run1");
     args[4] = "invalid";
     argv.clear();
     for (auto& arg : args) { argv.push_back(arg.data()); }
     EXPECT_FALSE(ArgParser().Parse(static_cast<int>(argv.size()), argv.data(), options).Ok());
+}
+TEST(BenchRunnerTest, CycleRangeIsIndependentOfSingleIoConfiguration)
+{
+    auto state = std::make_shared<State>();
+    state->failWait = false;
+    auto config = Config();
+    config.count = 1000;
+    config.keyPrefix = "single-io";
+    config.bench.cycleKeyCount = 5;
+    config.bench.op = BenchOpType::BATCH_STORE;
+    config.bench.batchSize = 2;
+    config.bench.ioCount = 12;
+    KvClientRunner runner(std::make_unique<Client>(state));
+    CommandResult result;
+    EXPECT_TRUE(BenchRunner().Run({}, config, runner, result).Ok());
+    EXPECT_EQ(state->keys.size(), 5U);
+    EXPECT_EQ(result.benchMetrics.completedEntries, 12U);
+    for (const auto& key : state->keys) {
+        EXPECT_EQ(key.front(), static_cast<std::byte>('b'));
+    }
 }
 }  // namespace
 }  // namespace kv::bench

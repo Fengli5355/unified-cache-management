@@ -74,6 +74,7 @@ std::filesystem::path PowerCycleMetadataPath(const KvTestConfig& config)
 
 std::uint64_t EffectiveSeed(const CommandOptions& options, const KvTestConfig& config)
 {
+    if (options.command == CommandType::BENCH) { return config.bench.seed; }
     return options.seed == 0 ? config.seed : options.seed;
 }
 
@@ -84,11 +85,13 @@ std::uint64_t EffectiveValueSize(const CommandOptions& options, const KvTestConf
 
 std::uint64_t EffectiveCount(const CommandOptions& options, const KvTestConfig& config)
 {
+    if (options.command == CommandType::BENCH) { return 0; }
     return options.count == 0 ? config.count : options.count;
 }
 
 std::string EffectiveKeyPrefix(const CommandOptions& options, const KvTestConfig& config)
 {
+    if (options.command == CommandType::BENCH) { return config.bench.keyPrefix; }
     return options.keyPrefix.empty() ? config.keyPrefix : options.keyPrefix;
 }
 
@@ -102,6 +105,13 @@ CommandOptions BuildEffectiveOptions(const CommandOptions& options, const KvTest
                               : EffectiveValueSize(options, config);
     effective.executionMode = config.bench.executionMode;
     effective.keyMode = config.bench.keyMode;
+    const bool batch = config.bench.op == BenchOpType::BATCH_STORE ||
+                       config.bench.op == BenchOpType::BATCH_RETRIEVE ||
+                       config.bench.op == BenchOpType::MIX;
+    effective.cycleKeyCount = config.bench.keyMode == "cycle"
+        ? (config.bench.cycleKeyCount == 0
+            ? 16ULL * (batch ? std::max<std::uint32_t>(config.bench.batchSize, 1) : 1)
+            : config.bench.cycleKeyCount) : 0;
     effective.ioIntervalUs = config.bench.ioIntervalUs;
     effective.keyPrefix = EffectiveKeyPrefix(options, config);
     effective.batchSize = config.bench.batchSize;
@@ -220,7 +230,7 @@ void PrintGeneralHelp()
         << "  --output <path>          Override output.path.\n"
         << "\n"
         << "Bench options:\n"
-        << "  --execution-mode <sync|async>, --key-mode <cycle|unique>, --io-interval-us <us>,\n"
+        << "  --execution-mode <sync|async>, --key-mode <cycle|unique>, --cycle-key-count <n>, --io-interval-us <us>,\n"
         << "  --op <op>, --bench-op <op>, --io-size <bytes>, --concurrency <n>,\n"
         << "  --duration <sec>, --count <n>, --warmup <sec>, --read-ratio <n>,\n"
         << "  --write-ratio <n>,\n"
@@ -289,7 +299,7 @@ void PrintCommandHelp(CommandType command)
             break;
         case CommandType::BENCH:
             std::cout << "Usage: kv-test bench [store|retrieve|batch-store|batch-retrieve|mix] "
-                         "[--execution-mode <sync|async>] [--key-mode <cycle|unique>] "
+                         "[--execution-mode <sync|async>] [--key-mode <cycle|unique>] [--cycle-key-count <n>] "
                          "[--io-interval-us <us>] [--io-size <bytes>] [--concurrency <n>] "
                          "[--duration <sec>] [--count <n>]\n"
                       << "       kv-test bench --op <op> [--batch-size <n>] [--warmup <sec>] "

@@ -165,7 +165,7 @@ For `bench`, data generation is separate:
 
 - key prefix defaults to `bench-key-` when `kv.key_prefix` is empty
 - value bytes are filled from `(index + byteIndex + seed) & 0xFF`
-- key count is at least `entries_per_operation * 16`
+- cycle key count is `bench.cycle_key_count`, or `entries_per_operation * 16` when zero
 
 ## Config file
 
@@ -363,6 +363,9 @@ These fields are parsed by `kv-test` itself:
 | `bench.concurrency` | Retained for compatibility; effective in-flight count is derived from execution mode. |
 | `bench.execution_mode` | `sync` (default) or `async`; CLI: `--execution-mode`. |
 | `bench.key_mode` | `cycle` (default) or `unique`; CLI: `--key-mode`. |
+| `bench.cycle_key_count` | Exact cycle key range size; `0` (default) selects `16 * entries_per_operation`. CLI: `--cycle-key-count <positive n>`. Ignored in unique mode. |
+| `bench.key_prefix` | Bench key prefix, default `b`; CLI: `--prefix`. Independent of `kv.key_prefix`. |
+| `bench.seed` | Bench value generation seed, default `0`; CLI: `--seed`. Independent of `kv.seed`. |
 | `bench.duration_sec` | Measured benchmark duration. Must be greater than zero. |
 | `bench.warmup_sec` | Warmup duration. |
 | `bench.read_ratio` | Read ratio used by `bench mix`. |
@@ -628,7 +631,13 @@ collected before a phase ends or the registered buffers are released. Real
 submission timing depends on OS scheduling, completion collection and API cost;
 missed intervals are not replayed in a burst.
 
-`bench.key_mode=cycle` (default) retains the existing bounded key range.
+`bench.key_mode=cycle` (default) cycles over indexes `0` through
+`bench.cycle_key_count - 1`. Zero selects `16 * entries_per_operation`.
+Set `--cycle-key-count 1000` to cycle through exactly 1000 keys. A batch
+is shortened at the cycle boundary, then the next request resumes at index zero.
+The range does not use `kv.count`; `--count` still controls total benchmark IOs.
+Bench data comes from `bench.key_prefix`, `bench.seed` and `bench.io_size`;
+`kv.*` fields apply to non-bench commands and do not supply bench defaults.
 `bench.key_mode=unique` or `--key-mode unique` assigns monotonically increasing
 key indexes across warmup and measurement, including every entry of a batch.
 Only keys change before submission; the slot's allocated value buffer is reused.

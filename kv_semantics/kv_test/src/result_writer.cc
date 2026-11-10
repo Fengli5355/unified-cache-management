@@ -107,6 +107,10 @@ std::string ResultStatusName(const CommandResult& result)
 
 std::uint64_t KeyCount(const CommandOptions& options, const CommandResult& result)
 {
+    if (options.command == CommandType::BENCH) {
+        return options.keyMode == "cycle" ? options.cycleKeyCount
+                                           : result.benchMetrics.completedEntries;
+    }
     if (!options.keys.empty()) { return options.keys.size(); }
     if (options.keyStartSet && options.keyEndSet) { return options.keyEnd - options.keyStart + 1; }
     if (options.count != 0) { return options.count; }
@@ -218,6 +222,7 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "value_size: " << options.valueSize << '\n'
              << "execution_mode: " << options.executionMode << '\n'
              << "key_mode: " << options.keyMode << '\n'
+             << "cycle_key_count: " << options.cycleKeyCount << '\n'
              << "io_interval_us: " << options.ioIntervalUs << '\n'
              << "batch_size: " << options.batchSize << '\n'
              << "concurrency: " << effectiveConcurrency << '\n'
@@ -255,6 +260,7 @@ Status ResultWriter::WriteSummary(const CommandOptions& options, const CommandRe
              << "    \"value_size\": " << options.valueSize << ",\n"
              << "    \"execution_mode\": " << JsonString(options.executionMode) << ",\n"
              << "    \"key_mode\": " << JsonString(options.keyMode) << ",\n"
+             << "    \"cycle_key_count\": " << options.cycleKeyCount << ",\n"
              << "    \"io_interval_us\": " << options.ioIntervalUs << ",\n"
              << "    \"batch_size\": " << options.batchSize << ",\n"
              << "    \"concurrency\": " << effectiveConcurrency << ",\n"

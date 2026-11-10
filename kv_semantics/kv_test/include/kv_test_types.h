@@ -112,6 +112,7 @@ struct CommandOptions {
     BenchOpType benchOp{BenchOpType::UNKNOWN};
     std::string executionMode;
     std::string keyMode;
+    std::uint64_t cycleKeyCount{0};
     std::string configPath;
     std::vector<std::string> keys;
     std::string keysFile;
@@ -143,6 +144,9 @@ struct CommandOptions {
 struct BenchConfig {
     std::string executionMode{"sync"};
     std::string keyMode{"cycle"};
+    std::uint64_t cycleKeyCount{0};
+    std::string keyPrefix{"b"};
+    std::uint64_t seed{0};
     BenchOpType op{BenchOpType::UNKNOWN};
     std::uint64_t ioSize{0};
     std::uint64_t ioIntervalUs{0};

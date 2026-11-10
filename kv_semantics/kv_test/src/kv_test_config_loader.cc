@@ -227,6 +227,9 @@ Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& con
 
         GetStringAny(values, {"bench.execution_mode"}, config.bench.executionMode);
         GetStringAny(values, {"bench.key_mode"}, config.bench.keyMode);
+        GetUint64Any(values, {"bench.cycle_key_count"}, config.bench.cycleKeyCount);
+        GetStringAny(values, {"bench.key_prefix"}, config.bench.keyPrefix);
+        GetUint64Any(values, {"bench.seed"}, config.bench.seed);
         GetUint64Any(values, {"bench.io_size"}, config.bench.ioSize);
         GetUint64Any(values, {"bench.io_interval_us"}, config.bench.ioIntervalUs);
         GetUint32Any(values, {"bench.concurrency"}, config.bench.concurrency);
@@ -281,11 +284,19 @@ Status KvTestConfigLoader::Load(const std::string& configPath, KvTestConfig& con
 Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
                                                KvTestConfig& config) const
 {
-    if (options.seed != 0) { config.seed = options.seed; }
+    if (options.command == CommandType::BENCH) {
+        if (options.seed != 0) { config.bench.seed = options.seed; }
+        if (!options.keyPrefix.empty()) { config.bench.keyPrefix = options.keyPrefix; }
+    } else if (options.seed != 0) {
+        config.seed = options.seed;
+    }
     if (options.count != 0) { config.count = options.count; }
     if (options.valueSize != 0) {
-        config.valueSize = options.valueSize;
-        if (options.command == CommandType::BENCH) { config.bench.ioSize = options.valueSize; }
+        if (options.command == CommandType::BENCH) {
+            config.bench.ioSize = options.valueSize;
+        } else {
+            config.valueSize = options.valueSize;
+        }
     }
     if (options.batchSize != 0) { config.bench.batchSize = options.batchSize; }
     if (options.timeoutMs != 0) {
@@ -299,6 +310,7 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
 
     if (options.ioIntervalUs != 0) { config.bench.ioIntervalUs = options.ioIntervalUs; }
     if (!options.executionMode.empty()) { config.bench.executionMode = options.executionMode; }
+    if (options.cycleKeyCount != 0) { config.bench.cycleKeyCount = options.cycleKeyCount; }
     if (!options.keyMode.empty()) { config.bench.keyMode = options.keyMode; }
     if (options.benchOp != BenchOpType::UNKNOWN) { config.bench.op = options.benchOp; }
     if (options.concurrency != 0) { config.bench.concurrency = options.concurrency; }
@@ -313,17 +325,14 @@ Status KvTestConfigLoader::MergeCommandOptions(const CommandOptions& options,
 
     const bool hasExplicitKeys = !options.keys.empty() || !options.keysFile.empty() ||
                                  options.keyStartSet || options.keyEndSet;
-    if (config.count != 0 && config.keyPrefix.empty() && !hasExplicitKeys) {
+    if (options.command != CommandType::BENCH && config.count != 0 && config.keyPrefix.empty() && !hasExplicitKeys) {
         return Status::Error(kExitInvalidArgument,
                              "kv.key_prefix is required when count-based key generation is used");
     }
-    if (config.count != 0 && config.valueSize == 0 && options.command != CommandType::DELETE &&
+    if (options.command != CommandType::BENCH && config.count != 0 && config.valueSize == 0 && options.command != CommandType::DELETE &&
         options.command != CommandType::EXIST) {
         return Status::Error(kExitInvalidArgument,
                              "kv.value_size is required when count-based value generation is used");
-    }
-    if (options.command == CommandType::BENCH && config.bench.ioSize == 0) {
-        config.bench.ioSize = config.valueSize;
     }
     if (options.command == CommandType::BENCH && config.bench.ioSize > kMaxBenchIoSizeBytes) {
         return Status::Error(kExitInvalidArgument,
