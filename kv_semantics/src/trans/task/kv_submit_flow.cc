@@ -119,6 +119,9 @@ void TransportTaskExecutor::BuildSubBatchSendBuffers(
     ioBatches.reserve(subBatchContexts.size());
 
     for (auto& subBatchContext : subBatchContexts) {
+        KV_DEBUG("[UCM_SEND_TRACE] cid={} request_dev_va=0x{:x} len={}",
+                 subBatchContext.cid, subBatchContext.sendSge.device_addr,
+                 subBatchContext.sendSge.length);
         ioBatches.push_back(TransProvider::SendIoBatch{
             subBatchContext.channel->GetConnection(),
             reinterpret_cast<void*>(subBatchContext.sendSge.device_addr),
@@ -140,11 +143,18 @@ void TransportTaskExecutor::SendSubBatchBuffers(
     metrics::UpdateStats(
         KV_METRIC("kv_transport_task_send_call_duration_seconds"),
         std::chrono::duration<double>(std::chrono::steady_clock::now() - sendStartedAt).count());
-    if (sendStatuses.size() != ioBatches.size()) {
+    ApplySubBatchSendStatuses(subBatchContexts, sendStatuses, ioBatches.size());
+}
+
+void TransportTaskExecutor::ApplySubBatchSendStatuses(
+    std::vector<TransportSubBatchContext>& subBatchContexts,
+    const std::vector<Status>& sendStatuses, std::size_t expectedCount)
+{
+    if (sendStatuses.size() != expectedCount || expectedCount != subBatchContexts.size()) {
         const auto status = Status::Error(StatusCode::INTERNAL_ERROR,
                                           "transport send returned unexpected status count");
         KV_ERROR("Transport send returned unexpected status count expected={} actual={}",
-                 ioBatches.size(), sendStatuses.size());
+                 expectedCount, sendStatuses.size());
         for (auto& subBatchContext : subBatchContexts) {
             SetSubBatchSendFailed(subBatchContext, status);
             ReleaseSubBatchResources(subBatchContext);
@@ -154,6 +164,7 @@ void TransportTaskExecutor::SendSubBatchBuffers(
 
     for (std::size_t index = 0; index < sendStatuses.size(); ++index) {
         auto& subBatchContext = subBatchContexts[index];
+        if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
         const auto& subBatchStatus = sendStatuses[index];
         if (subBatchStatus.ok()) { continue; }
 
