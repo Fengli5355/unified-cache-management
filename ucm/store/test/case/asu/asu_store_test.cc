@@ -691,6 +691,42 @@ TEST(UCAsuStoreTest, PropagatesSeparateMaxInflightTasks)
     EXPECT_EQ(asuConfig.transportConfigs.front().completionPollSpinLimit, std::size_t{19});
 }
 
+TEST(UCAsuStoreTest, PropagatesAicpuAsyncSendConfig)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeClient(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_trans_provider_backend", std::string{"aicpu"});
+    config.Set("asu_aicpu_hcomm_protocol", std::string{"ubc_ctp"});
+    config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
+    config.Set("asu_aicpu_send_mode", std::string{"ASYNC"});
+    config.SetNumber("asu_transport_max_inflight_tasks", std::uint64_t{4});
+
+    ASSERT_TRUE(store.Setup(config).Success());
+    ASSERT_FALSE(state->initConfigs.empty());
+
+    const auto transportConfig = UC::AsuStore::BuildTransportConfig(state->initConfigs.back(), 0);
+    EXPECT_EQ(transportConfig.attrs.at("aicpu_send_mode"), "async");
+    EXPECT_EQ(transportConfig.maxInflightTasks, 4U);
+}
+
+TEST(UCAsuStoreTest, RejectsOutOfRangeAicpuTransportTaskLimit)
+{
+    UC::AsuStore::AsuStore store;
+    auto config = MakeBaseConfig();
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_trans_provider_backend", std::string{"aicpu"});
+    config.Set("asu_aicpu_hcomm_protocol", std::string{"ubc_ctp"});
+    config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
+    config.Set("asu_aicpu_send_mode", std::string{"async"});
+    config.SetNumber("asu_transport_max_inflight_tasks", std::uint64_t{1} << 32U);
+
+    EXPECT_TRUE(store.Setup(config).Failure());
+}
+
 TEST(UCAsuStoreTest, FakeProviderPreservesConfiguredSc)
 {
     UC::AsuStore::AsuStore store;
@@ -917,6 +953,43 @@ TEST(UCAsuStoreTest, SchedulerTransportsUseDeviceZero)
             UC::AsuStore::BuildTransportConfig(state->initConfigs.back(), 0);
         EXPECT_EQ(transportConfig.deviceId, 0);
     }
+}
+
+TEST(UCAsuStoreTest, PropagatesAicpuJfcModeFromStoreConfig)
+{
+    for (const auto& mode : {std::string{}, std::string{"USER_CTL"}, std::string{"stars_poll"}}) {
+        UC::AsuStore::AsuStore store;
+        auto state = UseFakeClient(store);
+        auto config = MakeBaseConfig();
+        config.Set("asu_ids", std::vector<ssize_t>{1001});
+        config.Set("asu_trans_provider_backend", std::string{"aicpu"});
+        config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+        config.Set("asu_aicpu_hcomm_protocol", std::string{"ubg"});
+        config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
+        if (!mode.empty()) { config.Set("asu_aicpu_jfc_mode", mode); }
+
+        ASSERT_TRUE(store.Setup(config).Success());
+        ASSERT_FALSE(state->initConfigs.empty());
+        const auto transport = UC::AsuStore::BuildTransportConfig(state->initConfigs.back(), 0);
+        EXPECT_EQ(transport.attrs.at("aicpu_jfc_mode"),
+                  mode == "stars_poll" ? "STARS_POLL" : "USER_CTL");
+    }
+}
+
+TEST(UCAsuStoreTest, RejectsInvalidAicpuJfcModeBeforeClientInit)
+{
+    UC::AsuStore::AsuStore store;
+    auto state = UseFakeClient(store);
+    auto config = MakeBaseConfig();
+    config.Set("asu_ids", std::vector<ssize_t>{1001});
+    config.Set("asu_trans_provider_backend", std::string{"aicpu"});
+    config.Set("asu_ips", std::vector<std::string>{"127.0.0.1"});
+    config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
+    config.Set("asu_aicpu_hcomm_protocol", std::string{"ubg"});
+    config.Set("asu_aicpu_jfc_mode", std::string{"invalid"});
+
+    EXPECT_TRUE(store.Setup(config).Failure());
+    EXPECT_TRUE(state->initConfigs.empty());
 }
 
 TEST(UCAsuStoreTest, PropagatesKvNamespaceToEveryTransport)
