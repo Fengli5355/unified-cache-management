@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -42,6 +44,8 @@ namespace {
 using aicpu_config::CommAddrTypeName;
 using aicpu_config::CommProtocolName;
 using aicpu_config::IsUbProtocol;
+using aicpu_config::AicpuJfcMode;
+using aicpu_config::ResolveAicpuJfcMode;
 using aicpu_config::ResolveLocalEndpointAddress;
 using aicpu_config::ResolveProtocol;
 using aicpu_config::ResolveRemoteDeviceId;
@@ -56,7 +60,7 @@ using aicpu_config::ResolveLocType;
 
 constexpr std::uint32_t kDefaultNotifyNum = 1;
 constexpr std::uint32_t kDefaultUbSqDepth = 0xFFFFFFFFU;
-constexpr std::uint32_t kDefaultQos = 0xFFFFFFFFU;
+constexpr std::uint32_t kDefaultQoS = 0xFFFFFFFFU;
 constexpr std::uint32_t kDefaultSendTimeoutMs = 1836U * 1000U;
 constexpr std::uint32_t kAclSyncGraceMs = 5000U;
 constexpr std::uint32_t kCpuKernelMode = 0U;
@@ -64,8 +68,50 @@ constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr std::uint32_t kChannelStatusPollIntervalMs = 2U;
 constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
-constexpr const char* kProviderSignature = "UCM_ASU_AICPU_PROVIDER_UBC_CTP_UBG_HCOMM_HIXL_V10";
+constexpr const char* kProviderSignature =
+    "UCM_ASU_AICPU_PROVIDER_UBC_CTP_UBG_HCOMM_HIXL_ASYNC_SEND_V14";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
+
+#if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
+// HCOMM currently accepts staged JFC mode through an environment setting.
+// Serialize our channel creations and restore the previous process setting so
+// independent providers cannot overwrite each other's mode during creation.
+class ScopedStagedJfcMode {
+public:
+    explicit ScopedStagedJfcMode(AicpuJfcMode mode) : lock_(Mutex())
+    {
+        const char* previous = std::getenv(kEnv);
+        hadPrevious_ = previous != nullptr;
+        if (previous != nullptr) { previous_ = previous; }
+        const char* selected = mode == AicpuJfcMode::USER_CTL ? "USER_CTL" : "STARS_POLL";
+        if (::setenv(kEnv, selected, 1) != 0) {
+            status_ = Status::Error(StatusCode::INVALID_ARGUMENT,
+                                    "Cannot set HCOMM_AICPU_STAGED_JFC_MODE");
+        }
+    }
+
+    ~ScopedStagedJfcMode()
+    {
+        if (!status_.ok()) { return; }
+        const int ret = hadPrevious_ ? ::setenv(kEnv, previous_.c_str(), 1) : ::unsetenv(kEnv);
+        if (ret != 0) { KV_WARN("Cannot restore {} after staged channel creation", kEnv); }
+    }
+
+    const Status& status() const { return status_; }
+
+private:
+    static std::mutex& Mutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+    static constexpr const char* kEnv = "HCOMM_AICPU_STAGED_JFC_MODE";
+    std::unique_lock<std::mutex> lock_;
+    std::string previous_;
+    bool hadPrevious_{false};
+    Status status_{Status::OK()};
+};
+#endif
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
 constexpr const char* kChannelApiMode = "HcommChannelCreateStaged";
 #else
@@ -158,6 +204,26 @@ std::string StagedPublishTargetKey(const StagedPublishTarget& target)
 #endif
 
 struct MappedBatchWorkspace {
+    MappedBatchWorkspace() = default;
+    MappedBatchWorkspace(const MappedBatchWorkspace&) = delete;
+    MappedBatchWorkspace& operator=(const MappedBatchWorkspace&) = delete;
+
+    MappedBatchWorkspace(MappedBatchWorkspace&& other) noexcept
+        : owner(std::move(other.owner)),
+          deviceBase(std::exchange(other.deviceBase, nullptr)),
+          capacity(std::exchange(other.capacity, 0))
+    {
+    }
+
+    MappedBatchWorkspace& operator=(MappedBatchWorkspace&& other) noexcept
+    {
+        if (this == &other) { return *this; }
+        owner = std::move(other.owner);
+        deviceBase = std::exchange(other.deviceBase, nullptr);
+        capacity = std::exchange(other.capacity, 0);
+        return *this;
+    }
+
     std::shared_ptr<void> owner;
     void* deviceBase{nullptr};
     std::size_t capacity{0};
@@ -204,10 +270,56 @@ struct ConnectionRecord {
     bool hasServerCapabilities{false};
     std::string stagedOobHost;
     std::uint16_t stagedOobPort{0};
-    // HIXL launch state is connection-local so independent channels can submit concurrently.
+    // A stream is connection-local. Each in-flight async send owns one workspace. Successfully
+    // drained workspaces return to this connection-local pool instead of being registered and
+    // unregistered for every Send.
     std::mutex sendMu;
+    std::uint64_t sendSequence{0};
+    std::size_t asyncInflightCount{0};
+    bool asyncFaulted{false};
     MappedBatchWorkspace mappedBatchWorkspace;
+    std::vector<MappedBatchWorkspace> asyncWorkspacePool;
+    // A failed stream synchronization does not prove that the device stopped accessing the
+    // workspace. Keep such memory alive and never reuse it before connection cleanup.
+    std::vector<MappedBatchWorkspace> quarantinedAsyncWorkspaces;
     aclrtStream stream{nullptr};
+};
+
+struct BatchSendTicket {
+    BatchSendTicket() = default;
+    BatchSendTicket(const BatchSendTicket&) = delete;
+    BatchSendTicket& operator=(const BatchSendTicket&) = delete;
+    BatchSendTicket(BatchSendTicket&&) noexcept = default;
+    BatchSendTicket& operator=(BatchSendTicket&&) noexcept = default;
+
+    void Reset()
+    {
+        connection.reset();
+        completionEvent.reset();
+        completionRecorded = false;
+        workspace.Reset();
+        originalIndexes.clear();
+        sequence = 0;
+        batchSize = 0;
+        deadline = {};
+    }
+
+    bool IsValid() const { return connection != nullptr; }
+
+    std::shared_ptr<ConnectionRecord> connection;
+    std::shared_ptr<void> completionEvent;
+    bool completionRecorded{false};
+    MappedBatchWorkspace workspace;
+    std::vector<std::size_t> originalIndexes;
+    std::uint64_t sequence{0};
+    std::size_t batchSize{0};
+    std::chrono::steady_clock::time_point deadline{};
+};
+
+class AicpuSendOperation final : public TransProvider::SendOperation {
+public:
+    std::vector<Status> results;
+    std::vector<BatchSendTicket> tickets;
 };
 
 struct MemoryRecord {
@@ -503,6 +615,18 @@ int32_t MakeAclSyncTimeoutMs(std::uint32_t hcommTimeoutMs)
     return static_cast<int32_t>(timeout > max ? max : timeout);
 }
 
+int32_t RemainingAclSyncTimeoutMs(std::chrono::steady_clock::time_point deadline)
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) { return 1; }
+
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+    const auto bounded = std::min<std::int64_t>(
+        std::max<std::int64_t>(remaining, 1), std::numeric_limits<int32_t>::max());
+    return static_cast<int32_t>(bounded);
+}
+
 std::uint32_t MakeKernelTimeoutSeconds(std::uint32_t hcommTimeoutMs)
 {
     return static_cast<std::uint32_t>(MakeAclSyncTimeoutMs(hcommTimeoutMs) / 1000) + 1U;
@@ -528,7 +652,7 @@ struct AICPUTransProvider::Impl {
                                       kDefaultNotifyNum)),
           ubSqDepth(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_ub_sq_depth", "ub_sq_depth"}),
                                       kDefaultUbSqDepth)),
-          qos(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_qos", "qos"}), kDefaultQos)),
+          qos(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_qos", "qos"}), kDefaultQoS)),
           sendTimeoutMs(ParseConfigUint32(
               GetConfigAttr(configIn, {"aicpu_send_timeout_ms", "send_timeout_ms", "timeout"}),
               kDefaultSendTimeoutMs)),
@@ -541,6 +665,13 @@ struct AICPUTransProvider::Impl {
           stagedMamiTag(ParseConfigUint64(
               GetConfigAttr(configIn, {"aicpu_staged_mami_tag", "staged_mami_tag"}), 0))
     {
+        channelModeStatus = ResolveAicpuJfcMode(configIn, jfcMode);
+#if !UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
+        if (channelModeStatus.ok() && jfcMode != AicpuJfcMode::STARS_POLL) {
+            channelModeStatus = Status::Error(StatusCode::INVALID_ARGUMENT,
+                "USER_CTL requires the staged channel API; rebuild with the default staged API");
+        }
+#endif
         auto selection = ResolveLocalDevice(configIn);
         localDeviceId = selection.deviceId;
         providerContext = selection.context;
@@ -948,10 +1079,9 @@ struct AICPUTransProvider::Impl {
         return Status::OK();
     }
 
-    Status EnsureMappedBatchWorkspaceLocked(ConnectionRecord& connection,
-                                            std::size_t requiredCapacity)
+    Status EnsureMappedBatchWorkspace(MappedBatchWorkspace& workspace,
+                                      std::size_t requiredCapacity, ::ChannelHandle channel)
     {
-        auto& workspace = connection.mappedBatchWorkspace;
         if (workspace.owner && workspace.capacity >= requiredCapacity) { return Status::OK(); }
 
         constexpr auto kEntryBytes = sizeof(UcmHixlSendIoBatch) + sizeof(std::uint32_t);
@@ -991,8 +1121,79 @@ struct AICPUTransProvider::Impl {
             "AICPUTransProvider: allocated mapped batch workspace host_addr={} device_addr={} "
             "capacity={} bytes={} channel={}",
             workspace.owner.get(), workspace.deviceBase, capacity, capacity * kEntryBytes,
-            connection.channel);
+            channel);
         return Status::OK();
+    }
+
+    Status EnsureMappedBatchWorkspaceLocked(ConnectionRecord& connection,
+                                             std::size_t requiredCapacity)
+    {
+        return EnsureMappedBatchWorkspace(connection.mappedBatchWorkspace, requiredCapacity,
+                                           connection.channel);
+    }
+
+    void AcquireAsyncBatchWorkspaceLocked(ConnectionRecord& connection,
+                                          std::size_t requiredCapacity,
+                                          MappedBatchWorkspace& workspace)
+    {
+        if (connection.asyncWorkspacePool.empty()) { return; }
+
+        std::size_t largestIndex = 0;
+        std::size_t bestFitIndex = connection.asyncWorkspacePool.size();
+        for (std::size_t index = 0; index < connection.asyncWorkspacePool.size(); ++index) {
+            const auto capacity = connection.asyncWorkspacePool[index].capacity;
+            if (capacity > connection.asyncWorkspacePool[largestIndex].capacity) {
+                largestIndex = index;
+            }
+            if (capacity >= requiredCapacity &&
+                (bestFitIndex == connection.asyncWorkspacePool.size() ||
+                 capacity < connection.asyncWorkspacePool[bestFitIndex].capacity)) {
+                bestFitIndex = index;
+            }
+        }
+
+        // Prefer the smallest workspace that already fits. If none fits, grow the largest idle
+        // workspace so a changing batch size does not make the pool grow without bound.
+        const auto selectedIndex =
+            bestFitIndex == connection.asyncWorkspacePool.size() ? largestIndex : bestFitIndex;
+        workspace = std::move(connection.asyncWorkspacePool[selectedIndex]);
+        if (selectedIndex + 1U != connection.asyncWorkspacePool.size()) {
+            connection.asyncWorkspacePool[selectedIndex] =
+                std::move(connection.asyncWorkspacePool.back());
+        }
+        connection.asyncWorkspacePool.pop_back();
+        KV_DEBUG(
+            "AICPUTransProvider: acquired async batch workspace host_addr={} capacity={} "
+            "required_capacity={} idle_workspaces={} channel={}",
+            workspace.owner.get(), workspace.capacity, requiredCapacity,
+            connection.asyncWorkspacePool.size(), connection.channel);
+    }
+
+    void RecycleAsyncBatchWorkspaceLocked(ConnectionRecord& connection,
+                                          MappedBatchWorkspace& workspace)
+    {
+        if (!workspace.owner) { return; }
+        const auto* hostAddress = workspace.owner.get();
+        const auto capacity = workspace.capacity;
+        connection.asyncWorkspacePool.push_back(std::move(workspace));
+        KV_DEBUG(
+            "AICPUTransProvider: recycled async batch workspace host_addr={} capacity={} "
+            "idle_workspaces={} channel={}",
+            hostAddress, capacity, connection.asyncWorkspacePool.size(), connection.channel);
+    }
+
+    void QuarantineAsyncBatchWorkspaceLocked(ConnectionRecord& connection,
+                                             MappedBatchWorkspace& workspace)
+    {
+        if (!workspace.owner) { return; }
+        const auto* hostAddress = workspace.owner.get();
+        const auto capacity = workspace.capacity;
+        connection.quarantinedAsyncWorkspaces.push_back(std::move(workspace));
+        KV_WARN(
+            "AICPUTransProvider: quarantined async batch workspace host_addr={} capacity={} "
+            "quarantined_workspaces={} channel={}",
+            hostAddress, capacity, connection.quarantinedAsyncWorkspaces.size(),
+            connection.channel);
     }
 
     Status LoadHixlBatchSend(aclrtFuncHandle& func)
@@ -1011,14 +1212,20 @@ struct AICPUTransProvider::Impl {
             aclrtBinaryLoadOptions options{};
             options.options = &option;
             options.numOpt = 1U;
+            std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=BINARY_BEGIN json=%s\n", hixlKernelJsonPath.c_str());
             const auto ret =
                 aclrtBinaryLoadFromFile(hixlKernelJsonPath.c_str(), &options, &hixlBin);
+            std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=BINARY_RETURN ret=%d bin=%p\n",
+                         static_cast<int>(ret), static_cast<void*>(hixlBin));
             if (ret != ACL_SUCCESS) {
                 return AclError("aclrtBinaryLoadFromFile " + hixlKernelJsonPath, ret);
             }
         }
 
         const auto getRet = aclrtBinaryGetFunction(hixlBin, kBatchSendKernelName, &func);
+        std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=FUNCTION_RETURN kernel=%s ret=%d bin=%p func=%p\n",
+                     kBatchSendKernelName, static_cast<int>(getRet), static_cast<void*>(hixlBin),
+                     static_cast<void*>(func));
         if (getRet != ACL_SUCCESS) {
             return AclError("aclrtBinaryGetFunction HixlBatchSend", getRet);
         }
@@ -1026,6 +1233,8 @@ struct AICPUTransProvider::Impl {
         return Status::OK();
     }
 
+    // Original synchronous implementation. Keep this path independent from the async ticket
+    // implementation so sync/async can be selected explicitly for regression and benchmarking.
     Status LaunchBatchSendLocked(ConnectionRecord& connection,
                                  const std::vector<TransProvider::SendIoBatch>& ioBatches,
                                  std::vector<std::uint32_t>& hixlStatuses)
@@ -1084,9 +1293,8 @@ struct AICPUTransProvider::Impl {
         param.status_array = workspace.DeviceStatuses();
         param.timeout_ms = sendTimeoutMs;
         param.stats = nullptr;
-        // Staged Hcomm channels use USER_CTL sender CQs. The paired HixlBatchSend
-        // consumes one sender CQE and advances CQ/SQ CI before HcommThreadJoin.
-        param.complete_sender_cqe = 1U;
+        // USER_CTL consumes CQEs in software; STARS_POLL leaves completion to STARS.
+        param.complete_sender_cqe = jfcMode == AicpuJfcMode::USER_CTL ? 1U : 0U;
 
         aclrtArgsHandle args = nullptr;
         aclrtParamHandle paramHandle = nullptr;
@@ -1128,22 +1336,219 @@ struct AICPUTransProvider::Impl {
         return Status::OK();
     }
 
+    Status AsyncLaunchBatchSendLocked(
+        const std::shared_ptr<ConnectionRecord>& connectionOwner,
+        const std::vector<TransProvider::SendIoBatch>& ioBatches,
+        std::chrono::steady_clock::time_point deadline, BatchSendTicket& ticket)
+    {
+        ticket.Reset();
+        if (connectionOwner == nullptr) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "AICPUTransProvider::AsyncSend: invalid connection owner");
+        }
+        auto& connection = *connectionOwner;
+        if (connection.asyncFaulted) {
+            return Status::Error(StatusCode::CONNECTION_ERROR,
+                                 "AICPUTransProvider::AsyncSend: connection stream is faulted");
+        }
+        if (connection.channel == 0U || connection.thread == 0U) {
+            return Status::Error(StatusCode::CONNECTION_ERROR,
+                                 "AICPUTransProvider::AsyncSend: Hcomm channel is not ready");
+        }
+        if (!connection.hasImmOverride) {
+            return Status::Error(
+                StatusCode::CONNECTION_ERROR,
+                "AICPUTransProvider::AsyncSend: negotiated SendWithImm value is unavailable");
+        }
+
+        auto status = EnsureAclStreamLocked(connection);
+        if (!status.ok()) { return status; }
+
+        std::vector<UcmHixlSendIoBatch> batches;
+        batches.reserve(ioBatches.size());
+        for (const auto& io : ioBatches) {
+            auto* conn = ToConnectionRecord(io.connectionHandle);
+            if (conn != &connection) {
+                return Status::Error(
+                    StatusCode::INVALID_ARGUMENT,
+                    "AICPUTransProvider::AsyncSend: mixed connections in one launch group");
+            }
+            batches.push_back(UcmHixlSendIoBatch{connection.channel, io.sendBuffer, io.len,
+                                                 connection.immOverride, 0U});
+            KV_DEBUG(
+                "AICPUTransProvider: batch send entry channel={} thread={} addr={} len={} "
+                "imm=0x{:x}",
+                connection.channel, connection.thread, io.sendBuffer, io.len,
+                connection.immOverride);
+        }
+
+        AcquireAsyncBatchWorkspaceLocked(connection, batches.size(), ticket.workspace);
+        aclrtEvent completionEvent = nullptr;
+        const auto createRet = aclrtCreateEvent(&completionEvent);
+        if (createRet != ACL_SUCCESS) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return AclError("aclrtCreateEvent HixlBatchSend", createRet);
+        }
+        ticket.completionEvent = std::shared_ptr<void>(completionEvent, [](void* event) {
+            (void)aclrtDestroyEvent(event);
+        });
+        status = EnsureMappedBatchWorkspace(ticket.workspace, batches.size(), connection.channel);
+        if (!status.ok()) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return status;
+        }
+
+        auto& workspace = ticket.workspace;
+        std::memcpy(workspace.HostBatches(), batches.data(),
+                    batches.size() * sizeof(UcmHixlSendIoBatch));
+        std::fill_n(workspace.HostStatuses(), batches.size(), 1U);
+        // Host and AICPU use paired virtual addresses for one mapped allocation. Stream
+        // synchronization in WaitBatchSend completes device writes before Host reads statuses.
+        std::atomic_thread_fence(std::memory_order_release);
+
+        aclrtFuncHandle func = nullptr;
+        status = LoadHixlBatchSend(func);
+        if (!status.ok()) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return status;
+        }
+
+        UcmHixlBatchSendParam param{};
+        param.thread = connection.thread;
+        param.io_batches = workspace.DeviceBatches();
+        param.batch_size = static_cast<std::uint64_t>(batches.size());
+        param.status_array = workspace.DeviceStatuses();
+        param.timeout_ms = sendTimeoutMs;
+        param.stats = nullptr;
+        // Match the channel JFC mode, just as in the synchronous launch path.
+        param.complete_sender_cqe = jfcMode == AicpuJfcMode::USER_CTL ? 1U : 0U;
+
+        aclrtArgsHandle args = nullptr;
+        aclrtParamHandle paramHandle = nullptr;
+        auto ret = aclrtKernelArgsInit(func, &args);
+        if (ret != ACL_SUCCESS) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return AclError("aclrtKernelArgsInit HixlBatchSend", ret);
+        }
+        ret = aclrtKernelArgsAppend(args, &param, sizeof(param), &paramHandle);
+        if (ret != ACL_SUCCESS) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return AclError("aclrtKernelArgsAppend HixlBatchSend", ret);
+        }
+        ret = aclrtKernelArgsFinalize(args);
+        if (ret != ACL_SUCCESS) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return AclError("aclrtKernelArgsFinalize HixlBatchSend", ret);
+        }
+
+        aclrtLaunchKernelAttr attr{};
+        attr.id = ACL_RT_LAUNCH_KERNEL_ATTR_TIMEOUT;
+        attr.value.timeout = MakeKernelTimeoutSeconds(sendTimeoutMs);
+        aclrtLaunchKernelCfg cfg{};
+        cfg.numAttrs = 1U;
+        cfg.attrs = &attr;
+        KV_WARN("[SendTrace] launch_begin pid={} device={} stream={} thread={} batches={}",
+                getpid(), localDeviceId, connection.stream, connection.thread, batches.size());
+        ret = aclrtLaunchKernelWithConfig(func, kKernelBlockDim, connection.stream, &cfg, args,
+                                          nullptr);
+        KV_WARN("[SendTrace] launch_end pid={} stream={} thread={} ret={}", getpid(),
+                connection.stream, connection.thread, static_cast<int>(ret));
+        if (ret != ACL_SUCCESS) {
+            RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            return AclError("aclrtLaunchKernelWithConfig HixlBatchSend", ret);
+        }
+
+        ticket.connection = connectionOwner;
+        const auto eventRet = aclrtRecordEvent(completionEvent, connection.stream);
+        ticket.completionRecorded = eventRet == ACL_SUCCESS;
+        if (eventRet != ACL_SUCCESS) {
+            connection.asyncFaulted = true;
+            KV_ERROR("aclrtRecordEvent HixlBatchSend failed ret={}; retaining stream ticket",
+                     static_cast<int>(eventRet));
+        }
+        ticket.sequence = ++connection.sendSequence;
+        ticket.batchSize = batches.size();
+        ticket.deadline = deadline;
+        ++connection.asyncInflightCount;
+        return Status::OK();
+    }
+
+    Status WaitBatchSend(BatchSendTicket& ticket,
+                         std::vector<std::uint32_t>& hixlStatuses)
+    {
+        if (!ticket.IsValid()) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "AICPUTransProvider::Send: invalid batch-send ticket");
+        }
+
+        const auto connectionOwner = ticket.connection;
+        auto& connection = *connectionOwner;
+
+        hixlStatuses.assign(ticket.batchSize, 1U);
+        const auto syncTimeoutMs = RemainingAclSyncTimeoutMs(ticket.deadline);
+        KV_WARN("[SendTrace] sync_begin pid={} stream={} thread={} timeout_ms={} sequence={}",
+                getpid(), connection.stream, connection.thread, syncTimeoutMs, ticket.sequence);
+        const auto ret = ticket.completionRecorded
+            ? aclrtSynchronizeEventWithTimeout(ticket.completionEvent.get(), syncTimeoutMs)
+            : aclrtSynchronizeStreamWithTimeout(connection.stream, syncTimeoutMs);
+        KV_WARN("[SendTrace] sync_end pid={} stream={} thread={} ret={} sequence={}", getpid(),
+                connection.stream, connection.thread, static_cast<int>(ret), ticket.sequence);
+
+        Status status = Status::OK();
+        if (ret != ACL_SUCCESS) {
+            std::lock_guard<std::mutex> sendLock(connection.sendMu);
+            connection.asyncFaulted = true;
+            return AclError("HixlBatchSend completion pending; resources retained", ret);
+        } else {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            auto* statuses = static_cast<volatile std::uint32_t*>(ticket.workspace.HostStatuses());
+            for (std::size_t i = 0; i < hixlStatuses.size(); ++i) {
+                hixlStatuses[i] = statuses[i];
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> sendLock(connection.sendMu);
+            if (connection.asyncInflightCount == 0) {
+                status = Status::Error(
+                    StatusCode::INTERNAL_ERROR,
+                    "AICPUTransProvider::WaitSend: inconsistent in-flight count");
+            } else {
+                --connection.asyncInflightCount;
+            }
+            if (ret == ACL_SUCCESS) {
+                RecycleAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            } else {
+                QuarantineAsyncBatchWorkspaceLocked(connection, ticket.workspace);
+            }
+            if (!status.ok()) { connection.asyncFaulted = true; }
+        }
+        ticket.Reset();
+        return status;
+    }
+
     void ResetConnectionSendResources(ConnectionRecord& connection)
     {
-        connection.mappedBatchWorkspace.Reset();
         if (connection.stream != nullptr) {
             (void)aclrtDestroyStream(connection.stream);
             connection.stream = nullptr;
         }
+        connection.mappedBatchWorkspace.Reset();
+        connection.asyncWorkspacePool.clear();
+        connection.quarantinedAsyncWorkspaces.clear();
+        connection.asyncInflightCount = 0;
+        connection.asyncFaulted = false;
     }
 
     TransportConfig config;
+    AicpuJfcMode jfcMode{AicpuJfcMode::USER_CTL};
+    Status channelModeStatus{Status::OK()};
     std::uint32_t localDeviceId{0};
     aclrtContext providerContext{nullptr};
     std::string deviceSelectionSource{"default"};
     std::uint32_t notifyNum{kDefaultNotifyNum};
     std::uint32_t ubSqDepth{kDefaultUbSqDepth};
-    std::uint32_t qos{0};
+    std::uint32_t qos{kDefaultQoS};
     std::uint32_t sendTimeoutMs{kDefaultSendTimeoutMs};
     std::string channelName;
     std::string hixlKernelJsonPath;
@@ -1156,6 +1561,10 @@ struct AICPUTransProvider::Impl {
     // Channel creation and MR mutation must observe one another atomically. Rollback paths call
     // the public release helpers while retaining this lock, hence the recursive mutex.
     std::recursive_mutex resourceMu;
+    std::size_t asyncTicketCount{0};
+    bool asyncTicketDrainFailed{false};
+    std::condition_variable_any asyncTicketCv;
+    std::vector<std::unique_ptr<AicpuSendOperation>> quarantinedSendOperations;
     EndpointHandle endpoint{nullptr};
     std::string endpointIp;
     CommProtocol endpointProtocol{COMM_PROTOCOL_RESERVED};
@@ -1179,12 +1588,14 @@ AICPUTransProvider::AICPUTransProvider(const TransportConfig& config)
 {
     KV_INFO(
         "AICPU_TRANSPORT_PROVIDER_SIGNATURE={} pid={} asu_id={} logical_device_id={} "
-        "device_source={} provider_context={} protocol=ubg channel_api={} "
-        "send_with_imm=1 complete_sender_cqe=1 publish_mrs=1 mapped_batch_io=1 "
-        "channel_name={}",
+        "device_source={} provider_context={} jfc_mode={} channel_api={} "
+        "send_with_imm=1 complete_sender_cqe={} publish_mrs=1 mapped_batch_io=1 "
+        "async_send=1 async_workspace_pool=1 channel_name={}",
         kProviderSignature, static_cast<long>(::getpid()), impl_->config.nodeId,
         impl_->localDeviceId, impl_->deviceSelectionSource,
-        static_cast<const void*>(impl_->providerContext), kChannelApiMode, impl_->channelName);
+        static_cast<const void*>(impl_->providerContext),
+        impl_->jfcMode == AicpuJfcMode::USER_CTL ? "USER_CTL" : "STARS_POLL",
+        kChannelApiMode, impl_->jfcMode == AicpuJfcMode::USER_CTL ? 1U : 0U, impl_->channelName);
 }
 
 AICPUTransProvider::~AICPUTransProvider()
@@ -1217,6 +1628,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
 {
     connectionHandles.clear();
     if (qpNum == 0) { return Status::OK(); }
+    if (!impl_->channelModeStatus.ok()) { return impl_->channelModeStatus; }
 
     std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
     auto status = impl_->RefreshLocalDeviceFromCaller();
@@ -1271,17 +1683,18 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     const std::uint16_t stagedOobPort = ResolveStagedOobPort(impl_->config, endpoint, port);
     const std::uint32_t stagedClientId = ResolveStagedClientId(impl_->config, endpoint);
     KV_INFO(
-        "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
+        "AICPUTransProvider: CreateConnection resolved protocol={} channel_api={} "
         "staged_oob={}:{} staged_client_id={} notify_num={} ub_sq_depth={} qos={} "
         "send_with_imm={} complete_sender_cqe={}",
         CommProtocolName(protocol), kChannelApiMode, stagedOobHost, stagedOobPort, stagedClientId,
-        impl_->notifyNum, impl_->ubSqDepth, impl_->qos, 1, 0);
+        impl_->notifyNum, impl_->ubSqDepth, impl_->qos, 1,
+        impl_->jfcMode == AicpuJfcMode::USER_CTL ? 1U : 0U);
 #else
     KV_INFO(
-        "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
+        "AICPUTransProvider: CreateConnection resolved protocol={} channel_api={} "
         "notify_num={} ub_sq_depth={} qos={} send_with_imm={} complete_sender_cqe={}",
         CommProtocolName(protocol), kChannelApiMode, impl_->notifyNum, impl_->ubSqDepth, impl_->qos,
-        1, 0);
+        1, impl_->jfcMode == AicpuJfcMode::USER_CTL ? 1U : 0U);
 #endif
 
     for (std::uint32_t remaining = qpNum; remaining > 0; --remaining) {
@@ -1358,12 +1771,17 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             "mami_tag={} channel_port={}",
             qpIndex, stagedOobHost, stagedOobPort, stagedClientId, stagedDesc.timeoutMs,
             stagedDesc.rmUasid, stagedDesc.mamiTag, desc.port);
-        const auto chanRet = HcommChannelCreateStaged(hcommEndpoint, COMM_ENGINE_AICPU, &stagedDesc,
-                                                      1U, &record->channel);
-        if (chanRet != 0) {
+        const auto channelStatus = [&]() -> Status {
+            ScopedStagedJfcMode mode(impl_->jfcMode);
+            if (!mode.status().ok()) { return mode.status(); }
+            const auto ret = HcommChannelCreateStaged(hcommEndpoint, COMM_ENGINE_AICPU, &stagedDesc,
+                                                       1U, &record->channel);
+            return ret == 0 ? Status::OK() : HcommConnectionError("HcommChannelCreateStaged", ret);
+        }();
+        if (!channelStatus.ok()) {
             cleanupRecord();
             if (!createdHandles.empty()) { (void)DeleteConnections(createdHandles); }
-            return HcommConnectionError("HcommChannelCreateStaged", chanRet);
+            return channelStatus;
         }
         KV_INFO("AICPUTransProvider: staged channel created qp_index={} channel={} thread={}",
                 qpIndex, record->channel, record->thread);
@@ -1522,7 +1940,12 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
 
         std::lock_guard<std::mutex> sendLock(recordOwner->sendMu);
         Status status = Status::OK();
-        if (recordOwner->channel != 0) {
+        if (recordOwner->asyncInflightCount != 0) {
+            status = Status::Error(
+                StatusCode::RESOURCE_BUSY,
+                "AICPUTransProvider: connection has an in-flight HixlBatchSend");
+        }
+        if (status.ok() && recordOwner->channel != 0) {
             auto channel = recordOwner->channel;
             const auto ret = HcommChannelDestroy(&channel, 1U);
             if (ret != 0) {
@@ -1674,6 +2097,177 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
     return results;
 }
 
+std::vector<Status> AICPUTransProvider::AsyncSend(
+    const std::vector<SendIoBatch>& ioBatches, uint32_t kernelCount, uint32_t quietCount,
+    SendOperationPtr& operation)
+{
+    (void)kernelCount;
+    (void)quietCount;
+    operation.reset();
+    if (ioBatches.empty()) { return {}; }
+
+    struct ConnectionBatchGroup {
+        std::shared_ptr<ConnectionRecord> connection;
+        std::vector<std::size_t> originalIndexes;
+        std::vector<SendIoBatch> batches;
+    };
+
+    auto asyncOperation = std::make_unique<AicpuSendOperation>();
+    asyncOperation->results.assign(ioBatches.size(), Status::OK());
+    std::vector<std::shared_ptr<ConnectionRecord>> connectionOwners(ioBatches.size());
+    std::vector<ConnectionBatchGroup> groups;
+    std::unordered_map<ConnectionRecord*, std::size_t> groupIndexByConnection;
+    bool valid = true;
+    {
+        std::shared_lock<std::shared_mutex> lock(impl_->connectionMu);
+        for (std::size_t index = 0; index < ioBatches.size(); ++index) {
+            auto* conn = ToConnectionRecord(ioBatches[index].connectionHandle);
+            const auto connIter = impl_->connections.find(conn);
+            if (conn == nullptr || connIter == impl_->connections.end()) {
+                asyncOperation->results[index] =
+                    Status::Error(StatusCode::INVALID_ARGUMENT,
+                                  "AICPUTransProvider::AsyncSend: invalid connection handle");
+                valid = false;
+                continue;
+            }
+            connectionOwners[index] = connIter->second;
+        }
+    }
+
+    for (std::size_t index = 0; index < ioBatches.size(); ++index) {
+        const auto& item = ioBatches[index];
+        const auto& connection = connectionOwners[index];
+        if (connection == nullptr) { continue; }
+        if (item.sendBuffer == nullptr || item.len == 0) {
+            asyncOperation->results[index] =
+                Status::Error(StatusCode::INVALID_ARGUMENT,
+                              "AICPUTransProvider::AsyncSend: empty send buffer");
+            valid = false;
+            continue;
+        }
+
+        auto [groupIt, inserted] =
+            groupIndexByConnection.emplace(connection.get(), groups.size());
+        if (inserted) { groups.push_back(ConnectionBatchGroup{connection, {}, {}}); }
+        auto& group = groups[groupIt->second];
+        group.originalIndexes.push_back(index);
+        group.batches.push_back(item);
+    }
+    if (!valid) { return asyncOperation->results; }
+
+    const auto [deviceId, providerContext] = impl_->GetAclDeviceBinding();
+    ScopedAclDeviceContext deviceScope("AsyncSend", deviceId, providerContext);
+    const auto& deviceStatus = deviceScope.status();
+    if (!deviceStatus.ok()) { return std::vector<Status>(ioBatches.size(), deviceStatus); }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(MakeAclSyncTimeoutMs(impl_->sendTimeoutMs));
+    asyncOperation->tickets.reserve(groups.size());
+    for (const auto& group : groups) {
+        BatchSendTicket ticket;
+        Status launchStatus;
+        {
+            std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
+            std::lock_guard<std::mutex> sendLock(group.connection->sendMu);
+            KV_DEBUG(
+                "AICPUTransProvider: async launching HixlBatchSend channel={} thread={} "
+                "entries={}",
+                group.connection->channel, group.connection->thread, group.batches.size());
+            launchStatus = impl_->AsyncLaunchBatchSendLocked(group.connection, group.batches,
+                                                             deadline, ticket);
+            if (launchStatus.ok()) { ++impl_->asyncTicketCount; }
+        }
+        if (!launchStatus.ok()) {
+            for (const auto originalIndex : group.originalIndexes) {
+                asyncOperation->results[originalIndex] = launchStatus;
+            }
+            continue;
+        }
+        ticket.originalIndexes = group.originalIndexes;
+        asyncOperation->tickets.push_back(std::move(ticket));
+    }
+
+    auto results = asyncOperation->results;
+    if (!asyncOperation->tickets.empty()) { operation = std::move(asyncOperation); }
+    return results;
+}
+
+std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
+{
+    auto* asyncOperation = dynamic_cast<AicpuSendOperation*>(operation.get());
+    if (asyncOperation == nullptr) {
+        operation.reset();
+        return {Status::Error(StatusCode::INVALID_ARGUMENT,
+                              "AICPUTransProvider::WaitSend: invalid send operation")};
+    }
+
+    const auto [deviceId, providerContext] = impl_->GetAclDeviceBinding();
+    ScopedAclDeviceContext deviceScope("WaitSend", deviceId, providerContext);
+    const auto& deviceStatus = deviceScope.status();
+    if (!deviceStatus.ok()) {
+        std::fill(asyncOperation->results.begin(), asyncOperation->results.end(), deviceStatus);
+        auto results = asyncOperation->results;
+        for (auto& ticket : asyncOperation->tickets) {
+            if (!ticket.connection) { continue; }
+            std::lock_guard<std::mutex> sendLock(ticket.connection->sendMu);
+            ticket.connection->asyncFaulted = true;
+        }
+        KV_ERROR(
+            "AICPUTransProvider::WaitSend retains operation after ACL context binding "
+            "failure; referenced buffers must remain alive until a successful wait");
+        return results;
+    }
+
+    for (auto& ticket : asyncOperation->tickets) {
+        if (!ticket.IsValid()) { continue; }
+        const auto originalIndexes = ticket.originalIndexes;
+        std::vector<std::uint32_t> hixlStatuses;
+        const auto waitStatus = impl_->WaitBatchSend(ticket, hixlStatuses);
+        if (ticket.IsValid()) {
+            for (const auto originalIndex : originalIndexes) {
+                asyncOperation->results[originalIndex] = waitStatus;
+            }
+            return asyncOperation->results;
+        }
+        {
+            std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
+            if (impl_->asyncTicketCount == 0) {
+                KV_ERROR("AICPUTransProvider::WaitSend inconsistent async ticket count");
+            } else {
+                --impl_->asyncTicketCount;
+            }
+            if (impl_->asyncTicketCount == 0) { impl_->asyncTicketCv.notify_all(); }
+        }
+        if (!waitStatus.ok()) {
+            for (const auto originalIndex : originalIndexes) {
+                asyncOperation->results[originalIndex] = waitStatus;
+            }
+            continue;
+        }
+        if (hixlStatuses.size() != originalIndexes.size()) {
+            const auto status =
+                Status::Error(StatusCode::INTERNAL_ERROR,
+                              "HixlBatchSend returned an unexpected status count");
+            for (const auto originalIndex : originalIndexes) {
+                asyncOperation->results[originalIndex] = status;
+            }
+            continue;
+        }
+        for (std::size_t index = 0; index < hixlStatuses.size(); ++index) {
+            if (hixlStatuses[index] == 0U) { continue; }
+            const auto originalIndex = originalIndexes[index];
+            asyncOperation->results[originalIndex] = Status::Error(
+                StatusCode::INTERNAL_ERROR,
+                "HixlBatchSend failed for batch index " + std::to_string(originalIndex) +
+                    " status=" + std::to_string(hixlStatuses[index]));
+        }
+    }
+
+    auto results = std::move(asyncOperation->results);
+    operation.reset();
+    return results;
+}
+
 Status AICPUTransProvider::RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                           std::vector<MRHandle>& mrHandles)
 {
@@ -1720,7 +2314,24 @@ Status AICPUTransProvider::RegisterMemoryImpl(const std::vector<RegisterMemoryDe
                                  ": token count does not match memory count");
     }
 
-    std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
+    std::unique_lock<std::recursive_mutex> resourceLock(impl_->resourceMu);
+    if (impl_->asyncTicketCount != 0) {
+        KV_INFO("AICPUTransProvider::{} waiting for {} asynchronous send ticket(s)", operation,
+                impl_->asyncTicketCount);
+    }
+    const auto drained = impl_->asyncTicketCv.wait_for(
+        resourceLock, std::chrono::milliseconds(MakeAclSyncTimeoutMs(impl_->sendTimeoutMs)),
+        [this] { return impl_->asyncTicketCount == 0 || impl_->asyncTicketDrainFailed; });
+    if (!drained) {
+        return Status::Error(StatusCode::TIMEOUT,
+                             std::string("AICPUTransProvider::") + operation +
+                                 ": timed out waiting for asynchronous sends to drain");
+    }
+    if (impl_->asyncTicketDrainFailed) {
+        return Status::Error(StatusCode::CONNECTION_ERROR,
+                             std::string("AICPUTransProvider::") + operation +
+                                 ": an asynchronous send could not be drained");
+    }
     ScopedAclDeviceContext deviceScope(operation, impl_->localDeviceId, impl_->providerContext);
     const auto& bindStatus = deviceScope.status();
     if (!bindStatus.ok()) { return bindStatus; }
@@ -1837,9 +2448,17 @@ Status AICPUTransProvider::RegisterMemoryImpl(const std::vector<RegisterMemoryDe
                 return Status::Error(StatusCode::BUFFER_NOT_SUPPORTED,
                                      "AICPUTransProvider: HCOMM token range mismatch");
             }
-            if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB && tokenInfo.tokenValue != 0U) {
-                record->tokenId = tokenInfo.tokenId;
-                record->hasToken = true;
+            if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB) {
+                if (tokenInfo.tokenId != 0U) {
+#if defined(ASU_DEBUG_HOTFIX) && ASU_DEBUG_HOTFIX
+                    // Temporary integration behavior; remove this branch after validation.
+                    record->tokenId = tokenInfo.tokenId;
+#else
+                    // HCOMM exposes the UB token ID shifted right by 8 bits.
+                    record->tokenId = tokenInfo.tokenId << 8U;
+#endif
+                    record->hasToken = true;
+                }
             } else if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_RDMA && tokenInfo.rkey != 0U) {
                 record->tokenId = tokenInfo.rkey;
                 record->hasToken = true;
@@ -1929,7 +2548,28 @@ std::vector<Status> AICPUTransProvider::ReleaseMemory(const std::vector<MRHandle
     std::vector<Status> results(mrHandles.size(), Status::OK());
     if (mrHandles.empty()) { return results; }
 
-    std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
+    std::unique_lock<std::recursive_mutex> resourceLock(impl_->resourceMu);
+    if (impl_->asyncTicketCount != 0) {
+        KV_INFO("AICPUTransProvider::{} waiting for {} asynchronous send ticket(s)", operation,
+                impl_->asyncTicketCount);
+    }
+    const auto drained = impl_->asyncTicketCv.wait_for(
+        resourceLock, std::chrono::milliseconds(MakeAclSyncTimeoutMs(impl_->sendTimeoutMs)),
+        [this] { return impl_->asyncTicketCount == 0 || impl_->asyncTicketDrainFailed; });
+    if (!drained) {
+        return std::vector<Status>(
+            mrHandles.size(),
+            Status::Error(StatusCode::TIMEOUT,
+                          std::string("AICPUTransProvider::") + operation +
+                              ": timed out waiting for asynchronous sends to drain"));
+    }
+    if (impl_->asyncTicketDrainFailed) {
+        return std::vector<Status>(
+            mrHandles.size(),
+            Status::Error(StatusCode::CONNECTION_ERROR,
+                          std::string("AICPUTransProvider::") + operation +
+                              ": an asynchronous send could not be drained"));
+    }
     ScopedAclDeviceContext deviceScope(operation, impl_->localDeviceId, impl_->providerContext);
     const auto& deviceStatus = deviceScope.status();
     if (!deviceStatus.ok()) { return std::vector<Status>(mrHandles.size(), deviceStatus); }
