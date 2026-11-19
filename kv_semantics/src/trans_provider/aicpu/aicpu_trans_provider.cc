@@ -1,3 +1,4 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 #include "aicpu_trans_provider.h"
 #include "aicpu_config.h"
 
@@ -2205,10 +2206,10 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
     ScopedAclDeviceContext deviceScope("WaitSend", deviceId, providerContext);
     const auto& deviceStatus = deviceScope.status();
     if (!deviceStatus.ok()) {
-        std::fill(asyncOperation->results.begin(), asyncOperation->results.end(), deviceStatus);
         auto results = asyncOperation->results;
         for (auto& ticket : asyncOperation->tickets) {
-            if (!ticket.connection) { continue; }
+            if (!ticket.IsValid()) { continue; }
+            for (const auto index : ticket.originalIndexes) { results[index] = deviceStatus; }
             std::lock_guard<std::mutex> sendLock(ticket.connection->sendMu);
             ticket.connection->asyncFaulted = true;
         }
@@ -2224,10 +2225,13 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
         std::vector<std::uint32_t> hixlStatuses;
         const auto waitStatus = impl_->WaitBatchSend(ticket, hixlStatuses);
         if (ticket.IsValid()) {
+            // A retained operation has no final result yet. Preserve launch errors and
+            // completed tickets; transient wait errors must not poison a later success.
+            auto results = asyncOperation->results;
             for (const auto originalIndex : originalIndexes) {
-                asyncOperation->results[originalIndex] = waitStatus;
+                results[originalIndex] = waitStatus;
             }
-            return asyncOperation->results;
+            return results;
         }
         {
             std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
@@ -2254,8 +2258,11 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
             continue;
         }
         for (std::size_t index = 0; index < hixlStatuses.size(); ++index) {
-            if (hixlStatuses[index] == 0U) { continue; }
             const auto originalIndex = originalIndexes[index];
+            if (hixlStatuses[index] == 0U) {
+                asyncOperation->results[originalIndex] = Status::OK();
+                continue;
+            }
             asyncOperation->results[originalIndex] = Status::Error(
                 StatusCode::INTERNAL_ERROR,
                 "HixlBatchSend failed for batch index " + std::to_string(originalIndex) +

@@ -110,9 +110,20 @@ kv-test 使用 `transport.aicpu_send_mode=async` 和 `transport.async_send_max_i
 
 每个异步 ticket 在自己的 HixlBatchSend 后记录一个 ACL event。WaitSend 等待该 event，后续提交的 kernel 不会延长前一个 ticket 的等待。event 记录失败时，连接停止接受新发送，已有 ticket 回退到 stream 同步以确认设备完成。
 
-WaitSend 只有在 operation 被清空时才允许调用方应用最终状态和释放缓冲区。event/stream 同步失败或 ACL context 绑定失败时，operation、ticket 计数、workspace、发送槽位及响应槽位均保留；worker 间隔 10 ms 重试等待，完成线程和取消操作不能提前释放这些资源。MR 注销继续受未完成 ticket 计数保护。
+WaitSend 只有在 operation 被清空时才允许调用方应用最终状态和释放内部发送资源。临时等待错误只存在于本次返回值中，不覆盖已完成 ticket 的最终结果；后续成功完成必须写入 OK。
 
-本实现不自动 abort 整个设备，以免影响共用设备的其他任务。若设备永久故障且无法确认完成，worker 和 Shutdown 会继续等待，必须由运维停止进程并恢复设备；不能将超时当成 DMA 已停止的证明。发送数据内存的所有者仍须在业务任务真正完成前保持内存有效。
+### 当前限制：已提交 IO 的异常终止
+
+本次不引入 stream abort、设备复位或进程终止策略。以下异常的触发条件、错误码及底层终止保证尚未经过实机确认：
+
+- AsyncSend 已提交 kernel，但 WaitSend 无法绑定对应 ACL context。
+- event/stream 同步返回错误，无法确认 kernel 是否仍在访问内部发送缓冲区。
+
+当前沿用 PR 的 operation 保留及等待行为：连接被标记为 faulted，worker 每隔 10 ms 重试等待。在永久故障下，这可能阻塞后续任务，并使 Shutdown 卡在 worker.join。此行为是尚未解决的实现限制，不是期望的恢复方案；不能将此版本视为已支持上述异常下的有界退出。
+
+普通 Client 任务超时仍遵守仓库协议约定：Client 返回超时后，底层不再对该任务的业务内存发起远端读写，调用方可立即回收或复用 buffer。上述限制不改变该约定，不要求调用方额外轮询底层完成或保留业务 buffer 到 shutdown。需要继续确认当前异常路径与此协议约定之间的实现闭环，不能用保留内存代替访问停止保证。
+
+后续应先在实机确认 context 生命周期、同步错误码、任务是否仍在执行以及 Client/Server 的超时访问停止行为，再决定是否需要连接级终止或不可恢复故障处理。验证至少覆盖：正常 event 完成；暂时绑定失败后恢复；永久绑定失败；同步失败；Shutdown；Client 超时后立即复用 buffer。在这些边界确认前，不将新增的 abort 或 fatal 行为纳入本次修改。
 
 ## 9. 已淘汰实现
 
