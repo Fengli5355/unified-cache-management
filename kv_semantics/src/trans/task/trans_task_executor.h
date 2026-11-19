@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -73,6 +73,8 @@ public:
     bool Cancel(const TransportTaskPtr& task);
 
 private:
+    bool ExecuteImpl(const TransportTaskPtr& task,
+                      TransProvider::SendOperationPtr* asyncOperation);
     Status RegisterBufferMemory(BufferManager& bufferManager, MRHandle& mrHandle);
     Status UnregisterBufferMemory(MRHandle& mrHandle);
     std::uint16_t AllocateRequestCid();

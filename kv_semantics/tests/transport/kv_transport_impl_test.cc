@@ -223,6 +223,44 @@ TEST_F(TransportTaskCompletionTest, TaskExecutorSupportsExplicitLifecycle)
     EXPECT_EQ(transport.taskExecutor_, nullptr);
 }
 
+TEST_F(TransportTaskCompletionTest, PreparationFailureCompletesBothExecutionModes)
+{
+    for (const bool async : {false, true}) {
+        auto task = std::make_shared<TransportTask>();
+        task->opType = AsuOpType::QUERY;  // Empty keys fail before connection assignment.
+        TransProvider::SendOperationPtr operation;
+        const bool done = async ? transport_->taskExecutor_->ExecuteAsync(task, operation)
+                                : transport_->taskExecutor_->Execute(task);
+        EXPECT_TRUE(done);
+        EXPECT_TRUE(task->Done());
+        EXPECT_EQ(task->finalStatus.code, StatusCode::PARTIAL_FAILED);
+        EXPECT_FALSE(task->sendInProgress.load());
+        EXPECT_EQ(operation, nullptr);
+    }
+}
+
+TEST_F(TransportTaskCompletionTest, CancellationDuringAsyncWaitCompletesOnce)
+{
+    auto provider = std::make_shared<AsyncSchedulingProvider>();
+    transport_->SetTransProvider(provider);
+    transport_->connManager_ = std::make_unique<ConnectionManager>(*provider, "", 5000, 3);
+    ASSERT_TRUE(transport_->connManager_->AddGroup(NodeEndpoint{}, 1).ok());
+    auto task = std::make_shared<TransportTask>();
+    task->opType = AsuOpType::KEEP_ALIVE;
+    int sendCompletions = 0;
+    task->onSendComplete = [&] { ++sendCompletions; };
+    TransProvider::SendOperationPtr operation;
+    EXPECT_FALSE(transport_->taskExecutor_->ExecuteAsync(task, operation));
+    ASSERT_NE(operation, nullptr);
+    provider->onFirstWait = [&] { EXPECT_FALSE(transport_->taskExecutor_->Cancel(task)); };
+    EXPECT_TRUE(transport_->taskExecutor_->WaitAsync(task, operation));
+    EXPECT_EQ(task->finalStatus.code, StatusCode::CANCELED);
+    EXPECT_FALSE(task->sendInProgress.load());
+    EXPECT_EQ(sendCompletions, 1);
+    EXPECT_FALSE(transport_->taskExecutor_->WaitAsync(task, operation));
+    EXPECT_EQ(sendCompletions, 1);
+}
+
 TEST_F(TransportTaskCompletionTest, AsyncWaitFailureUpdatesRemainingCount)
 {
     auto* provider = static_cast<StubTransProvider*>(transport_->transProvider_.get());

@@ -317,6 +317,30 @@ struct BatchSendTicket {
     std::chrono::steady_clock::time_point deadline{};
 };
 
+void ApplyBatchSendResult(std::vector<Status>& results,
+                          const std::vector<std::size_t>& indexes, const Status& status,
+                          const std::vector<std::uint32_t>& hixlStatuses)
+{
+    if (!status.ok() || hixlStatuses.size() != indexes.size()) {
+        const auto failure = !status.ok() ? status : Status::Error(
+            StatusCode::INTERNAL_ERROR, "HixlBatchSend returned an unexpected status count");
+        for (const auto index : indexes) { results[index] = failure; }
+        return;
+    }
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        results[indexes[i]] = hixlStatuses[i] == 0U ? Status::OK() : Status::Error(
+            StatusCode::INTERNAL_ERROR,
+            "HixlBatchSend failed for batch index " + std::to_string(indexes[i]) +
+                " status=" + std::to_string(hixlStatuses[i]));
+    }
+}
+
+struct ConnectionBatchGroup {
+    std::shared_ptr<ConnectionRecord> connection;
+    std::vector<std::size_t> originalIndexes;
+    std::vector<TransProvider::SendIoBatch> batches;
+};
+
 class AicpuSendOperation final : public TransProvider::SendOperation {
 public:
     std::vector<Status> results;
@@ -1528,6 +1552,50 @@ struct AICPUTransProvider::Impl {
         return status;
     }
 
+    bool BuildSendGroups(const std::vector<TransProvider::SendIoBatch>& ioBatches,
+                         std::vector<ConnectionBatchGroup>& groups,
+                         std::vector<Status>& results)
+    {
+        std::vector<std::shared_ptr<ConnectionRecord>> connectionOwners(ioBatches.size());
+        std::unordered_map<ConnectionRecord*, std::size_t> groupIndexByConnection;
+        bool valid = true;
+        {
+            std::shared_lock<std::shared_mutex> lock(connectionMu);
+            for (std::size_t index = 0; index < ioBatches.size(); ++index) {
+                auto* conn = ToConnectionRecord(ioBatches[index].connectionHandle);
+                const auto connIter = connections.find(conn);
+                if (conn == nullptr || connIter == connections.end()) {
+                    results[index] =
+                        Status::Error(StatusCode::INVALID_ARGUMENT,
+                                      "AICPUTransProvider::Send: invalid connection handle");
+                    valid = false;
+                    continue;
+                }
+                connectionOwners[index] = connIter->second;
+            }
+        }
+
+        for (std::size_t index = 0; index < ioBatches.size(); ++index) {
+            const auto& item = ioBatches[index];
+            const auto& connection = connectionOwners[index];
+            if (connection == nullptr) { continue; }
+            if (item.sendBuffer == nullptr || item.len == 0) {
+                results[index] = Status::Error(StatusCode::INVALID_ARGUMENT,
+                                               "AICPUTransProvider::Send: empty send buffer");
+                valid = false;
+                continue;
+            }
+
+            auto* conn = connection.get();
+            auto [groupIt, inserted] = groupIndexByConnection.emplace(conn, groups.size());
+            if (inserted) { groups.push_back(ConnectionBatchGroup{connection, {}, {}}); }
+            auto& group = groups[groupIt->second];
+            group.originalIndexes.push_back(index);
+            group.batches.push_back(item);
+        }
+        return valid;
+    }
+
     void ResetConnectionSendResources(ConnectionRecord& connection)
     {
         if (connection.stream != nullptr) {
@@ -2013,52 +2081,9 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
     (void)quietCount;
     if (ioBatches.empty()) { return {}; }
 
-    struct ConnectionBatchGroup {
-        std::shared_ptr<ConnectionRecord> connection;
-        std::vector<std::size_t> originalIndexes;
-        std::vector<SendIoBatch> batches;
-    };
-
     std::vector<Status> results(ioBatches.size(), Status::OK());
-    std::vector<std::shared_ptr<ConnectionRecord>> connectionOwners(ioBatches.size());
     std::vector<ConnectionBatchGroup> groups;
-    std::unordered_map<ConnectionRecord*, std::size_t> groupIndexByConnection;
-    bool valid = true;
-    {
-        std::shared_lock<std::shared_mutex> lock(impl_->connectionMu);
-        for (std::size_t index = 0; index < ioBatches.size(); ++index) {
-            auto* conn = ToConnectionRecord(ioBatches[index].connectionHandle);
-            const auto connIter = impl_->connections.find(conn);
-            if (conn == nullptr || connIter == impl_->connections.end()) {
-                results[index] =
-                    Status::Error(StatusCode::INVALID_ARGUMENT,
-                                  "AICPUTransProvider::Send: invalid connection handle");
-                valid = false;
-                continue;
-            }
-            connectionOwners[index] = connIter->second;
-        }
-    }
-
-    for (std::size_t index = 0; index < ioBatches.size(); ++index) {
-        const auto& item = ioBatches[index];
-        const auto& connection = connectionOwners[index];
-        if (connection == nullptr) { continue; }
-        if (item.sendBuffer == nullptr || item.len == 0) {
-            results[index] = Status::Error(StatusCode::INVALID_ARGUMENT,
-                                           "AICPUTransProvider::Send: empty send buffer");
-            valid = false;
-            continue;
-        }
-
-        auto* conn = connection.get();
-        auto [groupIt, inserted] = groupIndexByConnection.emplace(conn, groups.size());
-        if (inserted) { groups.push_back(ConnectionBatchGroup{connection, {}, {}}); }
-        auto& group = groups[groupIt->second];
-        group.originalIndexes.push_back(index);
-        group.batches.push_back(item);
-    }
-    if (!valid) { return results; }
+    if (!impl_->BuildSendGroups(ioBatches, groups, results)) { return results; }
 
     const auto [deviceId, providerContext] = impl_->GetAclDeviceBinding();
     ScopedAclDeviceContext deviceScope("Send", deviceId, providerContext);
@@ -2072,28 +2097,7 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
         std::vector<std::uint32_t> hixlStatuses;
         const auto launchStatus =
             impl_->LaunchBatchSendLocked(*group.connection, group.batches, hixlStatuses);
-        if (!launchStatus.ok()) {
-            for (const auto originalIndex : group.originalIndexes) {
-                results[originalIndex] = launchStatus;
-            }
-            continue;
-        }
-        if (hixlStatuses.size() != group.originalIndexes.size()) {
-            const auto status = Status::Error(StatusCode::INTERNAL_ERROR,
-                                              "HixlBatchSend returned an unexpected status count");
-            for (const auto originalIndex : group.originalIndexes) {
-                results[originalIndex] = status;
-            }
-            continue;
-        }
-        for (std::size_t groupIndex = 0; groupIndex < hixlStatuses.size(); ++groupIndex) {
-            if (hixlStatuses[groupIndex] == 0U) { continue; }
-            const auto originalIndex = group.originalIndexes[groupIndex];
-            results[originalIndex] = Status::Error(
-                StatusCode::INTERNAL_ERROR,
-                "HixlBatchSend failed for batch index " + std::to_string(originalIndex) +
-                    " status=" + std::to_string(hixlStatuses[groupIndex]));
-        }
+        ApplyBatchSendResult(results, group.originalIndexes, launchStatus, hixlStatuses);
     }
     return results;
 }
@@ -2107,54 +2111,12 @@ std::vector<Status> AICPUTransProvider::AsyncSend(
     operation.reset();
     if (ioBatches.empty()) { return {}; }
 
-    struct ConnectionBatchGroup {
-        std::shared_ptr<ConnectionRecord> connection;
-        std::vector<std::size_t> originalIndexes;
-        std::vector<SendIoBatch> batches;
-    };
-
     auto asyncOperation = std::make_unique<AicpuSendOperation>();
     asyncOperation->results.assign(ioBatches.size(), Status::OK());
-    std::vector<std::shared_ptr<ConnectionRecord>> connectionOwners(ioBatches.size());
     std::vector<ConnectionBatchGroup> groups;
-    std::unordered_map<ConnectionRecord*, std::size_t> groupIndexByConnection;
-    bool valid = true;
-    {
-        std::shared_lock<std::shared_mutex> lock(impl_->connectionMu);
-        for (std::size_t index = 0; index < ioBatches.size(); ++index) {
-            auto* conn = ToConnectionRecord(ioBatches[index].connectionHandle);
-            const auto connIter = impl_->connections.find(conn);
-            if (conn == nullptr || connIter == impl_->connections.end()) {
-                asyncOperation->results[index] =
-                    Status::Error(StatusCode::INVALID_ARGUMENT,
-                                  "AICPUTransProvider::AsyncSend: invalid connection handle");
-                valid = false;
-                continue;
-            }
-            connectionOwners[index] = connIter->second;
-        }
+    if (!impl_->BuildSendGroups(ioBatches, groups, asyncOperation->results)) {
+        return asyncOperation->results;
     }
-
-    for (std::size_t index = 0; index < ioBatches.size(); ++index) {
-        const auto& item = ioBatches[index];
-        const auto& connection = connectionOwners[index];
-        if (connection == nullptr) { continue; }
-        if (item.sendBuffer == nullptr || item.len == 0) {
-            asyncOperation->results[index] =
-                Status::Error(StatusCode::INVALID_ARGUMENT,
-                              "AICPUTransProvider::AsyncSend: empty send buffer");
-            valid = false;
-            continue;
-        }
-
-        auto [groupIt, inserted] =
-            groupIndexByConnection.emplace(connection.get(), groups.size());
-        if (inserted) { groups.push_back(ConnectionBatchGroup{connection, {}, {}}); }
-        auto& group = groups[groupIt->second];
-        group.originalIndexes.push_back(index);
-        group.batches.push_back(item);
-    }
-    if (!valid) { return asyncOperation->results; }
 
     const auto [deviceId, providerContext] = impl_->GetAclDeviceBinding();
     ScopedAclDeviceContext deviceScope("AsyncSend", deviceId, providerContext);
@@ -2164,7 +2126,7 @@ std::vector<Status> AICPUTransProvider::AsyncSend(
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(MakeAclSyncTimeoutMs(impl_->sendTimeoutMs));
     asyncOperation->tickets.reserve(groups.size());
-    for (const auto& group : groups) {
+    for (auto& group : groups) {
         BatchSendTicket ticket;
         Status launchStatus;
         {
@@ -2184,7 +2146,7 @@ std::vector<Status> AICPUTransProvider::AsyncSend(
             }
             continue;
         }
-        ticket.originalIndexes = group.originalIndexes;
+        ticket.originalIndexes = std::move(group.originalIndexes);
         asyncOperation->tickets.push_back(std::move(ticket));
     }
 
@@ -2221,7 +2183,7 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
 
     for (auto& ticket : asyncOperation->tickets) {
         if (!ticket.IsValid()) { continue; }
-        const auto originalIndexes = ticket.originalIndexes;
+        auto originalIndexes = std::move(ticket.originalIndexes);
         std::vector<std::uint32_t> hixlStatuses;
         const auto waitStatus = impl_->WaitBatchSend(ticket, hixlStatuses);
         if (ticket.IsValid()) {
@@ -2231,6 +2193,7 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
             for (const auto originalIndex : originalIndexes) {
                 results[originalIndex] = waitStatus;
             }
+            ticket.originalIndexes = std::move(originalIndexes);
             return results;
         }
         {
@@ -2242,32 +2205,7 @@ std::vector<Status> AICPUTransProvider::WaitSend(SendOperationPtr& operation)
             }
             if (impl_->asyncTicketCount == 0) { impl_->asyncTicketCv.notify_all(); }
         }
-        if (!waitStatus.ok()) {
-            for (const auto originalIndex : originalIndexes) {
-                asyncOperation->results[originalIndex] = waitStatus;
-            }
-            continue;
-        }
-        if (hixlStatuses.size() != originalIndexes.size()) {
-            const auto status =
-                Status::Error(StatusCode::INTERNAL_ERROR,
-                              "HixlBatchSend returned an unexpected status count");
-            for (const auto originalIndex : originalIndexes) {
-                asyncOperation->results[originalIndex] = status;
-            }
-            continue;
-        }
-        for (std::size_t index = 0; index < hixlStatuses.size(); ++index) {
-            const auto originalIndex = originalIndexes[index];
-            if (hixlStatuses[index] == 0U) {
-                asyncOperation->results[originalIndex] = Status::OK();
-                continue;
-            }
-            asyncOperation->results[originalIndex] = Status::Error(
-                StatusCode::INTERNAL_ERROR,
-                "HixlBatchSend failed for batch index " + std::to_string(originalIndex) +
-                    " status=" + std::to_string(hixlStatuses[index]));
-        }
+        ApplyBatchSendResult(asyncOperation->results, originalIndexes, waitStatus, hixlStatuses);
     }
 
     auto results = std::move(asyncOperation->results);

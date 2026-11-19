@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -322,78 +322,6 @@ Status TransportTaskExecutor::AssignSubBatchConnections(
     return Status::OK();
 }
 
-bool TransportTaskExecutor::Execute(const TransportTaskPtr& task)
-{
-    TransportTaskState expected = TransportTaskState::PENDING;
-    if (!task->state.compare_exchange_strong(expected, TransportTaskState::INFLIGHT,
-                                             std::memory_order_acq_rel)) {
-        return false;
-    }
-    const auto processingStartedAt = std::chrono::steady_clock::now();
-    task->asuCompletionMetric = &asuCompletionMetric_;
-
-    std::vector<TransportSubBatchContext> subBatchContexts;
-    auto status = PrepareTaskSubBatches(*task, subBatchContexts);
-
-    if (status.ok()) { status = AssignSubBatchConnections(subBatchContexts); }
-
-    std::vector<TransProvider::SendIoBatch> ioBatches;
-    if (status.ok()) { BuildSubBatchSendBuffers(subBatchContexts, ioBatches); }
-
-    if (!status.ok()) {
-        KV_ERROR("Abort transport task before send task_id={} code={} message={}", task->taskId,
-                 static_cast<int>(status.code), status.message);
-    } else if (!ioBatches.empty()) {
-        const auto preSendAt = std::chrono::steady_clock::now();
-        const metrics::MetricUpdate preSendUpdates[] = {
-            {KV_METRIC("kv_transport_task_pre_send_duration_seconds"),
-             std::chrono::duration<double>(preSendAt - task->submittedAt).count()          },
-            {KV_METRIC("kv_transport_task_queue_duration_seconds"),
-             std::chrono::duration<double>(processingStartedAt - task->submittedAt).count()},
-            {KV_METRIC("kv_transport_task_process_duration_seconds"),
-             std::chrono::duration<double>(preSendAt - processingStartedAt).count()        },
-        };
-        metrics::UpdateStats(preSendUpdates, std::size(preSendUpdates));
-        SendSubBatchBuffers(subBatchContexts, ioBatches);
-        task->sendCompletedAt = std::chrono::steady_clock::now();
-        task->sendReturned.store(true, std::memory_order_release);
-        const metrics::MetricUpdate sendUpdates[] = {
-            {KV_METRIC("kv_transport_task_send_duration_seconds"),
-             std::chrono::duration<double>(task->sendCompletedAt - task->submittedAt).count()},
-            {asuSendMetric_,
-             std::chrono::duration<double>(task->sendCompletedAt - task->submittedAt).count()},
-        };
-        metrics::UpdateStats(sendUpdates, std::size(sendUpdates));
-        if (task->onSendComplete) { task->onSendComplete(); }
-    }
-
-    bool done = false;
-    {
-        std::lock_guard<std::mutex> lock(task->mutex);
-        if (task->Done()) {
-            KV_DEBUG(
-                "TransportTaskExecutor::Execute canceled during process task_id={} sub_batches={}",
-                task->taskId, subBatchContexts.size());
-            ReleaseAllSubBatchResources(subBatchContexts);
-            return false;
-        }
-
-        if (!status.ok()) { AbortSubBatchesBeforeSend(*task, subBatchContexts); }
-        *task->subBatchContexts = std::move(subBatchContexts);
-        task->InitializeRemainingSubBatchCount();
-        task->TryFinalizeFromSubBatches();
-        KV_DEBUG(
-            "TransportTaskExecutor::Execute submitted task_id={} op_type={} entries={} keys={} "
-            "sub_batches={} done={} code={} message={}",
-            task->taskId, static_cast<int>(task->opType), task->entries.size(), task->keys.size(),
-            task->subBatchContexts->size(), task->Done(), static_cast<int>(task->finalStatus.code),
-            task->finalStatus.message);
-
-        done = task->Done();
-    }
-    return done;
-}
-
 void TransportTaskExecutor::RecordSendComplete(const TransportTaskPtr& task)
 {
     task->sendCompletedAt = std::chrono::steady_clock::now();
@@ -408,10 +336,22 @@ void TransportTaskExecutor::RecordSendComplete(const TransportTaskPtr& task)
     if (task->onSendComplete) { task->onSendComplete(); }
 }
 
+bool TransportTaskExecutor::Execute(const TransportTaskPtr& task)
+{
+    return ExecuteImpl(task, nullptr);
+}
+
 bool TransportTaskExecutor::ExecuteAsync(const TransportTaskPtr& task,
                                          TransProvider::SendOperationPtr& operation)
 {
     operation.reset();
+    return ExecuteImpl(task, &operation);
+}
+
+bool TransportTaskExecutor::ExecuteImpl(const TransportTaskPtr& task,
+                                        TransProvider::SendOperationPtr* asyncOperation)
+{
+    const bool async = asyncOperation != nullptr;
     {
         std::lock_guard<std::mutex> lock(task->mutex);
         TransportTaskState expected = TransportTaskState::PENDING;
@@ -419,28 +359,25 @@ bool TransportTaskExecutor::ExecuteAsync(const TransportTaskPtr& task,
                                                  std::memory_order_acq_rel)) {
             return false;
         }
-        task->sendInProgress.store(true, std::memory_order_release);
+        if (async) { task->sendInProgress.store(true, std::memory_order_release); }
     }
     const auto processingStartedAt = std::chrono::steady_clock::now();
     task->asuCompletionMetric = &asuCompletionMetric_;
-
     std::vector<TransportSubBatchContext> subBatchContexts;
     auto status = PrepareTaskSubBatches(*task, subBatchContexts);
     if (status.ok()) { status = AssignSubBatchConnections(subBatchContexts); }
-
     std::vector<TransProvider::SendIoBatch> ioBatches;
     if (status.ok()) { BuildSubBatchSendBuffers(subBatchContexts, ioBatches); }
-    if (status.ok() && task->cancelRequested.load(std::memory_order_acquire)) {
+    if (async && status.ok() && task->cancelRequested.load(std::memory_order_acquire)) {
         status = Status::Error(StatusCode::CANCELED,
                                "transport task canceled before asynchronous send");
     }
-
     if (!status.ok()) {
-        KV_ERROR("Abort async transport task before send task_id={} code={} message={}",
-                 task->taskId, static_cast<int>(status.code), status.message);
+        KV_ERROR("Abort transport task before send task_id={} code={} message={}", task->taskId,
+                 static_cast<int>(status.code), status.message);
     } else if (!ioBatches.empty()) {
         const auto preSendAt = std::chrono::steady_clock::now();
-        const metrics::MetricUpdate preSendUpdates[] = {
+        const metrics::MetricUpdate updates[] = {
             {KV_METRIC("kv_transport_task_pre_send_duration_seconds"),
              std::chrono::duration<double>(preSendAt - task->submittedAt).count()},
             {KV_METRIC("kv_transport_task_queue_duration_seconds"),
@@ -448,64 +385,63 @@ bool TransportTaskExecutor::ExecuteAsync(const TransportTaskPtr& task,
             {KV_METRIC("kv_transport_task_process_duration_seconds"),
              std::chrono::duration<double>(preSendAt - processingStartedAt).count()},
         };
-        metrics::UpdateStats(preSendUpdates, std::size(preSendUpdates));
+        metrics::UpdateStats(updates, std::size(updates));
+        if (!async) {
+            SendSubBatchBuffers(subBatchContexts, ioBatches);
+            RecordSendComplete(task);
+        } else {
+            auto& operation = *asyncOperation;
+            const auto kernelCount = GetSendCountAttr(config_.attrs, "kernel_count");
+            const auto quietCount = GetSendCountAttr(config_.attrs, "quiet_count");
+            const auto sendStartedAt = std::chrono::steady_clock::now();
+            auto sendStatuses =
+                transProvider_->AsyncSend(ioBatches, kernelCount, quietCount, operation);
+            metrics::UpdateStats(
+                KV_METRIC("kv_transport_task_send_call_duration_seconds"),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - sendStartedAt)
+                    .count());
 
-        const auto kernelCount = GetSendCountAttr(config_.attrs, "kernel_count");
-        const auto quietCount = GetSendCountAttr(config_.attrs, "quiet_count");
-        const auto sendStartedAt = std::chrono::steady_clock::now();
-        auto sendStatuses =
-            transProvider_->AsyncSend(ioBatches, kernelCount, quietCount, operation);
-        metrics::UpdateStats(
-            KV_METRIC("kv_transport_task_send_call_duration_seconds"),
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - sendStartedAt)
-                .count());
-
-        if (sendStatuses.size() != ioBatches.size() && operation) {
-            do {
-                (void)transProvider_->WaitSend(operation);
-                if (operation) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
-            } while (operation);
-        }
-        if (!operation) {
-            const auto missingOperation =
-                Status::Error(StatusCode::INTERNAL_ERROR,
-                              "provider completed AsyncSend without a wait operation");
-            for (auto& sendStatus : sendStatuses) {
-                if (sendStatus.ok()) { sendStatus = missingOperation; }
+            if (sendStatuses.size() != ioBatches.size() && operation) {
+                do {
+                    (void)transProvider_->WaitSend(operation);
+                    if (operation) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+                } while (operation);
             }
+            if (!operation) {
+                const auto missingOperation =
+                    Status::Error(StatusCode::INTERNAL_ERROR,
+                                  "provider completed AsyncSend without a wait operation");
+                for (auto& sendStatus : sendStatuses) {
+                    if (sendStatus.ok()) { sendStatus = missingOperation; }
+                }
+            }
+            ApplySubBatchSendStatuses(subBatchContexts, sendStatuses, ioBatches.size());
         }
-        ApplySubBatchSendStatuses(subBatchContexts, sendStatuses, ioBatches.size());
     }
-
-    bool done = false;
-    {
-        std::lock_guard<std::mutex> lock(task->mutex);
-        if (!status.ok()) { AbortSubBatchesBeforeSend(*task, subBatchContexts); }
-        *task->subBatchContexts = std::move(subBatchContexts);
-        task->InitializeRemainingSubBatchCount();
-
-        if (!operation) {
-            if (task->cancelRequested.load(std::memory_order_acquire)) {
-                const auto canceledStatus =
-                    Status::Error(StatusCode::CANCELED, "transport task canceled");
-                std::fill(task->entryStatus.begin(), task->entryStatus.end(), canceledStatus);
-                ReleaseAllSubBatchResources(*task->subBatchContexts);
-                task->finalStatus = canceledStatus;
-                task->state.store(TransportTaskState::COMPLETED, std::memory_order_release);
-            } else {
-                task->TryFinalizeFromSubBatches();
-            }
+    std::lock_guard<std::mutex> lock(task->mutex);
+    if (!async && task->Done()) {
+        ReleaseAllSubBatchResources(subBatchContexts);
+        return false;
+    }
+    if (!status.ok()) { AbortSubBatchesBeforeSend(*task, subBatchContexts); }
+    *task->subBatchContexts = std::move(subBatchContexts);
+    task->InitializeRemainingSubBatchCount();
+    if (!async || !*asyncOperation) {
+        if (async && task->cancelRequested.load(std::memory_order_acquire)) {
+            const auto canceled = Status::Error(StatusCode::CANCELED, "transport task canceled");
+            std::fill(task->entryStatus.begin(), task->entryStatus.end(), canceled);
+            ReleaseAllSubBatchResources(*task->subBatchContexts);
+            task->finalStatus = canceled;
+            task->state.store(TransportTaskState::COMPLETED, std::memory_order_release);
+        } else {
+            task->TryFinalizeFromSubBatches();
+        }
+        if (async) {
             RecordSendComplete(task);
             task->sendInProgress.store(false, std::memory_order_release);
         }
-        done = task->Done();
     }
-
-    KV_DEBUG(
-        "TransportTaskExecutor::ExecuteAsync launched task_id={} sub_batches={} pending_wait={} "
-        "done={}",
-        task->taskId, task->subBatchContexts->size(), operation != nullptr, done);
-    return done;
+    return task->Done();
 }
 
 bool TransportTaskExecutor::WaitAsync(const TransportTaskPtr& task,
