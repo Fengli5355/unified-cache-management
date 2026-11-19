@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -24,8 +24,10 @@
 #include "kv_transport_impl.h"
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <string>
@@ -97,8 +99,19 @@ Status AsuTransportImpl::Init(const TransportConfig& config,
                              "aicpu_send_mode must be sync or async");
     }
     asyncSendEnabled_ = sendMode == "async";
-    // Reuse the transport task limit; a zero value must still allow worker progress.
-    asyncSendMaxInflight_ = std::max<std::size_t>(1, config_.maxInflightTasks);
+    // Queue capacity and device submission concurrency are independent limits.
+    asyncSendMaxInflight_ = 2;
+    if (const auto it = config_.attrs.find("async_send_max_inflight");
+        it != config_.attrs.end()) {
+        const auto& value = it->second;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(),
+                                            asyncSendMaxInflight_);
+        if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() ||
+            asyncSendMaxInflight_ == 0) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "async_send_max_inflight must be a positive integer");
+        }
+    }
     if (asyncSendEnabled_ && !transProvider_->SupportsAsyncSend()) {
         return Status::Error(StatusCode::UNSUPPORTED,
                              "configured transport provider does not support AsyncSend");
@@ -306,33 +319,33 @@ void AsuTransportImpl::WorkerLoop()
             return;
         }
 
-        std::vector<PendingSend> pending;
-        pending.reserve(asyncSendMaxInflight_);
+        ExecuteAsyncTasks(std::move(task));
+    });
+}
 
-        const auto launchStartedAt = std::chrono::steady_clock::now();
-        std::size_t taskCount = 0;
-        auto pendingTask = std::move(task);
-        while (pendingTask && taskCount < asyncSendMaxInflight_) {
-            ++taskCount;
+void AsuTransportImpl::ExecuteAsyncTasks(TransportTaskPtr task)
+{
+    std::deque<PendingSend> pending;
+    do {
+        // Bound each refill even if queued tasks finish without an operation.
+        std::size_t attempts = 0;
+        while (task && pending.size() < asyncSendMaxInflight_ &&
+               attempts++ < asyncSendMaxInflight_) {
             TransProvider::SendOperationPtr operation;
-            const bool done = taskExecutor_->ExecuteAsync(pendingTask, operation);
-            if (done) { taskManager_.NotifyCompletion(pendingTask); }
+            const bool done = taskExecutor_->ExecuteAsync(task, operation);
+            if (done) { taskManager_.NotifyCompletion(task); }
             if (operation) {
-                pending.push_back(PendingSend{pendingTask, std::move(operation)});
+                pending.push_back(PendingSend{task, std::move(operation)});
             }
-
-            pendingTask.reset();
-            if (taskCount < asyncSendMaxInflight_) {
-                (void)executeQueue_.TryPop(pendingTask);
+            task.reset();
+            if (pending.size() < asyncSendMaxInflight_ &&
+                attempts < asyncSendMaxInflight_ &&
+                !stopWorker_.load(std::memory_order_acquire)) {
+                (void)executeQueue_.TryPop(task);
             }
         }
-        KV_DEBUG("AsyncSend fanout tasks={} launched={} elapsed_us={}", taskCount,
-                 pending.size(),
-                 std::chrono::duration_cast<std::chrono::microseconds>(
-                     std::chrono::steady_clock::now() - launchStartedAt)
-                     .count());
-
-        for (auto& pendingSend : pending) {
+        if (!pending.empty()) {
+            auto& pendingSend = pending.front();
             do {
                 if (taskExecutor_->WaitAsync(pendingSend.task, pendingSend.operation)) {
                     taskManager_.NotifyCompletion(pendingSend.task);
@@ -341,8 +354,13 @@ void AsuTransportImpl::WorkerLoop()
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
             } while (pendingSend.operation);
+            pending.pop_front();
         }
-    });
+        // Refill immediately after one send completes, rather than draining a whole batch.
+        if (!stopWorker_.load(std::memory_order_acquire)) {
+            (void)executeQueue_.TryPop(task);
+        }
+    } while (task || !pending.empty());
 }
 
 void AsuTransportImpl::CompletionLoop()

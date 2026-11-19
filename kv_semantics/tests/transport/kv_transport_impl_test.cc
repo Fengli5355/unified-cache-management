@@ -1,7 +1,7 @@
 /**
  * MIT License
  *
- * Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <gtest/gtest.h>
 #include <vector>
 #define private public
@@ -88,6 +89,36 @@ public:
     }
 };
 
+class AsyncSchedulingProvider : public StubTransProvider {
+public:
+    struct Operation : SendOperation {
+        int id;
+        std::size_t count;
+        Operation(int value, std::size_t size) : id(value), count(size) {}
+    };
+    int nextId{0};
+    std::vector<int> calls;
+    std::function<void()> onFirstWait;
+    bool SupportsAsyncSend() const override { return true; }
+    std::vector<Status> AsyncSend(const std::vector<SendIoBatch>& batches, uint32_t,
+                                 uint32_t, SendOperationPtr& operation) override
+    {
+        calls.push_back(++nextId);
+        operation = std::make_unique<Operation>(nextId, batches.size());
+        return std::vector<Status>(batches.size(), Status::OK());
+    }
+    std::vector<Status> WaitSend(SendOperationPtr& operation) override
+    {
+        const auto& send = static_cast<const Operation&>(*operation);
+        calls.push_back(-send.id);
+        if (send.id == 1 && onFirstWait) { onFirstWait(); }
+        const auto count = send.count;
+        operation.reset();
+        // Complete locally without requiring a synthetic remote response.
+        return std::vector<Status>(count, Status::Error(StatusCode::IO_ERROR, "test send"));
+    }
+};
+
 void CreateTaskExecutor(AsuTransportImpl& transport)
 {
     transport.taskExecutor_ = std::make_unique<TransportTaskExecutor>(
@@ -134,12 +165,47 @@ TEST_F(TransportTaskCompletionTest, InitRejectsAsyncModeForUnsupportedProvider)
 {
     TransportConfig config;
     config.attrs["aicpu_send_mode"] = "async";
-    config.maxInflightTasks = 2;
+    config.maxInflightTasks = 1024;
 
     const auto status = transport_->Init(config, transport_->transProvider_);
 
     EXPECT_EQ(status.code, StatusCode::UNSUPPORTED);
     EXPECT_EQ(transport_->asyncSendMaxInflight_, 2U);
+}
+
+TEST_F(TransportTaskCompletionTest, AsyncWindowIsValidatedSeparatelyFromQueueCapacity)
+{
+    TransportConfig config;
+    config.attrs["aicpu_send_mode"] = "async";
+    config.attrs["async_send_max_inflight"] = "3";
+    EXPECT_EQ(transport_->Init(config, transport_->transProvider_).code, StatusCode::UNSUPPORTED);
+    EXPECT_EQ(transport_->asyncSendMaxInflight_, 3U);
+    for (const auto* value : {"0", "-1", "", "2x", "184467440737095516160"}) {
+        config.attrs["async_send_max_inflight"] = value;
+        EXPECT_EQ(transport_->Init(config, transport_->transProvider_).code,
+                  StatusCode::INVALID_ARGUMENT) << value;
+    }
+}
+
+TEST_F(TransportTaskCompletionTest, AsyncWorkerRefillsWindowBeforeWaitingForNextSend)
+{
+    auto provider = std::make_shared<AsyncSchedulingProvider>();
+    transport_->SetTransProvider(provider);
+    transport_->connManager_ = std::make_unique<ConnectionManager>(*provider, "", 5000, 3);
+    ASSERT_TRUE(transport_->connManager_->AddGroup(NodeEndpoint{}, 1).ok());
+    transport_->executeQueue_.Setup(8);
+    transport_->asyncSendMaxInflight_ = 2;
+    auto first = std::make_shared<TransportTask>();
+    auto second = std::make_shared<TransportTask>();
+    auto third = std::make_shared<TransportTask>();
+    for (const auto& task : {first, second, third}) { task->opType = AsuOpType::KEEP_ALIVE; }
+    ASSERT_TRUE(transport_->executeQueue_.TryPush(TransportTaskPtr(second)));
+    provider->onFirstWait = [&] {
+        EXPECT_TRUE(transport_->executeQueue_.TryPush(TransportTaskPtr(third)));
+    };
+    transport_->ExecuteAsyncTasks(first);
+    EXPECT_EQ(provider->calls, (std::vector<int>{1, 2, -1, 3, -2, -3}));
+    for (const auto& task : {first, second, third}) { EXPECT_TRUE(task->Done()); }
 }
 
 TEST_F(TransportTaskCompletionTest, TaskExecutorSupportsExplicitLifecycle)

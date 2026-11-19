@@ -1,3 +1,5 @@
+<!-- Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved. -->
+
 # AICPU 跨 Send 异步 Launch/Wait 方案
 
 ## 1. 目标
@@ -32,7 +34,7 @@ std::vector<Status> WaitSend(SendOperationPtr& operation);
 
 ## 3. Transport 调度时序
 
-`aicpu_send_mode=async` 时，transport worker 从现有 SPSC queue 中最多取 `max(1, TransportConfig.maxInflightTasks)` 个任务，复用 Transport 配置，不再设置独立的 AICPU 窗口：
+`aicpu_send_mode=async` 时，transport worker 使用独立的 `async_send_max_inflight` 发送窗口（默认 2，必须为正整数）。发送完成一个任务后，立即从现有 SPSC queue 补充任务，无需等待整个窗口排空：
 
 ```text
 task A: prepare -> AsyncSend -> operation A
@@ -88,14 +90,12 @@ asu_transport_max_inflight_tasks: 1024
 ucm_config_asu_aicpu.yaml
   -> AsuStore::ParseConfig
   -> AsuStore::BuildTransportConfig
-  -> TransportConfig.attrs (send mode) / TransportConfig.maxInflightTasks (窗口)
+  -> TransportConfig.attrs (send mode / async_send_max_inflight)
   -> AsuTransportImpl (选择同步/异步调度)
   -> AICPUTransProvider::AsyncSend/WaitSend
 ```
 
-kv-test 的对应配置为 `transport.aicpu_send_mode=async` 和 `transport.max_inflight_tasks=1024`。窗口默认 1024；旧的独立 AICPU 窗口配置已移除，原先填 2 的配置需要将 Transport 限制设为 2 才能保留实验规模。原生 Transport 配置为 0 时，发送窗口取 1，以保证 worker 推进。
-
-该配置同时决定 Transport 执行队列容量和每轮异步下发上限，不是所有未完成业务请求的严格总上限。Client 的 `asu_client_max_inflight_tasks` 是另一层队列配置，不控制此窗口。同步模式仍调用原 `Send`/`LaunchBatchSendLocked`。
+kv-test 使用 `transport.aicpu_send_mode=async` 和 `transport.async_send_max_inflight=2`。`TransportConfig.maxInflightTasks` 仅决定 Transport 队列容量，不再同时控制设备发送窗口。Client 的 `asu_client_max_inflight_tasks` 是另一层队列配置。同步模式仍调用原 `Send`/`LaunchBatchSendLocked`。
 
 ## 7. 验证建议
 
